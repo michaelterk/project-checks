@@ -1,6 +1,6 @@
 # Contributing
 
-Use Node 26 or later. The package has no npm dependencies or build step.
+Use Node 24 or later. The package has no npm dependencies or build step.
 
 ```sh
 npm test

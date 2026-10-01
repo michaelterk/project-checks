@@ -2,7 +2,7 @@
 
 Run a configured command for each test file, with CPU/RAM-based concurrency and
 a cache of successful tests. Import it into a script or use the CLI in any project.
-The package uses Node 26+, has no npm dependencies or build step, and is MIT licensed.
+The package uses Node 24+, has no npm dependencies or build step, and is MIT licensed.
 Commands can run Node, Python, or another installed test framework.
 
 ## Install
