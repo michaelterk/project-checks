@@ -1,0 +1,11 @@
+node_modules/
+.test-cache/
+.env
+.env.*
+!.env.example
+local.env
+*.log
+.DS_Store
+*.tgz
+__pycache__/
+.vscode/
