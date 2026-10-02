@@ -58,16 +58,24 @@ Always call the package before accepting cached test success. Replace generic
 outer test caches that can bypass it; retain unrelated deployment/artifact gates.
 Use the existing evidence engine rather than adding another cache layer.
 
-Discover runnable tests across all configured suites, including unselected ones.
-Exclude independent test files from the shared hash and hash each separately.
-Treat remaining inputs conservatively as shared; infer no dependency graphs.
+Suites may set an `inputRoot` within the project, defaulting to the project root,
+and reuse `inputs`/`ignore` overrides for shared inputs and exclusions. Validate paths
+against the project root; discovery must stay within declared boundaries.
+Exclude operational data, runtime state, and generated output before reading or
+hashing files, using defaults and project-specific exclusions. An unrelated app
+outside a suite's inputs must not invalidate its evidence.
+
+Discover runnable tests across all configured suites, including unselected ones,
+then fingerprint each suite's declared inputs. Exclude independent test files
+from its shared hash and hash each separately. Treat remaining inputs
+conservatively as shared within that scope; infer no dependency graphs.
 
 | Change | Default behavior |
 | --- | --- |
 | Edit an independent test | Rerun that file |
 | Add a test | Run the new file |
 | Delete a test | Remove it; retain other passes |
-| Change shared code, fixtures, helpers, framework configuration, or dependencies | Rerun all suites |
+| Change shared code, fixtures, helpers, framework configuration, or dependencies | Rerun affected suites |
 | Change commands, working directory, runtime, meaningful environment, numerical threads, or timeout/retry policy | Invalidate affected execution evidence |
 | Change resource limits, tuning, logging, or progress display | Retain evidence |
 | Change package-owned cache, report, or log outputs, or Git metadata | Retain evidence |
@@ -91,27 +99,66 @@ validation, and failure handling. Live or externally stateful tests stay uncache
 
 ## Serial timeout retries
 
-The package owns per-test deadlines and retries only confirmed timeouts. Allow
-one additional attempt by default, with suite timeout/retry overrides. Ordinary
-test failures, spawn errors, and cancellation retain their existing behavior.
+Ordinary Node test bodies follow [`node:test` completion rules](https://nodejs.org/docs/latest-v24.x/api/test.html#test-runner):
+a synchronous body returns without throwing, an async body's promise fulfills,
+or a callback completes without an error. Exceptions, rejected promises,
+assertion failures, and hook errors fail the test. Returning `0` or `1` from a
+test body is not an exit-status API. The low-level `execute` callback instead
+resolves to an integer process exit code; preserve that contract and the runner's
+existing result shape.
+
+The package owns a wall deadline for each test-file attempt, including blocked
+or hung processes. Its expiry confirms a timeout but cannot override an observed
+non-timeout failure. Recognize internal test or hook timeouts only through
+positively identified structured signals from supported framework adapters.
+The Node adapter uses reporter events and verified failure causes; hook failures
+whose timeout cause cannot be verified remain ordinary failures without retry.
+Parent failure summaries inherit their children's classification. An error named
+`TimeoutError` or timeout text alone is not proof.
+
+Assertions, other hook errors, spawn errors, and unknown or mixed failures prevent
+timeout-only retry. Cancelled child tests block file retry even when their parent
+or suite has a confirmed timeout. User cancellation never retries; termination
+performed by the package to clean up its own deadline is distinct.
+
+Allow one additional attempt by default, with bounded suite timeout/retry
+overrides. Each suite has one retry owner: disable framework/consumer retries
+when the package owns them, or disable package retries for an advanced adapter
+that retains ownership.
 
 Collect timed-out tests during the normal pass. Finish that queue and drain all
 active workers before retrying timed-out tests one at a time. Retry concurrency
 is one regardless of the normal worker cap; retries do not overlap normal tests.
-Terminate and drain each timed-out attempt before another attempt, and obtain
-live resource admission for every retry.
+Terminate and drain each timed-out attempt, including its child processes and
+reporter output, before another attempt. Obtain live resource admission for
+every retry.
 
-Keep retries bounded and report them. Preserve integer exit codes and the
-existing result shape. Save evidence only after a complete successful attempt
-with unchanged inputs. Reuse command cancellation/cleanup; add no general retry
-framework.
+Keep retries bounded and report every attempt. A successful retry replaces that
+file's initial timeout result; unrecovered and unrelated failures still fail the
+suite. Check inputs against the original baseline throughout both stages; never
+adopt changed inputs as a new retry baseline. Save evidence only after a complete
+successful attempt with unchanged inputs. Reuse command cancellation/cleanup;
+add no general retry framework.
 
 ## Coverage and JSON gates
 
-Normal runs reuse evidence. `--coverage` freshly runs complete selected suites
-through their installed framework/coverage provider and evaluates gates. Bypass
-passing evidence; do not merge or persist per-file coverage. Missing providers
-or unsupported custom-command coverage fail with actionable errors.
+Normal runs reuse passing evidence. `--coverage` retains per-file coverage from
+complete successful executions of cacheable tests, including across failed or
+interrupted runs. Rerun failed, new, changed, or invalidated files and files whose
+coverage artifacts are missing or corrupt, using the installed framework/coverage
+provider. Passing-test evidence alone cannot skip missing coverage collection.
+Missing providers or unsupported custom-command coverage fail with actionable
+errors.
+
+Bind artifacts to test, source, and execution inputs, the coverage provider and its
+dependencies, and collection settings. Verify artifact checksums before reuse;
+save successful contributions with the existing unchanged-input checks and
+atomic evidence guarantees. Failed or incomplete attempts supply no coverage.
+
+Merge fresh and retained contributions for every current test in each selected
+suite, then evaluate all gates, including when every contribution was cached.
+Exclude deleted tests. Never report suite success while a test has failed, a
+required contribution is missing or invalid, or inputs have changed.
 
 Each suite may declare `coverageGates`. A gate has a source file/directory path
 and named percentage thresholds for lines, branches, and functions. Every
@@ -132,13 +179,17 @@ independently. Missing paths, absent coverage, or unavailable required metrics
 fail explicitly rather than silently passing. Use native reports and small
 framework handlers; consumers supply configuration, not parsing or gate code.
 
+Changes only to gate criteria reevaluate retained contributions without rerunning
+tests when the artifacts cover the requested sources and metrics. Changes to
+collection settings invalidate affected artifacts.
+
 ## Implementation and acceptance
 
-1. Correct package-owned execution identity and independent/shared hashing,
-   including the narrow npm normalization.
+1. Correct package-owned execution identity and independent/shared hashing
+   within suite input boundaries, including the narrow npm normalization.
 2. Add defaults merging and declarative suites around the existing runner.
-3. Move framework execution, serial timeout retries, and coverage gates into
-   built-ins.
+3. Move framework execution, verified timeout classification and serial retries,
+   retained coverage contributions, and coverage gates into built-ins.
 4. Migrate consumers, starting with Portfolio Mix. Trace callers before removing
    generic cache/retry wrappers; retain bootstrap, live credentials, specialized
    artifact gates, and non-test concurrency consumers.
@@ -146,12 +197,20 @@ framework handlers; consumers supply configuration, not parsing or gate code.
 Verify retest rules with an edit matrix: independent test, shared helper,
 numerical threads, resource settings, reporter edits, scheduler-only package
 upgrades, and real dependency changes. Retain concurrent-edit, atomic-write,
-cancellation, and resource-admission regressions. Check timeout recovery,
-exhaustion, cleanup, and no overlap with normal tests or other retries; coverage
-defaults, scoped gates, unsupported metrics, and complete uncached coverage
-runs; path validation and installation with bundled defaults.
+cancellation, and resource-admission regressions. Verify unrelated app isolation,
+declared shared inputs, and operational/runtime/generated-input exclusions.
+Check Node completion semantics, verified internal timeouts, unverifiable hook
+failures, wall deadlines, mixed failures, and children cancelled by parent
+timeouts. Check retry recovery/exhaustion, original-input validation, cleanup,
+and no overlap or duplicate retry ownership.
+
+Check coverage defaults, scoped gates, unsupported metrics, retained successes
+after failure/interruption, failed/new/changed-file reruns, missing/corrupt
+artifacts, provider/collection invalidation, deleted tests, complete aggregation
+with fresh/reused contributions, and gate reevaluation on all-cached runs and
+criteria changes. Retain path validation and installation with bundled defaults.
 
 Keep the scope to these requirements. Add no import/dependency graphs, framework
 autodetection, setup wizard, plugin interface, general merge library, new command
-placeholders, coverage persistence/merging, universal package-manager
-normalization, general retry framework, or new package dependencies.
+placeholders, general persistence layer, universal package-manager normalization,
+general retry framework, or new package dependencies.
