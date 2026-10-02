@@ -21,10 +21,18 @@ project-specific costs stay in consumer configuration. Merge documented objects
 explicitly; arrays replace. Resource precedence is package defaults, project
 `resources`, then `suiteResources[name]`.
 
-Provide small Node, pytest, and Vitest runners. Suites declare test paths and
-framework, plus necessary working directory, interpreter, or framework-config
-paths. Resolve typed paths against the project root, itself resolved beside the
-configuration file. Use `project-checks.config.json` or `--config <path>`.
+Provide small Node, Python unittest, pytest, and Vitest runners. Suites declare
+test paths and framework, plus necessary working directory, interpreter, or
+framework-config paths. Resolve typed paths against the project root, itself
+resolved beside the configuration file. Use `project-checks.config.json` or
+`--config <path>`.
+
+The `unittest` built-in runs existing Python test files unchanged with the
+configured installed interpreter, app working directory, and import/discovery
+settings. Declare these and provider configuration in suite JSON; ordinary
+adoption needs no custom runner, callback, test rewrites, or pytest dependency.
+Bind the selected Python environment and discovery/import/provider settings into
+the existing scoped fingerprints and per-file evidence.
 
 Reuse existing validation, discovery, command execution, admission, and cache
 machinery. Run suites sequentially and keep framework-internal file concurrency
@@ -116,6 +124,11 @@ whose timeout cause cannot be verified remain ordinary failures without retry.
 Parent failure summaries inherit their children's classification. An error named
 `TimeoutError` or timeout text alone is not proof.
 
+Stdlib [`unittest`](https://docs.python.org/3/library/unittest.html#command-line-interface)
+has no general internal-timeout classification. Its built-in
+uses the package wall deadline; any supported internal-timeout signal must meet
+the same positive verification rules.
+
 Assertions, other hook errors, spawn errors, and unknown or mixed failures prevent
 timeout-only retry. Cancelled child tests block file retry even when their parent
 or suite has a confirmed timeout. User cancellation never retries; termination
@@ -149,6 +162,14 @@ coverage artifacts are missing or corrupt, using the installed framework/coverag
 provider. Passing-test evidence alone cannot skip missing coverage collection.
 Missing providers or unsupported custom-command coverage fail with actionable
 errors.
+
+For `unittest`, use installed [coverage.py](https://coverage.readthedocs.io/en/latest/commands/cmd_run.html)
+through the selected interpreter to collect and combine per-file artifacts under
+the retention rules below. Suite JSON supplies provider configuration. Native
+measurement covers statements and, when enabled, branches; enable branch
+collection when gates require it. Evaluate each declared metric separately. If
+the installed provider cannot supply a required function or other metric, fail
+explicitly instead of approximating or dropping it.
 
 Bind artifacts to test, source, and execution inputs, the coverage provider and its
 dependencies, and collection settings. Verify artifact checksums before reuse;
@@ -187,7 +208,8 @@ collection settings invalidate affected artifacts.
 
 1. Correct package-owned execution identity and independent/shared hashing
    within suite input boundaries, including the narrow npm normalization.
-2. Add defaults merging and declarative suites around the existing runner.
+2. Add defaults merging and declarative suites around the existing runner,
+   including native unittest interpreter, import/discovery, and provider settings.
 3. Move framework execution, verified timeout classification and serial retries,
    retained coverage contributions, and coverage gates into built-ins.
 4. Migrate consumers, starting with Portfolio Mix. Trace callers before removing
@@ -209,6 +231,11 @@ after failure/interruption, failed/new/changed-file reruns, missing/corrupt
 artifacts, provider/collection invalidation, deleted tests, complete aggregation
 with fresh/reused contributions, and gate reevaluation on all-cached runs and
 criteria changes. Retain path validation and installation with bundled defaults.
+
+Exercise existing unittest files with configured interpreter/cwd/import settings,
+scoped evidence reuse/invalidation, wall-deadline retries, and retained coverage.py
+artifacts. Verify provider absence, branch collection, exact per-metric gates,
+and unsupported required metrics using the same coverage acceptance cases.
 
 Keep the scope to these requirements. Add no import/dependency graphs, framework
 autodetection, setup wizard, plugin interface, general merge library, new command
