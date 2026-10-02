@@ -2,8 +2,8 @@ import { readFileSync } from 'node:fs';
 import { cpus } from 'node:os';
 import { detectResources, selectConcurrency } from './resources.mjs';
 
-function pressureTime() {
-  try { return Number(readFileSync('/proc/pressure/cpu', 'utf8').match(/^some .*total=(\d+)/m)?.[1]); }
+function pressureTime(resource) {
+  try { return Number(readFileSync(`/proc/pressure/${resource}`, 'utf8').match(/^some .*total=(\d+)/m)?.[1]); }
   catch { return NaN; }
 }
 
@@ -15,7 +15,7 @@ function cpuTimes() {
     total += Object.values(times).reduce((sum, value) => sum + value, 0);
     idle += times.idle;
   }
-  return { total, idle, count: processors.length, pressure: pressureTime(), time: performance.now() };
+  return { total, idle, count: processors.length, pressure: pressureTime('cpu'), memoryPressure: pressureTime('memory'), time: performance.now() };
 }
 
 export function resourceSampler() {
@@ -27,6 +27,7 @@ export function resourceSampler() {
     const value = {
       busyCpus: total > 0 ? current.count * (1 - (current.idle - previous.idle) / total) : NaN,
       pressure: elapsed > 0 ? (current.pressure - previous.pressure) / (elapsed * 1000) : NaN,
+      memoryPressure: elapsed > 0 ? (current.memoryPressure - previous.memoryPressure) / (elapsed * 1000) : NaN,
       availableMemoryMiB: process.availableMemory() / 1024 ** 2,
     };
     previous = current;
@@ -47,8 +48,9 @@ export class Admission {
     this.memory = policy.memoryMiBPerWorker ?? 256;
     this.reserve = policy.reserveMemoryMiB ?? 0;
     this.capacity = Math.max(1, Math.min(units, Math.floor(this.selected.memoryBudgetMiB / this.memory), policy.maxWorkers ?? Infinity));
-    this.weight = policy.cpusPerWorker ?? 1;
-    this.limit = Math.min(this.capacity, this.selected.workers);
+    const initial = Math.max(1, Math.min(this.capacity, Math.floor(this.selected.cpuBudget / 2),
+      Number.isFinite(available) ? Math.floor((available - this.reserve) / this.memory) : Infinity));
+    this.weight = this.selected.cpuBudget / (initial + 1e-6);
     this.active = 0;
     this.peak = 0;
     this.spare = 0;
@@ -64,17 +66,21 @@ export class Admission {
 
   wake() { for (const wake of this.waiters) wake(); }
 
+  get limit() {
+    return Math.min(this.capacity, selectConcurrency({ ...this.policy, cpusPerWorker: this.weight }, this.host).workers);
+  }
+
   tick() {
     this.reading = this.sample();
-    const { busyCpus, pressure, availableMemoryMiB } = this.reading;
+    const { busyCpus, pressure, memoryPressure, availableMemoryMiB } = this.reading;
     if (Number.isFinite(availableMemoryMiB)) this.minimumMemory = Math.min(this.minimumMemory, availableMemoryMiB);
     if (this.active && Number.isFinite(busyCpus)) {
       this.cpuSum += busyCpus;
       this.samples++;
       const budget = this.selected.cpuBudget;
       const memoryFits = !Number.isFinite(availableMemoryMiB) || availableMemoryMiB >= this.reserve + this.memory;
-      const spare = this.active >= this.limit && busyCpus < budget * 0.85 && !(pressure > 0.05) && memoryFits;
-      const pressured = busyCpus > budget + 0.2 || (pressure > 0.15 && busyCpus >= budget * 0.9);
+      const spare = this.active >= this.limit && busyCpus < budget * 0.85 && !(pressure > 0.05) && !(memoryPressure > 0.05) && memoryFits;
+      const pressured = !memoryFits || memoryPressure > 0.05 || busyCpus > budget + 0.2 || (pressure > 0.15 && busyCpus >= budget * 0.9);
       this.spare = spare ? this.spare + 1 : 0;
       this.pressured = pressured ? this.pressured + 1 : 0;
       let next = this.limit;
@@ -82,7 +88,6 @@ export class Admission {
       else if (this.pressured >= 3 && next > 1) next--;
       if (next !== this.limit) {
         this.weight = budget / (next + 1e-6);
-        this.limit = Math.min(this.capacity, selectConcurrency({ ...this.policy, cpusPerWorker: this.weight }, this.host).workers);
         this.spare = this.pressured = 0;
       }
     } else this.spare = this.pressured = 0;
@@ -96,15 +101,16 @@ export class Admission {
       if (this.closed) throw new Error('Resource admission stopped');
       const available = this.reading.availableMemoryMiB;
       const fits = this.selected.memoryBudgetMiB >= this.memory && (!Number.isFinite(available) || available >= this.reserve + this.memory);
-      if (this.active < this.limit && fits) {
+      const pressured = this.reading.memoryPressure > 0.05;
+      if (this.active < this.limit && fits && !pressured) {
         this.active++;
         this.peak = Math.max(this.peak, this.active);
         this.blockedSince = undefined;
         return;
       }
-      if (!this.active && !fits) {
+      if (!this.active && (!fits || pressured)) {
         this.blockedSince ??= performance.now();
-        if (performance.now() - this.blockedSince >= 30000) throw new Error(`Insufficient memory for a ${this.memory} MiB test worker after 30 seconds`);
+        if (performance.now() - this.blockedSince >= 30000) throw new Error(`Insufficient memory headroom or sustained memory pressure for a ${this.memory} MiB test worker after 30 seconds`);
       }
       await new Promise(resolve => {
         const wake = () => { this.waiters.delete(wake); resolve(); };

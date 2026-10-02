@@ -23,7 +23,7 @@ and install that archive in another project:
 npm pack
 
 # In your project (adjust the path)
-npm install --save-dev /path/to/project-checks/project-checks-0.1.2.tgz
+npm install --save-dev /path/to/project-checks/project-checks-0.1.3.tgz
 ```
 
 After a maintainer publishes it under this name, installation will be
@@ -218,23 +218,27 @@ and empty test selections fail explicitly.
 The resource policy uses 100% of detected available CPUs, zero reserves,
 1 CPU and 256 MiB per worker, and `divisor: 1`. Set `cpuPercent`, `reserveCpus`,
 `reserveMemoryMiB`, `cpusPerWorker`, `memoryMiBPerWorker`, `maxWorkers` and
-`divisor` as needed. Fractional CPU costs support I/O-bound tests. The CPU and
+`divisor` as needed. `cpusPerWorker` is the estimate for the static
+`selectConcurrency` API; automatic runs replace it with a run-local weight. The CPU and
 memory budgets each constrain concurrency. `divisor` shares the original host
 budget for nested orchestration; the caller supplies that share. Explicit
 `workers` retains fixed concurrency and overrides automatic admission.
 
-Without explicit `workers`, fresh commands automatically adjust the effective
-`cpusPerWorker` during the run. Three consecutive one-second samples of spare
-CPU permit one additional worker; sustained CPU pressure reduces new admissions.
+Without explicit `workers`, fresh commands start at half the available CPU budget
+(rounded down, minimum one), clamped by live free RAM, the reserve and hard caps.
+They automatically adjust the effective `cpusPerWorker`. Three consecutive one-second
+samples of spare CPU and RAM permit one additional worker; sustained CPU or
+memory pressure reduces new admissions.
 Saturation alone holds the count. `maxWorkers` and configured RAM reservations
 remain bounds, including a cap of one for suites requiring serial execution.
 
 The total RAM budget limits reservations; a live headroom check pauses admission
-below the reserve plus one worker's RAM estimate. Active commands finish
-normally. If no worker can fit for 30 seconds, the run fails rather than forcing
+below `reserveMemoryMiB` plus one worker's RAM estimate, or during memory pressure.
+Active commands finish normally. If admission stays blocked with no active
+worker for 30 seconds, the run fails rather than forcing
 one through. This is conservative admission, not protection against every memory
 spike. CPU feedback uses host usage and Linux pressure data where available;
-missing CPU measurements retain the configured weight. No process-tree profiling,
+missing CPU measurements retain the conservative startup count. No process-tree profiling,
 calibration runs or saved tuning profiles are used. Each invocation learns anew.
 Cached passes bypass admission. A short summary reports peak fresh workers,
 sampled CPU, minimum available RAM and the final effective CPU weight.

@@ -1,7 +1,9 @@
 export interface ResourcePolicy {
   cpuPercent?: number;
   reserveCpus?: number;
+  /** Free RAM headroom to retain before admitting another worker, in MiB. */
   reserveMemoryMiB?: number;
+  /** Static selectConcurrency estimate; automatic runs tune their own CPU weight. */
   cpusPerWorker?: number;
   memoryMiBPerWorker?: number;
   maxWorkers?: number;
@@ -38,7 +40,7 @@ export interface TestConfig {
   inputs?: string[];
   /** Exclusions relative to root. Replaces default .git/.test-cache/__pycache__ exclusions. */
   ignore?: string[];
-  /** Fixed concurrency override; omitted counts adjust automatically within resource caps. */
+  /** Fixed override; omitted starts at half the CPU budget and tunes within resource caps. */
   workers?: number;
   resources?: ResourcePolicy;
   cache?: boolean;

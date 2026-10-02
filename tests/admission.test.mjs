@@ -3,7 +3,7 @@ import test from 'node:test';
 import { Admission, resourceSampler } from '../src/admission.mjs';
 
 function fixture(t, policy = {}, host = { cpus: 2, memoryMiB: 8192 }, signal) {
-  const reading = { busyCpus: 0.2, pressure: 0, availableMemoryMiB: host.memoryMiB };
+  const reading = { busyCpus: 0.2, pressure: 0, memoryPressure: 0, availableMemoryMiB: host.memoryMiB };
   const admission = new Admission({ maxWorkers: 4, memoryMiBPerWorker: 512, ...policy }, 8, { host, sample: () => ({ ...reading }), signal });
   t.after(() => admission.close());
   return { admission, reading };
@@ -11,12 +11,15 @@ function fixture(t, policy = {}, host = { cpus: 2, memoryMiB: 8192 }, signal) {
 
 test('automatically lowers CPU weight one worker at a time after sustained spare capacity', async t => {
   const { admission } = fixture(t);
-  await admission.acquire();
+  assert.equal(admission.limit, 1);
   await admission.acquire();
   admission.tick();
+  admission.tick();
+  assert.equal(admission.limit, 1);
   admission.tick();
   assert.equal(admission.limit, 2);
-  admission.tick();
+  await admission.acquire();
+  for (let count = 0; count < 3; count++) admission.tick();
   assert.equal(admission.limit, 3);
   assert.ok(admission.weight < 1);
   await admission.acquire();
@@ -28,6 +31,7 @@ test('automatically lowers CPU weight one worker at a time after sustained spare
 test('saturation holds; sustained pressure raises the weight without stopping active work', async t => {
   const { admission, reading } = fixture(t);
   await admission.acquire();
+  for (let count = 0; count < 3; count++) admission.tick();
   await admission.acquire();
   reading.busyCpus = 2;
   for (let count = 0; count < 6; count++) admission.tick();
@@ -51,6 +55,17 @@ test('memory reservations and explicit suite caps bound automatic growth', async
   assert.equal(admission.limit, 4);
 });
 
+test('startup uses half the CPU budget, clamped by live free RAM and the reserve', t => {
+  for (const [availableMemoryMiB, expected] of [[8192, 4], [2560, 3], [1024, 1]]) {
+    const admission = new Admission({ reserveMemoryMiB: 1024, memoryMiBPerWorker: 512, maxWorkers: 16 }, 16, {
+      host: { cpus: 8, memoryMiB: 8192 },
+      sample: () => ({ availableMemoryMiB, busyCpus: 0, pressure: 0 }),
+    });
+    t.after(() => admission.close());
+    assert.equal(admission.limit, expected);
+  }
+});
+
 test('live pressure pauses admission until recovery without double-counting active RAM', async t => {
   const reading = { busyCpus: 0, pressure: 0, availableMemoryMiB: 2048 };
   const admission = new Admission({ memoryMiBPerWorker: 1024, reserveMemoryMiB: 512 }, 4, { host: { cpus: 4, memoryMiB: 8192 }, sample: () => ({ ...reading }) });
@@ -66,8 +81,47 @@ test('live pressure pauses admission until recovery without double-counting acti
   admission.tick();
   await waiting;
   assert.equal(admission.active, 1);
+  for (let count = 0; count < 3; count++) admission.tick();
   await admission.acquire();
   assert.equal(admission.active, 2);
+});
+
+test('sustained memory pressure stops growth and lowers future admissions even with spare CPU and RAM', async t => {
+  const { admission, reading } = fixture(t);
+  await admission.acquire();
+  for (let count = 0; count < 3; count++) admission.tick();
+  await admission.acquire();
+  reading.memoryPressure = 0.1;
+  for (let count = 0; count < 3; count++) admission.tick();
+  assert.equal(admission.limit, 1);
+  assert.equal(admission.active, 2);
+  admission.release();
+  admission.release();
+  let started = false;
+  const waiting = admission.acquire().then(() => { started = true; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(started, false);
+  reading.memoryPressure = 0;
+  admission.tick();
+  await waiting;
+  assert.equal(admission.active, 1);
+});
+
+test('free-memory reserve blocks growth and admission, then allows recovery', async t => {
+  const { admission, reading } = fixture(t, { reserveMemoryMiB: 1024 });
+  await admission.acquire();
+  reading.availableMemoryMiB = 1400;
+  for (let count = 0; count < 6; count++) admission.tick();
+  assert.equal(admission.limit, 1);
+  admission.release();
+  let started = false;
+  const waiting = admission.acquire().then(() => { started = true; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(started, false);
+  reading.availableMemoryMiB = 1536;
+  admission.tick();
+  await waiting;
+  assert.equal(admission.active, 1);
 });
 
 test('blocked admissions stop promptly on cancellation or fatal errors and time out without forcing a worker', async t => {
@@ -91,15 +145,14 @@ test('blocked admissions stop promptly on cancellation or fatal errors and time 
   assert.equal(second.active, 0);
 });
 
-test('missing telemetry retains configured CPU weights and sampling reports live RAM', async t => {
+test('missing CPU telemetry retains half-CPU startup and sampling reports live RAM', async t => {
   const { admission, reading } = fixture(t);
   reading.busyCpus = NaN;
   reading.pressure = NaN;
   await admission.acquire();
-  await admission.acquire();
   for (let count = 0; count < 12; count++) admission.tick();
-  assert.equal(admission.weight, 1);
-  assert.equal(admission.limit, 2);
+  assert.ok(Math.abs(admission.weight - 2) < 0.00001);
+  assert.equal(admission.limit, 1);
   const sample = resourceSampler()();
   assert.ok(sample.availableMemoryMiB >= 0);
 });
