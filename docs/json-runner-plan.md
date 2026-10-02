@@ -39,6 +39,12 @@ machinery. Run suites sequentially and keep framework-internal file concurrency
 serial. Preserve the flat API and custom-command escape hatch; built-ins supply
 the ordinary integration path.
 
+Runs using within-file name, skip, only, or case filters bypass reading and
+writing complete-file passing and coverage evidence. Such runs cannot certify
+the full file or a suite gate. Selecting fewer complete files can retain normal
+per-file reuse when execution meaning is unchanged; suite gates still require
+complete current evidence.
+
 ## Automatic resource maximization
 
 Automatic tuning and live-memory admission are required defaults:
@@ -72,6 +78,12 @@ against the project root; discovery must stay within declared boundaries.
 Exclude operational data, runtime state, and generated output before reading or
 hashing files, using defaults and project-specific exclusions. An unrelated app
 outside a suite's inputs must not invalidate its evidence.
+
+Configured runtime binaries and provider assets outside `inputRoot` remain
+execution inputs for the suites that use them. Fingerprint the selected contents
+through explicitly declared trusted paths. Reuse advanced fingerprint/snapshot
+callbacks for browser-specific bundle discovery, limited to those paths;
+preserve source exclusions and scoped discovery boundaries.
 
 Discover runnable tests across all configured suites, including unselected ones,
 then fingerprint each suite's declared inputs. Exclude independent test files
@@ -171,6 +183,16 @@ collection when gates require it. Evaluate each declared metric separately. If
 the installed provider cannot supply a required function or other metric, fail
 explicitly instead of approximating or dropping it.
 
+[coverage.py 7.6+ provides per-function JSON](https://coverage.readthedocs.io/en/7.10.2/changes.html#version-7-6-0-2024-07-11).
+Before migrating function gates, verify that native provider counts match the
+consumer's metric semantics; preserve its declared thresholds. For gates based
+on executed body lines, exclude docstrings and directly nested function/class
+definition statements, including their bodies, from each function's eligible
+lines. Count each synchronous or asynchronous function with at least one eligible
+line; it is covered if any such line executed. Count nested functions separately.
+Reuse supported provider data; fail clearly if accurate required counts are
+unavailable.
+
 Bind artifacts to test, source, and execution inputs, the coverage provider and its
 dependencies, and collection settings. Verify artifact checksums before reuse;
 save successful contributions with the existing unchanged-input checks and
@@ -221,6 +243,9 @@ numerical threads, resource settings, reporter edits, scheduler-only package
 upgrades, and real dependency changes. Retain concurrent-edit, atomic-write,
 cancellation, and resource-admission regressions. Verify unrelated app isolation,
 declared shared inputs, and operational/runtime/generated-input exclusions.
+Check partial-file filters cannot reuse or certify complete-file passing/coverage
+evidence, complete-file subset reuse, and external runtime/asset changes
+invalidating affected suites while retaining unrelated app evidence.
 Check Node completion semantics, verified internal timeouts, unverifiable hook
 failures, wall deadlines, mixed failures, and children cancelled by parent
 timeouts. Check retry recovery/exhaustion, original-input validation, cleanup,
@@ -236,6 +261,9 @@ Exercise existing unittest files with configured interpreter/cwd/import settings
 scoped evidence reuse/invalidation, wall-deadline retries, and retained coverage.py
 artifacts. Verify provider absence, branch collection, exact per-metric gates,
 and unsupported required metrics using the same coverage acceptance cases.
+Check Python function-count parity for executed/uncalled bodies, single-line and
+async functions, docstring-only bodies, and nested functions/classes before
+replacing consumer gates.
 
 Keep the scope to these requirements. Add no import/dependency graphs, framework
 autodetection, setup wizard, plugin interface, general merge library, new command
