@@ -4,7 +4,6 @@ import { defineConfig, defaultIgnore } from './config.mjs';
 import { runCachedUnits } from './cache.mjs';
 import { commandEnvironment, runCommand } from './command.mjs';
 import { createSnapshot, discoverTests } from './inputs.mjs';
-import { selectConcurrency } from './resources.mjs';
 import { digest, inside } from './util.mjs';
 
 async function implementationIdentity() {
@@ -28,12 +27,10 @@ export async function runTests(options = {}) {
   if (!files.length) throw new Error(`No test files found in ${config.testDirectory}`);
   const env = commandEnvironment(options.env);
   const logger = options.logger === false ? null : options.logger ?? console;
-  const selected = selectConcurrency(options.resources);
-  const workers = options.workers ?? selected.workers;
   const template = options.command ?? [process.execPath, '--test', '--test-concurrency=1', '{file}'];
   const units = files.map(id => ({ id, command: template.map(argument => argument.replaceAll('{file}', id)) }));
   return runCachedUnits({
-    cacheDirectory: config.cacheDirectory, suite: options.suite ?? 'tests', units, workers,
+    cacheDirectory: config.cacheDirectory, suite: options.suite ?? 'tests', units, workers: options.workers, resources: options.resources ?? {},
     cache: options.cache ?? true, signal: options.signal, logger,
     environment: env, ignoreEnv: options.ignoreEnv,
     snapshot: createSnapshot(config, implementationIdentity),

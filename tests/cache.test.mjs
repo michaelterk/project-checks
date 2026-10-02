@@ -140,3 +140,29 @@ test('bounded scheduling drains failures, preserves input order, and waits for a
   await assert.rejects(runCachedUnits(f.options), /fatal/);
   assert.equal(siblingEnded, true);
 });
+
+test('resource admission preserves cache evidence, input fencing and fixed worker overrides', async t => {
+  const f = await fixture(t);
+  delete f.options.workers;
+  f.options.resources = { maxWorkers: 1, memoryMiBPerWorker: 1 };
+  let active = 0;
+  let peak = 0;
+  f.options.execute = async () => {
+    peak = Math.max(peak, ++active);
+    await new Promise(resolve => setTimeout(resolve, 10));
+    active--;
+    return 0;
+  };
+  assert.equal((await runCachedUnits(f.options)).passed, 2);
+  assert.equal(peak, 1);
+  assert.equal((await runCachedUnits(f.options)).cached, 2);
+  f.inputs.common = 'changed';
+  f.options.workers = 2;
+  assert.equal((await runCachedUnits(f.options)).workers, 2);
+  assert.equal(peak, 2);
+  delete f.options.workers;
+  f.inputs.common = 'new';
+  f.options.execute = async () => { f.inputs.common = 'mutated'; return 0; };
+  assert.equal((await runCachedUnits(f.options)).inputsChanged, true);
+  assert.deepEqual(await readdir(f.directory), []);
+});

@@ -10,8 +10,10 @@ Commands can run Node, Python, or another installed test framework.
 Install directly from GitHub:
 
 ```sh
-npm install --save-dev github:michaelterk/project-checks#v0.1.1
+npm install --save-dev github:michaelterk/project-checks#COMMIT
 ```
+
+Replace `COMMIT` with the reviewed commit SHA to pin the installed implementation.
 
 The package has not been published to npm. You can also create an archive here
 and install that archive in another project:
@@ -21,7 +23,7 @@ and install that archive in another project:
 npm pack
 
 # In your project (adjust the path)
-npm install --save-dev /path/to/project-checks/project-checks-0.1.1.tgz
+npm install --save-dev /path/to/project-checks/project-checks-0.1.2.tgz
 ```
 
 After a maintainer publishes it under this name, installation will be
@@ -198,7 +200,7 @@ inside Node's own test runner.
 | `command` | Current Node, `--test --test-concurrency=1 {file}` | Executable and argument array |
 | `inputs` | `['.']` | Shared input paths/globs relative to root |
 | `ignore` | `.git`, `.test-cache`, `__pycache__` trees | Replaces default root-relative exclusions |
-| `workers` | CPU/RAM-derived count | Positive integer override |
+| `workers` | Automatically tuned CPU/RAM-derived count | Positive integer fixed override |
 | `resources` | See below | Resource policy |
 | `cache` | `true` | Read/write passing evidence |
 | `cacheDirectory` | `.test-cache/project-checks` | Evidence storage, relative to root or absolute |
@@ -217,9 +219,25 @@ The resource policy uses 100% of detected available CPUs, zero reserves,
 1 CPU and 256 MiB per worker, and `divisor: 1`. Set `cpuPercent`, `reserveCpus`,
 `reserveMemoryMiB`, `cpusPerWorker`, `memoryMiBPerWorker`, `maxWorkers` and
 `divisor` as needed. Fractional CPU costs support I/O-bound tests. The CPU and
-memory budgets each constrain concurrency, with at least one worker retained
-on small hosts. `divisor` shares the original host budget for nested orchestration;
-the caller supplies that share. Explicit `workers` overrides the derived count.
+memory budgets each constrain concurrency. `divisor` shares the original host
+budget for nested orchestration; the caller supplies that share. Explicit
+`workers` retains fixed concurrency and overrides automatic admission.
+
+Without explicit `workers`, fresh commands automatically adjust the effective
+`cpusPerWorker` during the run. Three consecutive one-second samples of spare
+CPU permit one additional worker; sustained CPU pressure reduces new admissions.
+Saturation alone holds the count. `maxWorkers` and configured RAM reservations
+remain bounds, including a cap of one for suites requiring serial execution.
+
+The total RAM budget limits reservations; a live headroom check pauses admission
+below the reserve plus one worker's RAM estimate. Active commands finish
+normally. If no worker can fit for 30 seconds, the run fails rather than forcing
+one through. This is conservative admission, not protection against every memory
+spike. CPU feedback uses host usage and Linux pressure data where available;
+missing CPU measurements retain the configured weight. No process-tree profiling,
+calibration runs or saved tuning profiles are used. Each invocation learns anew.
+Cached passes bypass admission. A short summary reports peak fresh workers,
+sampled CPU, minimum available RAM and the final effective CPU weight.
 
 ## API results and adapters
 

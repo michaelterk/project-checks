@@ -38,6 +38,7 @@ export interface TestConfig {
   inputs?: string[];
   /** Exclusions relative to root. Replaces default .git/.test-cache/__pycache__ exclusions. */
   ignore?: string[];
+  /** Fixed concurrency override; omitted counts adjust automatically within resource caps. */
   workers?: number;
   resources?: ResourcePolicy;
   cache?: boolean;
@@ -66,6 +67,7 @@ export interface RunResult {
   passed: number;
   failed: number;
   cached: number;
+  /** Peak fresh concurrency for adaptive runs; selected pool size otherwise. */
   workers: number;
   inputsChanged: boolean;
   results: UnitResult[];
@@ -89,6 +91,8 @@ export interface CachedUnitsOptions<T extends TestUnit = TestUnit> {
   snapshot(): InputSnapshot | Promise<InputSnapshot>;
   execute(unit: T): number | Promise<number>;
   workers?: number;
+  /** Automatically adjusts CPU weight during fresh work when workers is omitted. */
+  resources?: ResourcePolicy;
   environment?: Record<string, string | undefined>;
   ignoreEnv?: string[];
   cache?: boolean;
