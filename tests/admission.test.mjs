@@ -33,7 +33,7 @@ test('saturation holds; sustained pressure raises the weight without stopping ac
   await admission.acquire();
   for (let count = 0; count < 3; count++) admission.tick();
   await admission.acquire();
-  reading.busyCpus = 2;
+  reading.busyCpus = 1.9;
   for (let count = 0; count < 6; count++) admission.tick();
   assert.equal(admission.limit, 2);
   reading.pressure = 0.2;
@@ -52,11 +52,11 @@ test('memory reservations and explicit suite caps bound automatic growth', async
     assert.equal(admission.limit, 1);
   }
   const { admission } = fixture(t, {}, { cpus: 8, memoryMiB: 8192 });
-  assert.equal(admission.limit, 4);
+  assert.equal(admission.limit, 3);
 });
 
 test('startup uses half the CPU budget, clamped by live free RAM and the reserve', t => {
-  for (const [availableMemoryMiB, expected] of [[8192, 4], [2560, 3], [1024, 1]]) {
+  for (const [availableMemoryMiB, expected] of [[8192, 3], [2560, 3], [1024, 1]]) {
     const admission = new Admission({ reserveMemoryMiB: 1024, memoryMiBPerWorker: 512, maxWorkers: 16 }, 16, {
       host: { cpus: 8, memoryMiB: 8192 },
       sample: () => ({ availableMemoryMiB, busyCpus: 0, pressure: 0 }),
@@ -151,7 +151,7 @@ test('missing CPU telemetry retains half-CPU startup and sampling reports live R
   reading.pressure = NaN;
   await admission.acquire();
   for (let count = 0; count < 12; count++) admission.tick();
-  assert.ok(Math.abs(admission.weight - 2) < 0.00001);
+  assert.ok(Math.abs(admission.weight - 1.9) < 0.00001);
   assert.equal(admission.limit, 1);
   const sample = resourceSampler()();
   assert.ok(sample.availableMemoryMiB >= 0);
@@ -170,4 +170,19 @@ test('fixed shared overrides remain bounded by capacity and do not retune', asyn
   assert.equal(admission.limit, 3);
   assert.equal(admission.samples, 6);
   assert.ok(admission.capacity * admission.memory <= admission.selected.memoryBudgetMiB);
+});
+
+test('CPU ceiling reserves 5% and lowers admissions above it without pressure', async t => {
+  for (const cpuPercent of [undefined, 200]) {
+    const { admission, reading } = fixture(t, { cpuPercent }, { cpus: 8, memoryMiB: 8192 });
+    assert.equal(admission.selected.cpuBudget, 7.6);
+    for (let i = 0; i < 3; i++) await admission.acquire();
+    reading.busyCpus = 7.6;
+    for (let i = 0; i < 3; i++) admission.tick();
+    assert.equal(admission.limit, 3);
+    reading.busyCpus = 7.7;
+    for (let i = 0; i < 3; i++) admission.tick();
+    assert.equal(admission.limit, 2);
+    assert.equal(admission.active, 3);
+  }
 });

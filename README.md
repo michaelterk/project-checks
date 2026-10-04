@@ -298,13 +298,14 @@ Input fingerprinting bounds filesystem work at eight operations within one
 invocation, with fresh metadata on every snapshot. Content digests and path-only
 exclusion decisions are reused; listings and snapshots are not.
 
-Without explicit `workers`, fresh commands start at half the available CPU budget
-(rounded down, minimum one), clamped by live free RAM, the reserve and hard caps.
+Without explicit `workers`, the CPU ceiling is capped at 95% of detected host
+capacity, leaving roughly 5% for other VM work even when `cpuPercent` is higher.
+Fresh commands start at half this CPU budget (rounded down, minimum one), clamped by live free RAM, the reserve and hard caps.
 They automatically adjust the effective `cpusPerWorker`. Three consecutive one-second
 samples of spare CPU and RAM permit one additional worker; sustained CPU or
 memory pressure reduces new admissions.
-Saturation alone holds the count. `maxWorkers` and configured RAM reservations
-remain bounds, including a cap of one for suites requiring serial execution.
+Usage at the ceiling holds the count; sustained usage above it reduces admissions.
+`maxWorkers` and configured RAM reservations remain bounds, including a cap of one for suites requiring serial execution.
 
 The total RAM budget limits reservations; a live headroom check pauses admission
 below `reserveMemoryMiB` plus one worker's RAM estimate, or during memory pressure.

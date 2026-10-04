@@ -46,6 +46,8 @@ export class Admission {
     const available = this.reading.availableMemoryMiB;
     this.host = host;
     this.selected = selectConcurrency(policy, this.host);
+    // Leave roughly 5% of host CPU capacity for other VM work.
+    this.selected.cpuBudget = Math.min(this.selected.cpuBudget, this.host.cpus * 0.95);
     this.memory = policy.memoryMiBPerWorker ?? 256;
     this.reserve = policy.reserveMemoryMiB ?? 0;
     this.capacity = Math.max(1, Math.min(units, Math.floor(this.selected.memoryBudgetMiB / this.memory), policy.maxWorkers ?? Infinity));
@@ -71,7 +73,7 @@ export class Admission {
   wake() { for (const wake of this.waiters) wake(); }
 
   get limit() {
-    return this.fixedWorkers ?? Math.min(this.capacity, selectConcurrency({ ...this.policy, cpusPerWorker: this.weight }, this.host).workers);
+    return this.fixedWorkers ?? Math.min(this.capacity, Math.max(1, Math.floor(this.selected.cpuBudget / this.weight)));
   }
 
   tick() {
@@ -85,7 +87,7 @@ export class Admission {
       const budget = this.selected.cpuBudget;
       const memoryFits = !Number.isFinite(availableMemoryMiB) || availableMemoryMiB >= this.reserve + this.memory;
       const spare = this.active >= this.limit && busyCpus < budget * 0.85 && !(pressure > 0.05) && !(memoryPressure > 0.05) && memoryFits;
-      const pressured = !memoryFits || memoryPressure > 0.05 || busyCpus > budget + 0.2 || (pressure > 0.15 && busyCpus >= budget * 0.9);
+      const pressured = !memoryFits || memoryPressure > 0.05 || busyCpus > budget || (pressure > 0.15 && busyCpus >= budget * 0.9);
       this.spare = spare ? this.spare + 1 : 0;
       this.pressured = pressured ? this.pressured + 1 : 0;
       let next = this.limit;
