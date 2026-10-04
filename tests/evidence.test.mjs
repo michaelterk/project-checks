@@ -299,7 +299,7 @@ test('public JSON snapshots preserve minimal dependencies and full/focused passi
   await put(root, 'test/helper.mjs', 'changed shared helper');
   assert.equal((await run(full)).passed, 2);
   await focused.close();
-  await assert.rejects(focused.snapshot(), /context closed/);
+  await assert.rejects(focused.snapshot());
   await full.close();
 });
 

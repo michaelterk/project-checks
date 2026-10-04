@@ -79,6 +79,7 @@ export class Admission {
 
   tick() {
     this.reading = this.sample();
+    this.lastTick = Date.now();
     const { busyCpus, pressure, memoryPressure, availableMemoryMiB } = this.reading;
     if (Number.isFinite(availableMemoryMiB)) this.minimumMemory = Math.min(this.minimumMemory, availableMemoryMiB);
     if (this.active && Number.isFinite(busyCpus)) {
@@ -148,6 +149,17 @@ export class Admission {
     clearInterval(this.timer);
     this.signal?.removeEventListener('abort', this.abort);
     this.wake();
+  }
+
+  inspect() {
+    return {
+      lastTick: this.lastTick === undefined ? null : new Date(this.lastTick).toISOString(),
+      readingAgeSeconds: this.lastTick === undefined ? null : (Date.now() - this.lastTick) / 1000,
+      active: this.active, limit: this.limit, capacity: this.capacity, weight: this.weight,
+      spareTicks: this.spare, pressuredTicks: this.pressured, reading: { ...this.reading },
+      cpuBudget: this.selected.cpuBudget, reserveMemoryMiB: this.reserve,
+      memoryMiBPerWorker: this.memory, closed: Boolean(this.closed),
+    };
   }
 
   report(logger, suite) {

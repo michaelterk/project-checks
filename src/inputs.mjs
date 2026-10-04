@@ -3,6 +3,7 @@ import { createReadStream } from 'node:fs';
 import { glob, lstat, readdir, readlink, realpath } from 'node:fs/promises';
 import { dirname, join, matchesGlob, relative, resolve } from 'node:path';
 import { digest, inside, slash, text } from './util.mjs';
+import { defineConfig } from './config.mjs';
 
 // One queue bounds leaf work. Visitors enqueue children without awaiting them.
 export function createSnapshotContext({ signal } = {}) {
@@ -177,11 +178,22 @@ export function createSnapshot(config, extraIdentity, context = createSnapshotCo
     const excludedFiles = new Set(config.excludeTestsFromInputs ? inventory.map(id => resolve(config.root, id)) : []);
     const roots = await selectPaths(config.inputs, excludedFiles);
     const fixtures = [];
-    const dependencies = await Promise.all(files.map(async (id, index) => {
-      const inputs = await selectPaths(
-        Object.entries(config.testInputs ?? {}).filter(([scope]) => scope === id || (scope.endsWith('/') && id.startsWith(scope))).flatMap(([, inputs]) => inputs),
-        excludedFiles,
-      );
+    const dependencyResults = await Promise.allSettled(files.map(async (id, index) => {
+      const discoverInputs = async () => {
+        const started = performance.now();
+        const declared = await config.testInputs(id);
+        config.diagnostics?.file(config.suite, id, 'dependency-discovery', {
+          seconds: (performance.now() - started) / 1000, inputCount: declared?.length,
+        });
+        return declared;
+      };
+      const declaredInputs = typeof config.testInputs === 'function'
+        ? await (config.diagnostics
+          ? config.diagnostics.span(config.suite, 'per-file-dependency-discovery', discoverInputs, { file: id })
+          : discoverInputs())
+        : Object.entries(config.testInputs ?? {}).filter(([scope]) => scope === id || (scope.endsWith('/') && id.startsWith(scope))).flatMap(([, inputs]) => inputs);
+      defineConfig({ testInputs: { [id]: declaredInputs } });
+      const inputs = await selectPaths(declaredInputs, excludedFiles);
       if (config.testFixtureInputs) {
         const declared = await config.testFixtureInputs(id);
         if (!Array.isArray(declared)) throw new TypeError('testFixtureInputs must return an array of literal paths');
@@ -189,6 +201,9 @@ export function createSnapshot(config, extraIdentity, context = createSnapshotCo
       }
       return [...new Set(inputs)].sort();
     }));
+    const failedDependency = dependencyResults.find(result => result.status === 'rejected');
+    if (failedDependency) throw failedDependency.reason;
+    const dependencies = dependencyResults.map(result => result.value);
     const paths = [...new Set([...roots, ...files.map(id => resolve(config.root, id)), ...dependencies.flat()])];
     const identities = await context.identify(paths, config, excludedFiles);
     const values = new Map(paths.map((file, index) => [file, identities[index]]));

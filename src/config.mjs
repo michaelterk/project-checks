@@ -5,7 +5,7 @@ import { command, integer, keys, text } from './util.mjs';
 import { selectConcurrency } from './resources.mjs';
 import defaultConfig from '../project-checks.config.json' with { type: 'json' };
 
-const options = ['root', 'testDirectory', 'pattern', 'files', 'command', 'inputs', 'testInputs', 'excludeTestsFromInputs', 'ignore', 'workers', 'resources', 'cache', 'cacheDirectory', 'cacheIdentity', 'suite', 'env', 'ignoreEnv', 'fingerprint', 'testFixtureInputs', 'signal', 'logger', 'stdio', 'retryTimeouts', 'retryTimeoutMs', 'timeoutMs'];
+const options = ['root', 'testDirectory', 'pattern', 'files', 'command', 'inputs', 'testInputs', 'excludeTestsFromInputs', 'ignore', 'workers', 'resources', 'cache', 'cacheDirectory', 'cacheIdentity', 'suite', 'env', 'ignoreEnv', 'fingerprint', 'testFixtureInputs', 'signal', 'logger', 'stdio', 'retryTimeouts', 'retryTimeoutMs', 'timeoutMs', 'admission', 'snapshotContext', 'diagnostics', 'durationHints', 'initialDurations'];
 export const defaultIgnore = ['**/.git', '**/.git/**', '**/.test-cache', '**/.test-cache/**', '**/__pycache__', '**/__pycache__/**'];
 
 function patterns(value, label, allowEmpty = false) {
@@ -32,7 +32,7 @@ export function defineConfig(config) {
   }
   if (config.excludeTestsFromInputs !== undefined && typeof config.excludeTestsFromInputs !== 'boolean') throw new TypeError('excludeTestsFromInputs must be a boolean');
   for (const key of ['inputs', 'ignore']) if (config[key] !== undefined) patterns(config[key], key, true);
-  if (config.testInputs !== undefined) {
+  if (config.testInputs !== undefined && typeof config.testInputs !== 'function') {
     keys(config.testInputs, Object.keys(config.testInputs), 'testInputs');
     for (const [id, inputs] of Object.entries(config.testInputs)) {
       testId(id.endsWith('/') ? id.slice(0, -1) : id);
@@ -63,6 +63,17 @@ export function defineConfig(config) {
   if (config.signal !== undefined && !(config.signal instanceof AbortSignal)) throw new TypeError('signal must be an AbortSignal');
   if (config.logger !== undefined && config.logger !== false && (typeof config.logger?.log !== 'function' || typeof config.logger?.error !== 'function')) throw new TypeError('logger must provide log and error methods, or be false');
   if (config.stdio !== undefined && !['inherit', 'ignore'].includes(config.stdio)) throw new TypeError('stdio must be inherit or ignore');
+  if (config.durationHints !== undefined && typeof config.durationHints !== 'boolean') throw new TypeError('durationHints must be a boolean');
+  if (config.initialDurations !== undefined) {
+    keys(config.initialDurations, Object.keys(config.initialDurations), 'initialDurations');
+    for (const [id, seconds] of Object.entries(config.initialDurations)) {
+      testId(id);
+      if (!Number.isFinite(seconds) || seconds <= 0) throw new TypeError('initialDurations must contain positive finite seconds');
+    }
+  }
+  for (const [name, methods] of [['admission', ['acquire', 'release']], ['snapshotContext', ['run', 'identify']], ['diagnostics', ['event', 'files', 'file', 'span']]]) {
+    if (config[name] !== undefined && !methods.every(method => typeof config[name]?.[method] === 'function')) throw new TypeError(`${name} has invalid methods`);
+  }
   return config;
 }
 

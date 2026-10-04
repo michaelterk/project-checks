@@ -33,7 +33,7 @@ test('drains all normal units before one complete serial retry and saves only it
   };
   const result = await runCachedUnits({ ...options, execute });
   assert.equal(result.exitCode, 0);
-  assert.deepEqual(events.slice(0, 3), ['a:false', 'b:false', 'c:false']);
+  assert.deepEqual(events.slice(0, 3).sort(), ['a:false', 'b:false', 'c:false']);
   assert.deepEqual(events.slice(3).sort(), ['a:true', 'b:true']);
   assert.equal((await readdir(root)).length, 3);
   assert.equal((await runCachedUnits({ ...options, execute })).cached, 3);

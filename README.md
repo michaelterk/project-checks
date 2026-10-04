@@ -23,7 +23,7 @@ and install that archive in another project:
 npm pack
 
 # In your project (adjust the path)
-npm install --save-dev /path/to/project-checks/project-checks-0.1.4.tgz
+npm install --save-dev /path/to/project-checks/project-checks-0.1.8.tgz
 ```
 
 After a maintainer publishes it under this name, installation will be
@@ -236,6 +236,11 @@ excluded from a broad SDK input can still be tracked for its actual consumers.
 Fixture directories inside or resolving into `cacheDirectory` are rejected.
 Load the JSON config and add this fixture callback before calling `runTests`.
 The existing common `fingerprint` API remains available for compatibility.
+For import discovery, `testInputs` also accepts a sync/async `(id) => string[]`
+callback. It runs on every snapshot, including focused runs, and returns
+root-relative dependency paths/globs. Ordinary exclusions apply to these inputs;
+`testFixtureInputs` remains the API for literal external fixtures.
+
 Passing-test caching assumes deterministic tests against the selected inputs.
 `cache: false` and `--no-cache` execute all tests without reading or writing evidence.
 They still check that inputs stay unchanged during execution.
@@ -258,7 +263,7 @@ inside Node's own test runner.
 | `files` | All discovered files | Selected root-relative IDs from the full configured inventory |
 | `command` | Current Node, `--test --test-concurrency=1 {file}` | Executable and argument array |
 | `inputs` | `['.']` | Shared input paths/globs relative to root |
-| `testInputs` | `{}` | Additive dependency arrays by exact test ID or folder prefix ending in `/` |
+| `testInputs` | `{}` | Dependency mapping or sync/async callback returning relative paths/globs |
 | `excludeTestsFromInputs` | `false` | Omit runnable tests from dependency folders/globs; own and explicit file inputs remain |
 | `ignore` | `.git`, `.test-cache`, `__pycache__` trees | Replaces default root-relative exclusions |
 | `workers` | Automatically tuned CPU/RAM-derived count | Positive integer worker cap |
@@ -274,6 +279,11 @@ inside Node's own test runner.
 | `ignoreEnv` | `[]` | Additional environment names excluded from evidence |
 | `fingerprint` | None | Sync/async callback returning an extra identity string |
 | `testFixtureInputs` | None | Programmatic sync/async callback `(id) => string[]` declaring literal fixture input paths |
+| `admission` | None | Caller-owned worker pool shared across `runTests` calls |
+| `snapshotContext` | None | Caller-owned hashing queue shared across snapshots/suites |
+| `diagnostics` | None | Invocation observer returned by `createDiagnostics` |
+| `durationHints` | `false` | Learn and reuse source-bound longest-first timings |
+| `initialDurations` | `{}` | Initial positive timing estimates by test ID, in seconds |
 | `signal` | None | AbortSignal for cancellation |
 | `logger` | `console` | Object with `log`/`error`, or `false` |
 | `stdio` | `inherit` | Child output: `inherit` or `ignore` |
@@ -321,6 +331,23 @@ missing CPU measurements retain the conservative startup count. No process-tree 
 calibration runs or saved tuning profiles are used. Each invocation learns anew.
 Cached passes bypass admission. A short summary reports peak fresh workers,
 sampled CPU, minimum available RAM and the final effective CPU weight.
+
+`runTests` can share one `Admission` and `createSnapshotContext({ signal })`
+across concurrent suites. Close those caller-owned resources after all suite
+promises settle. Each file-snapshot handle drains its own calls on `close()` and
+rejects subsequent snapshots without closing a shared context.
+
+`createDiagnostics({ logger })` starts invocation-scoped resource sampling and
+emits `TEST_DIAGNOSTIC` JSON records. Use `suiteStart`/`suiteEnd` for setup and
+suite transitions, `span` for application stages, and `observeAdmission` for the
+shared pool. Call `close(exitCode)` after cleanup. Observation does not drive
+scheduler ticks or patch its methods.
+
+With `durationHints: true`, fresh passes record source-bound durations separately
+from passing evidence in `durations-<encoded-suite>.json`. Stable longest-first
+ordering retains discovery order for unknown/equal durations. Cache hits retain
+previous timings; input-changing or cancelled runs save no new hints. Disable
+hints for runs whose execution mode should not reuse or replace those timings.
 
 ## API results and adapters
 

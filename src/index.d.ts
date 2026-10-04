@@ -45,7 +45,7 @@ export interface TestConfig {
   /** Shared input paths/globs, relative to root. Default: every project file. */
   inputs?: string[];
   /** Additive dependencies by root-relative test ID or folder prefix ending in '/'. */
-  testInputs?: Record<string, string[]>;
+  testInputs?: Record<string, string[]> | ((id: string) => string[] | Promise<string[]>);
   /** Exclude runnable tests from dependency folders/globs, keeping each own test identity. */
   excludeTestsFromInputs?: boolean;
   /** Exclusions relative to root. Replaces default .git/.test-cache/__pycache__ exclusions. */
@@ -74,6 +74,13 @@ export interface TestConfig {
   signal?: AbortSignal;
   logger?: Logger | false;
   stdio?: 'inherit' | 'ignore';
+  /** Reuse invocation-owned resources; caller closes after every suite settles. */
+  admission?: Admission;
+  snapshotContext?: SnapshotContext;
+  diagnostics?: Diagnostics;
+  /** Learn source-bound longest-first hints separately from passing evidence. Default: false. */
+  durationHints?: boolean;
+  initialDurations?: Record<string, number>;
 }
 
 export interface UnitResult {
@@ -134,6 +141,7 @@ export class Admission {
   release(): void;
   close(): void;
   report(logger: Logger | null, suite: string): void;
+  inspect(): Record<string, unknown>;
 }
 
 export interface CachedUnitsOptions<T extends TestUnit = TestUnit> {
@@ -159,6 +167,7 @@ export interface CachedUnitsOptions<T extends TestUnit = TestUnit> {
   cache?: boolean;
   signal?: AbortSignal;
   logger?: Logger | null;
+  diagnostics?: Diagnostics;
 }
 
 export interface CommandOptions {
@@ -194,3 +203,20 @@ export function selectConcurrency(policy?: ResourcePolicy, resources?: HostResou
 
 /** Linux user-systemd scope covering this command and all descendant processes. */
 export function runWithCpuQuota(command: string[], options?: { resources?: ResourcePolicy; cwd?: string; env?: Record<string, string | undefined>; signal?: AbortSignal; stdio?: 'inherit' | 'ignore' }): Promise<number>;
+
+/** Opaque hashing queue and content memoization shared by file snapshots. */
+export interface SnapshotContext {
+  close(): Promise<void>;
+}
+export interface Diagnostics {
+  event(event: string, fields?: Record<string, unknown>): void;
+  suiteStart(suite: string, total?: number): void;
+  suiteEnd(suite: string): void;
+  files(suite: string, total: number): void;
+  file(suite: string, file: string, event: string, fields?: Record<string, unknown>): void;
+  span<T>(suite: string | null, stage: string, operation: () => T | Promise<T>, fields?: Record<string, unknown>): Promise<T>;
+  observeAdmission(admission: Admission): void;
+  close(exitCode: number): void;
+}
+export function createSnapshotContext(options?: { signal?: AbortSignal }): SnapshotContext;
+export function createDiagnostics(options?: { logger?: Logger | false }): Diagnostics;

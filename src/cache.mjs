@@ -18,7 +18,7 @@ export async function runCachedUnits(options) {
   return withProcessSignal(options.signal, signal => runUnits({ ...options, signal }));
 }
 
-async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, workers, resources, execute, environment = process.env, ignoreEnv = [], cache = true, signal, logger = console, admission: sharedAdmission, retryTimeouts = false, restoreEvidence, saveEvidence }) {
+async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, workers, resources, execute, environment = process.env, ignoreEnv = [], cache = true, signal, logger = console, admission: sharedAdmission, retryTimeouts = false, restoreEvidence, saveEvidence, diagnostics }) {
   if (workers !== undefined) integer(workers, 'workers');
   if (typeof retryTimeouts !== 'boolean') throw new TypeError('retryTimeouts must be a boolean');
   text(suite, 'suite');
@@ -86,6 +86,7 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
     const hit = cached?.key === expected && cached?.passed === true;
     if (hit && !restoreEvidence) {
       logger?.log(`==> Reusing successful ${suite}/${unit.id}`);
+      diagnostics?.file(suite, unit.id, "cache-hit");
       results[index] = { id: unit.id, exitCode: 0, cached: true };
       return;
     }
@@ -118,7 +119,8 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
         }
         if (restored) {
           logger?.log(`==> Reusing successful ${suite}/${unit.id}`);
-          results[index] = { id: unit.id, exitCode: 0, cached: true };
+          diagnostics?.file(suite, unit.id, "cache-hit");
+      results[index] = { id: unit.id, exitCode: 0, cached: true };
           return;
         }
         await rm(filename, { force: true });
