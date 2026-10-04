@@ -1,3 +1,4 @@
+import { withProcessSignal } from './cancellation.mjs';
 import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { isAbsolute, join, resolve } from 'node:path';
@@ -13,7 +14,11 @@ export function environmentIdentity(env = process.env, ignoreEnv = []) {
   return digest(JSON.stringify(Object.entries(env).filter(([name, value]) => value !== undefined && !ignored.has(name) && !ignoredEnvironment.test(name)).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)));
 }
 
-export async function runCachedUnits({ cacheDirectory, suite = 'tests', units, snapshot, workers, resources, execute, environment = process.env, ignoreEnv = [], cache = true, signal, logger = console, admission: sharedAdmission, retryTimeouts = false, restoreEvidence, saveEvidence }) {
+export async function runCachedUnits(options) {
+  return withProcessSignal(options.signal, signal => runUnits({ ...options, signal }));
+}
+
+async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, workers, resources, execute, environment = process.env, ignoreEnv = [], cache = true, signal, logger = console, admission: sharedAdmission, retryTimeouts = false, restoreEvidence, saveEvidence }) {
   if (workers !== undefined) integer(workers, 'workers');
   if (typeof retryTimeouts !== 'boolean') throw new TypeError('retryTimeouts must be a boolean');
   text(suite, 'suite');
@@ -184,6 +189,7 @@ export async function runCachedUnits({ cacheDirectory, suite = 'tests', units, s
     logger?.error(`Inputs changed during ${suite}; suite has not passed.`);
     inputsChanged = true;
   }
+  signal?.throwIfAborted();
   if (!sharedAdmission) admission?.report(logger, suite);
   return {
     exitCode: inputsChanged ? 1 : results.find(result => result.exitCode !== 0)?.exitCode ?? 0,

@@ -165,6 +165,10 @@ export interface CommandOptions {
   timeoutMs?: number;
   /** Attach a structured Node test reporter; command must directly invoke node --test. */
   nodeTest?: boolean;
+  /** Direct Playwright test CLI: structured outcomes, one worker, no native retries.
+   * Overrides configured reporters with line unless CLI --reporter is supplied.
+   * Mutually exclusive with nodeTest. Requires Linux or macOS. */
+  playwrightTest?: boolean;
   /** Override the Node default test timeout; only used with nodeTest. */
   testTimeoutMs?: number;
   onTimeout?(outcome: { ordinaryFailure: boolean }): void;

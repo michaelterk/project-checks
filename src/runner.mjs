@@ -1,3 +1,4 @@
+import { withProcessSignal } from './cancellation.mjs';
 import { readFile, readdir, realpath } from 'node:fs/promises';
 import { basename, join, resolve } from 'node:path';
 import { defineConfig, defaultIgnore } from './config.mjs';
@@ -40,6 +41,10 @@ export async function createFileSnapshot(options = {}) {
 }
 
 export async function runTests(options = {}) {
+  return withProcessSignal(options.signal, signal => runTestsWithSignal({ ...options, signal }));
+}
+
+async function runTestsWithSignal(options) {
   const config = await normalizeConfig(options);
   const { root } = config;
   const files = selectTests(config, await discoverTests(config));

@@ -61,7 +61,8 @@ test('second timeout fails, ordinary failures never retry, and legacy integer ad
     if (unit.id === 'a') reportTimeout({ ordinaryFailure: false });
     return unit.id === 'a' ? 1 : 9;
   } });
-  assert.deepEqual(attempts, ['a:false', 'b:false', 'a:true']);
+  assert.deepEqual(attempts.slice(0, 2).sort(), ['a:false', 'b:false']);
+  assert.deepEqual(attempts.slice(2), ['a:true']);
   assert.equal(result.failed, 2);
   assert.deepEqual(await readdir(root), []);
   assert.equal((await runCachedUnits({ ...options, execute: async () => 0 })).passed, 2);

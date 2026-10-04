@@ -337,9 +337,17 @@ sampled CPU, minimum available RAM and the final effective CPU weight.
 Check `exitCode` for suite success; individual zero-exit commands can still have
 `inputsChanged: true`. Nonzero commands do not stop the queue, and all active
 commands drain before the promise resolves. Runtime errors reject after active
-work drains. Cancellation stops admission and terminates direct child processes,
-with a forced kill after two seconds if necessary. Commands that spawn background
-processes are responsible for cleaning up those descendants.
+work drains. `runTests`, `runCachedUnits`, and `runCommand` share one temporary
+SIGINT/SIGTERM listener pair while calls without an explicit `signal` are active.
+Interrupts cancel those calls and stop admission; listeners are removed after
+all default calls drain. An explicit signal remains caller-owned, including
+forwarding it to commands started by custom callbacks.
+
+On Linux and macOS, command cleanup owns an isolated process group. Generic
+shell/npm commands get eight seconds for nested package owners to drain detached
+workers, even if the shell exits first. Forced generic cleanup fails closed;
+it cannot certify the nested workers or start a retry. Other platforms retain
+direct-child termination for ordinary commands.
 
 When `retryTimeouts` is enabled, verified Node timeouts and package wall deadlines
 queue one complete-file retry after all normal files finish. Retries run serially;
@@ -362,13 +370,12 @@ hook-timeout metadata; unverifiable
 hook errors remain failures without retry. Set `timeoutMs` to bound hung commands
 in any framework; it does not classify ordinary framework failures.
 
-Verified Node execution and wall deadlines require Linux or macOS. Each attempt
-owns a process group; termination, forced cleanup and quiescence checks cover its
-inherited descendants even after the launcher exits. Cleanup completes before
-admission is released or a retry begins. Unsupported platforms and unconfirmed
+Verified Node execution, Playwright execution, and wall deadlines require Linux
+or macOS. Node attempts retain their two-second termination grace. Termination,
+forced cleanup and quiescence checks cover inherited descendants even after the
+launcher exits. Cleanup completes before admission is released or a retry begins. Unsupported platforms and unconfirmed
 cleanup fail closed. Commands remain responsible for processes they deliberately
-detach into other groups. Runs without these options keep the direct-child
-cleanup contract above.
+detach into other groups outside the package or native Playwright lifecycle.
 
 For integrations that supply their own discovery and fingerprints, use
 `runCachedUnits`:
@@ -466,15 +473,29 @@ Adapters may opt into `retryTimeouts` and accept `execute(unit, context)` where
 `context.reportTimeout({ ordinaryFailure: boolean })` certifies a verified timeout
 while preserving any observed ordinary failure. `execute` still returns an integer.
 `runCommand` also retains its integer result: use `timeoutMs`, `nodeTest: true`
-for direct Node test commands, and `onTimeout: context.reportTimeout` to connect
-its structured timeout classification. Include adapter execution policy in the
-unit identity or snapshot. `Admission.acquire({ exclusive: true, signal })` waits
+for direct Node test commands, or `playwrightTest: true` for a direct Playwright
+CLI command, and `onTimeout: context.reportTimeout` to connect structured timeout
+classification. Playwright attempts force one native worker and zero native
+retries; the package owns concurrency and complete-file retries. The adapter
+sets CLI reporters, overriding the Playwright configuration's `reporter` setting:
+it uses `line` unless the command supplies `--reporter`. Pass artifact or custom
+reporters explicitly through that CLI option; the package appends its structured
+reporter to the same list. Native reporter events preserve mixed teardown failures.
+Cancellation and wall deadlines signal the Playwright launcher for native teardown of its detached servers and browsers;
+a second signal requests forced teardown after two seconds. If it still cannot
+exit after another two seconds, the package fails closed without retry. Include
+adapter execution policy in the unit identity or snapshot. `Admission.acquire({ exclusive: true, signal })` waits
 for an exclusive slot; pair each successful acquire with `release()`.
 
 The other exports are `defineConfig`, `loadConfig`, `runCommand`,
 `environmentIdentity`, `detectResources` and `selectConcurrency`.
 
 ## Development
+
+Native Playwright lifecycle regressions use an existing installation without
+browser downloads: set `PROJECT_CHECKS_PLAYWRIGHT_ROOT` to its `playwright` package
+directory when running `npm test`. These optional regressions start loopback
+servers and need local-network permission.
 
 ```sh
 npm test
