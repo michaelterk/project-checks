@@ -3,7 +3,7 @@ import { join, resolve } from 'node:path';
 import { defineConfig, defaultIgnore } from './config.mjs';
 import { runCachedUnits } from './cache.mjs';
 import { commandEnvironment, runCommand } from './command.mjs';
-import { createSnapshot, discoverTests } from './inputs.mjs';
+import { createSnapshot, createSnapshotContext, discoverTests } from './inputs.mjs';
 import { digest, inside } from './util.mjs';
 
 async function implementationIdentity() {
@@ -29,11 +29,12 @@ export async function runTests(options = {}) {
   const logger = options.logger === false ? null : options.logger ?? console;
   const template = options.command ?? [process.execPath, '--test', '--test-concurrency=1', '{file}'];
   const units = files.map(id => ({ id, command: template.map(argument => argument.replaceAll('{file}', id)) }));
-  return runCachedUnits({
+  const context = createSnapshotContext({ signal: options.signal });
+  try { return await runCachedUnits({
     cacheDirectory: config.cacheDirectory, suite: options.suite ?? 'tests', units, workers: options.workers, resources: options.resources ?? {},
     cache: options.cache ?? true, signal: options.signal, logger,
     environment: env, ignoreEnv: options.ignoreEnv,
-    snapshot: createSnapshot(config, implementationIdentity),
+    snapshot: createSnapshot(config, implementationIdentity, context),
     execute: unit => runCommand(unit.command, { cwd: root, env, signal: options.signal, stdio: options.stdio ?? 'inherit', logger }),
-  });
+  }); } finally { await context.close(); }
 }

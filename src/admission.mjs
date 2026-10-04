@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { cpus } from 'node:os';
 import { detectResources, selectConcurrency } from './resources.mjs';
+import { integer } from './util.mjs';
 
 function pressureTime(resource) {
   try { return Number(readFileSync(`/proc/pressure/${resource}`, 'utf8').match(/^some .*total=(\d+)/m)?.[1]); }
@@ -38,7 +39,7 @@ export function resourceSampler() {
 // One run-local CPU weight. RAM reservations stay conservative; sampled free RAM
 // cannot establish smaller per-worker peaks or guarantee protection from spikes.
 export class Admission {
-  constructor(policy, units, { host = detectResources(), sample = resourceSampler(), signal } = {}) {
+  constructor(policy, units, { host = detectResources(), sample = resourceSampler(), signal, workers } = {}) {
     this.policy = policy;
     this.sample = sample;
     this.reading = sample();
@@ -48,7 +49,8 @@ export class Admission {
     this.memory = policy.memoryMiBPerWorker ?? 256;
     this.reserve = policy.reserveMemoryMiB ?? 0;
     this.capacity = Math.max(1, Math.min(units, Math.floor(this.selected.memoryBudgetMiB / this.memory), policy.maxWorkers ?? Infinity));
-    const initial = Math.max(1, Math.min(this.capacity, Math.floor(this.selected.cpuBudget / 2),
+    this.fixedWorkers = workers === undefined ? undefined : Math.min(this.capacity, integer(workers, 'workers'));
+    const initial = this.fixedWorkers ?? Math.max(1, Math.min(this.capacity, Math.floor(this.selected.cpuBudget / 2),
       Number.isFinite(available) ? Math.floor((available - this.reserve) / this.memory) : Infinity));
     this.weight = this.selected.cpuBudget / (initial + 1e-6);
     this.active = 0;
@@ -67,7 +69,7 @@ export class Admission {
   wake() { for (const wake of this.waiters) wake(); }
 
   get limit() {
-    return Math.min(this.capacity, selectConcurrency({ ...this.policy, cpusPerWorker: this.weight }, this.host).workers);
+    return this.fixedWorkers ?? Math.min(this.capacity, selectConcurrency({ ...this.policy, cpusPerWorker: this.weight }, this.host).workers);
   }
 
   tick() {
@@ -77,6 +79,7 @@ export class Admission {
     if (this.active && Number.isFinite(busyCpus)) {
       this.cpuSum += busyCpus;
       this.samples++;
+      if (this.fixedWorkers !== undefined) { this.spare = this.pressured = 0; this.wake(); return; }
       const budget = this.selected.cpuBudget;
       const memoryFits = !Number.isFinite(availableMemoryMiB) || availableMemoryMiB >= this.reserve + this.memory;
       const spare = this.active >= this.limit && busyCpus < budget * 0.85 && !(pressure > 0.05) && !(memoryPressure > 0.05) && memoryFits;

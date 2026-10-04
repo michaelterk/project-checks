@@ -12,7 +12,7 @@ export function environmentIdentity(env = process.env, ignoreEnv = []) {
   return digest(JSON.stringify(Object.entries(env).filter(([name, value]) => value !== undefined && !ignored.has(name) && !ignoredEnvironment.test(name)).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)));
 }
 
-export async function runCachedUnits({ cacheDirectory, suite = 'tests', units, snapshot, workers, resources, execute, environment = process.env, ignoreEnv = [], cache = true, signal, logger = console }) {
+export async function runCachedUnits({ cacheDirectory, suite = 'tests', units, snapshot, workers, resources, execute, environment = process.env, ignoreEnv = [], cache = true, signal, logger = console, admission: sharedAdmission }) {
   if (workers !== undefined) integer(workers, 'workers');
   text(suite, 'suite');
   if (cache) text(cacheDirectory, 'cacheDirectory');
@@ -39,8 +39,8 @@ export async function runCachedUnits({ cacheDirectory, suite = 'tests', units, s
   const key = unit => digest(JSON.stringify([base, suite, unit.id, before.units[unit.id], unit.identity ?? unit.command]));
   if (cache) await mkdir(cacheDirectory, { recursive: true });
   const results = new Array(units.length);
-  const admission = workers === undefined && resources !== undefined ? new Admission(resources, units.length, { signal }) : null;
-  workers ??= admission?.capacity ?? 1;
+  const admission = sharedAdmission ?? (workers === undefined && resources !== undefined ? new Admission(resources, units.length, { signal }) : null);
+  workers = sharedAdmission ? sharedAdmission.capacity : workers ?? admission?.capacity ?? 1;
   let cursor = 0;
   let fatal;
   let stopped = false;
@@ -91,18 +91,18 @@ export async function runCachedUnits({ cacheDirectory, suite = 'tests', units, s
           } finally { await rm(temporary, { force: true }); }
         }
       }
-    } catch (error) { if (!stopped) fatal = error; stopped = true; admission?.close(); }
+    } catch (error) { if (!stopped) fatal = error; stopped = true; if (!sharedAdmission) admission?.close(); }
   }
   const concurrency = Math.min(workers, units.length);
   try { await Promise.all(Array.from({ length: concurrency }, worker)); }
-  finally { admission?.close(); }
+  finally { if (!sharedAdmission) admission?.close(); }
   if (stopped) throw fatal;
   signal?.throwIfAborted();
   if (!isDeepStrictEqual(before, await takeSnapshot())) {
     logger?.error(`Inputs changed during ${suite}; suite has not passed.`);
     inputsChanged = true;
   }
-  admission?.report(logger, suite);
+  if (!sharedAdmission) admission?.report(logger, suite);
   return {
     exitCode: inputsChanged ? 1 : results.find(result => result.exitCode !== 0)?.exitCode ?? 0,
     total: results.length,

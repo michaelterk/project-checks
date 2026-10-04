@@ -156,3 +156,18 @@ test('missing CPU telemetry retains half-CPU startup and sampling reports live R
   const sample = resourceSampler()();
   assert.ok(sample.availableMemoryMiB >= 0);
 });
+
+
+test('fixed shared overrides remain bounded by capacity and do not retune', async t => {
+  const admission = new Admission({ reserveMemoryMiB: 512, memoryMiBPerWorker: 512 }, 20, {
+    host: { cpus: 8, memoryMiB: 2048 }, workers: 9,
+    sample: () => ({ busyCpus: 0, pressure: 0, memoryPressure: 0, availableMemoryMiB: 2048 }),
+  });
+  t.after(() => admission.close());
+  assert.equal(admission.limit, 3);
+  for (let i = 0; i < 3; i++) await admission.acquire();
+  for (let i = 0; i < 6; i++) admission.tick();
+  assert.equal(admission.limit, 3);
+  assert.equal(admission.samples, 6);
+  assert.ok(admission.capacity * admission.memory <= admission.selected.memoryBudgetMiB);
+});

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile, readdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import test from 'node:test';
-import { environmentIdentity, runCachedUnits } from '../src/index.mjs';
+import { Admission, environmentIdentity, runCachedUnits } from '../src/index.mjs';
 import { temporary } from './helpers.mjs';
 
 async function fixture(t) {
@@ -165,4 +165,35 @@ test('resource admission preserves cache evidence, input fencing and fixed worke
   f.options.execute = async () => { f.inputs.common = 'mutated'; return 0; };
   assert.equal((await runCachedUnits(f.options)).inputsChanged, true);
   assert.deepEqual(await readdir(f.directory), []);
+});
+
+
+test('shared admission globally bounds suites and survives one suite failing', async t => {
+  const directory = await temporary(t);
+  const pool = new Admission({ memoryMiBPerWorker: 512, reserveMemoryMiB: 512 }, 6, {
+    workers: 2, host: { cpus: 8, memoryMiB: 8192 },
+    sample: () => ({ busyCpus: 0, pressure: 0, memoryPressure: 0, availableMemoryMiB: 8192 }),
+  });
+  t.after(() => pool.close());
+  let release;
+  const held = new Promise(resolve => { release = resolve; });
+  const options = suite => ({
+    suite, admission: pool, cacheDirectory: directory, cache: false, logger: null,
+    units: ['a', 'b', 'c'].map(id => ({ id, identity: id })),
+    snapshot: () => ({ common: suite, units: { a: 'a', b: 'b', c: 'c' } }),
+  });
+  const bad = runCachedUnits({ ...options('bad'), execute: async unit => {
+    if (unit.id === 'a') throw new Error('fixture fatal');
+    if (unit.id === 'b') await held;
+    return 0;
+  } });
+  const good = runCachedUnits({ ...options('good'), execute: async () => { release(); return 0; } });
+  const [failed, healthy] = await Promise.allSettled([bad, good]);
+  assert.equal(failed.status, 'rejected');
+  assert.match(failed.reason.message, /fixture fatal/);
+  assert.equal(healthy.status, 'fulfilled');
+  assert.equal(healthy.value.passed, 3);
+  assert.equal(pool.closed, undefined);
+  assert.equal(pool.active, 0);
+  assert.ok(pool.peak <= 2);
 });

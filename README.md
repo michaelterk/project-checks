@@ -223,6 +223,14 @@ The resource policy uses 100% of detected available CPUs, zero reserves,
 memory budgets each constrain concurrency. `divisor` shares the original host
 budget for nested orchestration; the caller supplies that share. Explicit
 `workers` retains fixed concurrency and overrides automatic admission.
+Programmatic callers can pass one `Admission` instance to several
+`runCachedUnits` calls. It bounds their combined active commands and retains
+one learned CPU weight; each suite keeps its own snapshot and passing evidence.
+The caller closes that pool after all calls settle. A fixed `workers` option on
+`Admission` disables tuning and stays within its RAM, unit and maximum-worker caps.
+Input fingerprinting bounds filesystem work at eight operations within one
+invocation, with fresh metadata on every snapshot. Content digests and path-only
+exclusion decisions are reused; listings and snapshots are not.
 
 Without explicit `workers`, fresh commands start at half the available CPU budget
 (rounded down, minimum one), clamped by live free RAM, the reserve and hard caps.

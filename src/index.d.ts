@@ -86,6 +86,19 @@ export interface InputSnapshot {
   units: Record<string, string>;
 }
 
+/** One invocation-owned pool; close only after every sharing suite has settled. */
+export class Admission {
+  constructor(policy: ResourcePolicy, units: number, options?: { host?: HostResources; signal?: AbortSignal; workers?: number });
+  readonly capacity: number;
+  readonly limit: number;
+  active: number;
+  peak: number;
+  acquire(): Promise<void>;
+  release(): void;
+  close(): void;
+  report(logger: Logger | null, suite: string): void;
+}
+
 export interface CachedUnitsOptions<T extends TestUnit = TestUnit> {
   cacheDirectory?: string;
   suite?: string;
@@ -95,6 +108,8 @@ export interface CachedUnitsOptions<T extends TestUnit = TestUnit> {
   workers?: number;
   /** Automatically adjusts CPU weight during fresh work when workers is omitted. */
   resources?: ResourcePolicy;
+  /** Reuse one pool across suites; the caller owns its final close. */
+  admission?: Admission;
   environment?: Record<string, string | undefined>;
   ignoreEnv?: string[];
   cache?: boolean;
