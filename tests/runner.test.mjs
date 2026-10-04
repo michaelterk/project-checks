@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFile, readdir, rm, symlink } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rm, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import test from 'node:test';
 import { defineConfig, loadConfig, runCommand, runTests } from '../src/index.mjs';
@@ -83,6 +83,55 @@ test('environment overrides and custom external fingerprints bind cache evidence
   assert.equal((await runTests(f.options)).cached, 0);
 });
 
+test('declared external fixture paths invalidate only consumers and share full/focused evidence', async t => {
+  const f = await fixture(t);
+  const configFile = await put(f.root, 'checks.json', JSON.stringify({
+    inputs: [], testInputs: { 'test/': ['src', 'node_modules/playwright-core'] },
+    ignore: ['node_modules/playwright-core/.local-browsers', 'node_modules/playwright-core/.local-browsers/**'],
+  }));
+  const external = await temporary(t);
+  const chromium = await put(f.root, 'node_modules/playwright-core/.local-browsers/chromium/binary', 'chromium-v1');
+  const webkit = await put(external, 'webkit/binary', 'webkit-v1');
+  const runtimes = { 'test/a.test.mjs': ['node_modules/playwright-core/.local-browsers/chromium'], 'test/nested/b.test.mjs': [webkit] };
+  const calls = [];
+  const options = { ...f.options, ...await loadConfig(configFile), testFixtureInputs: async id => { calls.push(id); return runtimes[id]; } };
+  assert.equal((await runTests(options)).passed, 2);
+  const focused = { ...options, files: ['test/a.test.mjs'] };
+  calls.length = 0;
+  assert.equal((await runTests(focused)).cached, 1);
+  assert.ok(calls.length > 0 && calls.every(id => id === 'test/a.test.mjs'));
+  await put(external, 'webkit/binary', 'webkit-v2');
+  assert.equal((await runTests(focused)).cached, 1);
+  assert.deepEqual((await runTests(options)).results.map(result => result.cached), [true, false]);
+  await put(f.root, 'node_modules/playwright-core/.local-browsers/chromium/binary', 'chromium-v2');
+  assert.equal((await runTests(focused)).passed, 1);
+  assert.equal((await runTests(options)).cached, 2);
+  assert.throws(() => defineConfig({ testFixtureInputs: 'invalid' }), /testFixtureInputs must be a function/);
+  await assert.rejects(runTests({ ...focused, testFixtureInputs: () => undefined }), /testFixtureInputs must return an array/);
+  await assert.rejects(runTests({ ...focused, testFixtureInputs: () => [null] }), /fixture input path/);
+  await rm(chromium);
+  await assert.rejects(runTests({ ...focused, testFixtureInputs: () => [chromium] }), { code: 'ENOENT' });
+});
+
+test('fixture directories inside the cache or resolving there are rejected instead of caching empty trees', async t => {
+  const f = await fixture(t);
+  const cacheDirectory = join(f.root, '.test-cache/project-checks');
+  await put(cacheDirectory, 'runtime/binary', 'first');
+  const runtime = join(cacheDirectory, 'runtime');
+  const alias = join(f.root, 'runtime-alias');
+  await symlink(runtime, alias);
+  for (const path of [runtime, alias]) {
+    const options = { ...f.options, inputs: [], testFixtureInputs: () => [path] };
+    await assert.rejects(runTests(options), /Fixture directory must stay outside cacheDirectory/);
+    await put(cacheDirectory, 'runtime/binary', 'changed');
+    await assert.rejects(runTests(options), /Fixture directory must stay outside cacheDirectory/);
+  }
+  const cacheAlias = join(f.root, 'cache-alias');
+  await symlink(cacheDirectory, cacheAlias);
+  await assert.rejects(runTests({ ...f.options, inputs: [], cacheDirectory: cacheAlias, testFixtureInputs: () => [runtime] }), /Fixture directory must stay outside cacheDirectory/);
+  assert.equal(await readFile(join(f.root, '.test-cache/events'), 'utf8'), '');
+});
+
 test('custom commands receive literal paths with spaces without shell expansion', async t => {
   const root = await temporary(t);
   await put(root, 'checks/a $(echo unsafe).spec', 'input');
@@ -158,4 +207,127 @@ test('command errors return failure and cancellation waits for child exit', asyn
   setTimeout(() => controller.abort(), 50);
   await assert.rejects(running, { name: 'AbortError' });
   await assert.rejects(runCommand([process.execPath], { signal: controller.signal }), { name: 'AbortError' });
+});
+
+test('explicit cacheIdentity shares equivalent checkouts while retaining input and environment invalidation', async t => {
+  const first = await fixture(t);
+  const second = await fixture(t);
+  const cacheDirectory = await temporary(t);
+  const config = { cacheDirectory, cacheIdentity: 'same-project', inputs: ['src', 'test'], workers: 1, logger: false, stdio: 'ignore' };
+  assert.equal((await runTests({ ...config, root: first.root })).passed, 2);
+  assert.equal((await runTests({ ...config, root: second.root })).cached, 2);
+  await put(second.root, 'src/value.mjs', 'export const value = 2;');
+  assert.equal((await runTests({ ...config, root: second.root })).passed, 2);
+  assert.equal((await runTests({ ...config, root: second.root, env: { PROJECT_CHECKS_TEST_MODE: 'changed' } })).cached, 0);
+  assert.equal((await runTests({ ...config, root: first.root, cacheIdentity: 'other-project' })).cached, 0);
+});
+
+test('JSON per-test dependencies invalidate only their consumers, including focused selections', async t => {
+  const root = await temporary(t);
+  await put(root, 'src/a.mjs', 'a-v1');
+  await put(root, 'src/b.mjs', 'b-v1');
+  await put(root, 'shared/helper.mjs', 'shared-v1');
+  for (const name of ['a', 'b']) await put(root, `test/${name}.test.mjs`, "import test from 'node:test'; test('ok', () => {});");
+  const config = {
+    inputs: ['shared'], testInputs: { 'test/a.test.mjs': ['src/a.mjs'], 'test/b.test.mjs': ['src/b.mjs'] },
+    workers: 1, logger: false, stdio: 'ignore',
+  };
+  const file = await put(root, 'checks.json', JSON.stringify(config));
+  const run = async (overrides = {}) => runTests({ ...await loadConfig(file), ...overrides });
+  assert.equal((await run()).passed, 2);
+  await put(root, 'src/a.mjs', 'a-v2');
+  assert.deepEqual((await run()).results.map(result => result.cached), [false, true]);
+  await put(root, 'test/b.test.mjs', "import test from 'node:test'; test('changed', () => {});");
+  assert.deepEqual((await run()).results.map(result => result.cached), [true, false]);
+  config.testInputs['test/b.test.mjs'].push('src/new-b.mjs');
+  await put(root, 'src/new-b.mjs', 'new');
+  await put(root, 'checks.json', JSON.stringify(config));
+  assert.equal((await run({ files: ['test/a.test.mjs'] })).cached, 1);
+  assert.deepEqual((await run()).results.map(result => result.cached), [true, false]);
+  await put(root, 'shared/helper.mjs', 'shared-v2');
+  assert.equal((await run()).passed, 2);
+  config.testInputs['test/a.test.mjs'].push('checks.json');
+  await put(root, 'checks.json', JSON.stringify(config));
+  assert.deepEqual((await run()).results.map(result => result.cached), [false, true]);
+  await put(root, 'checks.json', JSON.stringify(config, null, 2));
+  assert.deepEqual((await run()).results.map(result => result.cached), [false, true]);
+});
+
+test('per-test dependency mapping rejects escaping or noncanonical keys and unsafe paths', () => {
+  for (const testInputs of [
+    { '../a.test.mjs': [] }, { '/a.test.mjs': [] }, { './a.test.mjs': [] }, { 'test//a.test.mjs': [] },
+    { 'test/*.mjs': [] }, { 'a.test.mjs': ['../private'] }, { 'a.test.mjs': ['/private'] }, { 'a.test.mjs': ['!src'] },
+  ]) assert.throws(() => defineConfig({ testInputs }));
+});
+
+test('folder dependencies exclude full runnable inventory, retain helpers and share focused evidence', async t => {
+  const root = await temporary(t);
+  const source = "import test from 'node:test'; test('ok', () => {});";
+  for (const id of ['a', 'b']) await put(root, `test/${id}.test.mjs`, source);
+  await put(root, 'test/helper.mjs', 'helper-v1');
+  await put(root, 'src/common/value', 'common-v1');
+  await put(root, 'src/a/value', 'a-v1');
+  await mkdir(join(root, 'test/new-folder'));
+  const options = {
+    root, inputs: [], excludeTestsFromInputs: true,
+    testInputs: { 'test/': ['test', 'src/common'], 'test/a.test.mjs': ['src/a'] },
+    workers: 1, logger: false, stdio: 'ignore',
+  };
+  assert.equal((await runTests(options)).passed, 2);
+  await put(root, 'test/a.test.mjs', source + '\n// changed own file');
+  assert.equal((await runTests({ ...options, files: ['test/a.test.mjs'] })).passed, 1);
+  assert.equal((await runTests(options)).cached, 2);
+  await put(root, 'src/a/value', 'a-v2');
+  assert.deepEqual((await runTests(options)).results.map(result => result.cached), [false, true]);
+  await put(root, 'test/helper.mjs', 'helper-v2');
+  assert.equal((await runTests(options)).passed, 2);
+  await put(root, 'test/new-folder/c.test.mjs', source);
+  assert.equal((await runTests({ ...options, files: ['test/a.test.mjs'] })).cached, 1);
+  assert.deepEqual((await runTests(options)).results.map(result => result.cached), [true, true, false]);
+  await rm(join(root, 'test/new-folder/c.test.mjs'));
+  assert.equal((await runTests(options)).cached, 2);
+  await rm(join(root, 'test/new-folder'), { recursive: true });
+  assert.equal((await runTests(options)).passed, 2);
+  await put(root, 'src/common/value', 'common-v2');
+  assert.equal((await runTests(options)).passed, 2);
+  await assert.rejects(runTests({ ...options, files: ['test/helper.mjs'] }), /configured test inventory/);
+});
+
+test('empty fixture directory presence remains an input with independent-test exclusion', async t => {
+  const root = await temporary(t);
+  await mkdir(join(root, 'fixtures/empty'), { recursive: true });
+  await put(root, 'test/a.test.mjs', `
+    import test from 'node:test';
+    import assert from 'node:assert/strict';
+    import { existsSync } from 'node:fs';
+    test('fixture exists', () => assert.ok(existsSync('fixtures/empty')));
+  `);
+  const options = { root, inputs: [], testInputs: { 'test/a.test.mjs': ['fixtures'] }, excludeTestsFromInputs: true, workers: 1, logger: false, stdio: 'ignore' };
+  assert.equal((await runTests(options)).passed, 1);
+  assert.equal((await runTests(options)).cached, 1);
+  await rm(join(root, 'fixtures/empty'), { recursive: true });
+  const removedChild = await runTests(options);
+  assert.equal(removedChild.cached, 0);
+  assert.equal(removedChild.failed, 1);
+  await mkdir(join(root, 'fixtures/empty'));
+  assert.equal((await runTests(options)).passed, 1);
+  await rm(join(root, 'fixtures'), { recursive: true });
+  const removedRoot = await runTests(options);
+  assert.equal(removedRoot.cached, 0);
+  assert.equal(removedRoot.failed, 1);
+});
+
+test('shared folders exclude sibling tests while explicit runnable dependencies remain meaningful', async t => {
+  const root = await temporary(t);
+  const source = "import test from 'node:test'; test('ok', () => {});";
+  for (const id of ['a', 'b']) await put(root, `test/${id}.test.mjs`, source);
+  await put(root, 'test/helper.mjs', 'helper');
+  const options = { root, inputs: ['test'], excludeTestsFromInputs: true, workers: 1, logger: false, stdio: 'ignore' };
+  await runTests(options);
+  await put(root, 'test/a.test.mjs', source + '\n// changed');
+  assert.deepEqual((await runTests(options)).results.map(result => result.cached), [false, true]);
+  options.testInputs = { 'test/b.test.mjs': ['test', 'test/a.test.mjs'] };
+  assert.deepEqual((await runTests(options)).results.map(result => result.cached), [true, false]);
+  await put(root, 'test/a.test.mjs', source + '\n// changed imported fixture');
+  assert.equal((await runTests(options)).passed, 2);
 });

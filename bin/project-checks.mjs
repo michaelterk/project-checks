@@ -5,6 +5,7 @@ const help = `Usage: project-checks [run|resources] [options]
 
   --config <file>  Load a .mjs, .js or .json configuration
   --workers <n>    Override resource-based concurrency
+  --file <id>      Select a root-relative test file (repeatable); retain full inventory
   --no-cache       Run every test without reading or writing cached evidence
   --help          Show this help
 
@@ -25,10 +26,11 @@ try {
     const option = args.shift();
     if (option === '--help' || option === '-h') showHelp = true;
     else if (option === '--no-cache') overrides.cache = false;
-    else if (option === '--config' || option === '--workers') {
+    else if (option === '--config' || option === '--workers' || option === '--file') {
       const value = args.shift();
       if (!value || value.startsWith('-')) throw new Error(`Missing value for ${option}`);
       if (option === '--config') filename = value;
+      else if (option === '--file') (overrides.files ??= []).push(value);
       else {
         if (!/^[1-9][0-9]*$/.test(value) || !Number.isSafeInteger(Number(value))) throw new Error('--workers must be a positive integer');
         overrides.workers = Number(value);

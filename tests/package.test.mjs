@@ -65,6 +65,24 @@ test('CLI resolves configuration outside cwd, rejects invalid options, and prese
   assert.match(help.stdout, /Usage:/);
 });
 
+test('CLI file selection retains full inventory and shares passing evidence', async t => {
+  const project = await temporary(t);
+  const source = "import test from 'node:test'; test('ok', () => {});";
+  await put(project, 'test/a.test.mjs', source);
+  await put(project, 'test/b.test.mjs', source);
+  await put(project, 'project-checks.config.json', JSON.stringify({ inputs: ['test'], excludeTestsFromInputs: true, logger: false, stdio: 'ignore', workers: 1 }));
+  const execute = args => spawnSync(process.execPath, [cli, ...args], { cwd: project, encoding: 'utf8' });
+  assert.equal(execute([]).status, 0);
+  await put(project, 'test/b.test.mjs', source + '\n// changed');
+  const focused = execute(['--file', 'test/a.test.mjs']);
+  assert.equal(focused.status, 0, focused.stderr);
+  assert.match(focused.stdout, /1 cached \(1 total\)/);
+  const all = execute(['--file', 'test/a.test.mjs', '--file', 'test/b.test.mjs']);
+  assert.equal(all.status, 0, all.stderr);
+  assert.match(all.stdout, /1 passed, 0 failed, 1 cached \(2 total\)/);
+  assert.equal(execute(['--file', 'test/missing.test.mjs']).status, 2);
+});
+
 test('Node example runs through its project config', async t => {
   const config = await loadConfig(join(root, 'examples/node/project-checks.config.mjs'));
   // Use a temporary cache so repository examples remain untouched by tests.

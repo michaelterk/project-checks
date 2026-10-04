@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { glob, lstat, readdir, readlink, realpath } from 'node:fs/promises';
 import { dirname, join, matchesGlob, relative, resolve } from 'node:path';
-import { digest, inside, slash } from './util.mjs';
+import { digest, inside, slash, text } from './util.mjs';
 
 // One queue bounds leaf work. Visitors enqueue children without awaiting them.
 export function createSnapshotContext({ signal } = {}) {
@@ -67,7 +67,7 @@ export function createSnapshotContext({ signal } = {}) {
     digests.set(file, entry);
     return entry.hash;
   }
-  function identify(files, config) {
+  function identify(files, config, excludedFiles = new Set()) {
     const exclude = excluded(config);
     return new Promise((resolve, reject) => {
       const values = new Array(files.length);
@@ -78,6 +78,7 @@ export function createSnapshotContext({ signal } = {}) {
         run(async () => {
           if (failures.length) return;
           const info = await lstat(file, { bigint: true });
+          if (config.regularFilesOnly && !info.isFile()) throw new TypeError(`Artifact must be a regular file: ${file}`);
           if (info.isSymbolicLink()) {
             const target = await realpath(file);
             const value = ['symlink', await readlink(file), null];
@@ -88,9 +89,12 @@ export function createSnapshotContext({ signal } = {}) {
             assign(['file', Number(info.mode & 0o777n), await fileIdentity(file, info)]);
           } else if (info.isDirectory()) {
             const canonical = await realpath(file);
+            if (config.fixtureCacheDirectory && (inside(config.cacheDirectory, file) || inside(config.fixtureCacheDirectory, canonical))) {
+              throw new Error(`Fixture directory must stay outside cacheDirectory: ${file}`);
+            }
             if (ancestors.has(canonical)) { assign(['cycle', canonical]); return; }
             const nested = new Set(ancestors).add(canonical);
-            const entries = (await readdir(file)).sort().filter(name => !exclude(join(file, name))).map(name => [name, null]);
+            const entries = (await readdir(file)).sort().filter(name => !exclude(join(file, name)) && !excludedFiles.has(join(file, name))).map(name => [name, null]);
             assign(['directory', entries]);
             for (const entry of entries) enqueue(join(file, entry[0]), nested, identity => { entry[1] = identity; });
           } else throw new Error(`Unsupported input type: ${file}`);
@@ -130,16 +134,21 @@ export async function discoverTests({ root, testDirectory, pattern, ignore }) {
   return [...new Set(files)].sort();
 }
 
+export function selectTests(config, inventory) {
+  if (!config.files) return inventory;
+  for (const id of config.files) if (!inventory.includes(id)) throw new Error(`Selected file is not in the configured test inventory: ${id}`);
+  const selected = new Set(config.files);
+  return inventory.filter(id => selected.has(id));
+}
+
 // Every snapshot still discovers paths and rechecks metadata, including cache hits.
 export function createSnapshot(config, extraIdentity, context = createSnapshotContext()) {
-  const snapshot = async () => {
+  async function selectPaths(inputPatterns, excludedFiles) {
     const excluded = context.excluded(config);
-    const files = await context.run(() => discoverTests(config));
-    const common = [];
     const selected = new Set();
     // Node's glob does not emit the cwd itself for '.'. Select that tree
     // explicitly so default input tracking includes every project file.
-    const patterns = config.inputs.filter(pattern => {
+    const patterns = inputPatterns.filter(pattern => {
       if (resolve(config.root, pattern) !== config.root) return true;
       if (!excluded(config.root)) selected.add(config.root);
       return false;
@@ -148,7 +157,7 @@ export function createSnapshot(config, extraIdentity, context = createSnapshotCo
       for await (const name of glob(patterns, { cwd: config.root, exclude: config.ignore })) {
         const file = resolve(config.root, name);
         if (!inside(config.root, file)) throw new Error(`Input must stay inside the project root: ${name}`);
-        if (!excluded(file)) selected.add(file);
+        if (!excluded(file) && (!excludedFiles.has(file) || inputPatterns.includes(slash(relative(config.root, file))))) selected.add(file);
       }
     });
     // A selected directory already covers its descendants; hash each tree once.
@@ -156,17 +165,53 @@ export function createSnapshot(config, extraIdentity, context = createSnapshotCo
     for (const file of [...selected].sort()) {
       let parent = dirname(file);
       while (inside(config.root, parent) && parent !== config.root && !selected.has(parent)) parent = dirname(parent);
-      if (file !== config.root && selected.has(parent)) continue;
+      if (file !== config.root && selected.has(parent) && !excludedFiles.has(file)) continue;
       roots.push(file);
     }
-    const values = await context.identify([...roots, ...files.map(id => resolve(config.root, id))], config);
-    roots.forEach((file, index) => common.push([slash(relative(config.root, file)), values[index]]));
+    return roots;
+  }
+  const snapshot = async () => {
+    const inventory = await context.run(() => discoverTests(config));
+    const files = selectTests(config, inventory);
+    if (!files.length) throw new Error(`No test files found in ${config.testDirectory}`);
+    const excludedFiles = new Set(config.excludeTestsFromInputs ? inventory.map(id => resolve(config.root, id)) : []);
+    const roots = await selectPaths(config.inputs, excludedFiles);
+    const fixtures = [];
+    const dependencies = await Promise.all(files.map(async (id, index) => {
+      const inputs = await selectPaths(
+        Object.entries(config.testInputs ?? {}).filter(([scope]) => scope === id || (scope.endsWith('/') && id.startsWith(scope))).flatMap(([, inputs]) => inputs),
+        excludedFiles,
+      );
+      if (config.testFixtureInputs) {
+        const declared = await config.testFixtureInputs(id);
+        if (!Array.isArray(declared)) throw new TypeError('testFixtureInputs must return an array of literal paths');
+        fixtures[index] = [...new Set(declared.map(file => resolve(config.root, text(file, 'fixture input path'))))].sort();
+      }
+      return [...new Set(inputs)].sort();
+    }));
+    const paths = [...new Set([...roots, ...files.map(id => resolve(config.root, id)), ...dependencies.flat()])];
+    const identities = await context.identify(paths, config, excludedFiles);
+    const values = new Map(paths.map((file, index) => [file, identities[index]]));
+    const fixturePaths = [...new Set(fixtures.flat())];
+    const fixtureCacheDirectory = fixturePaths.length ? await realpath(config.cacheDirectory).catch(error => {
+      if (error.code === 'ENOENT') return config.cacheDirectory;
+      throw error;
+    }) : undefined;
+    const fixtureIdentities = await context.identify(fixturePaths, { ...config, ignore: [], fixtureCacheDirectory });
+    const fixtureValues = new Map(fixturePaths.map((file, index) => [file, fixtureIdentities[index]]));
+    const named = file => [slash(relative(config.root, file)), values.get(file)];
+    const common = roots.map(named);
     const units = {};
-    files.forEach((id, index) => { units[id] = digest(JSON.stringify(values[roots.length + index])); });
+    files.forEach((id, index) => {
+      const own = values.get(resolve(config.root, id));
+      const inputs = dependencies[index].map(named);
+      units[id] = digest(JSON.stringify(inputs.length ? [own, inputs] : own));
+      if (fixtures[index]?.length) units[id] = digest(JSON.stringify([units[id], fixtures[index].map(file => [file, fixtureValues.get(file)])]));
+    });
     const custom = config.fingerprint ? await config.fingerprint() : null;
     if (config.fingerprint && typeof custom !== 'string') throw new TypeError('fingerprint must return a string');
     const implementation = await extraIdentity();
-    return { common: digest(JSON.stringify([config.root, implementation, common, custom])), units };
+    return { common: digest(JSON.stringify([config.cacheIdentity ?? config.root, implementation, common, custom])), units };
   };
   snapshot.close = () => context.close();
   return snapshot;

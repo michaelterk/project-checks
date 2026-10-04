@@ -1,7 +1,9 @@
 # Declarative runner and cache defaults
 
-Status: implementation plan. Automatic resource admission exists; declarative
-suites, fingerprint changes, timeout retries, and coverage remain proposed.
+Status: implementation plan. Automatic admission, opt-in timeout retries, stable
+cache identity, and scoped `testInputs`/focused selection now exist in the flat
+configuration API; see README for their supported contracts. Declarative suites,
+broader fingerprint changes, and retained coverage remain proposed.
 
 ## Goal
 
@@ -88,8 +90,11 @@ gates. Ordinary consumers supply configuration, not hashes or collection scripts
   unverifiable hook causes do not qualify. Parent summaries inherit child
   classification. Unittest uses the wall deadline; it has no native general
   internal-timeout signal.
-- Assertions, other hook errors, spawn/unknown/mixed failures, and cancelled
-  children block timeout-only retry. A deadline cannot mask an observed ordinary
+- Verified timeouts retry even when mixed with ordinary failures, but observed
+  ordinary failures remain failures and prevent evidence. Cancelled descendants
+  of verified timed-out parents inherit the timeout; unrelated cancellations
+  remain ordinary failures. Assertions, other hook errors, spawn/unknown failures
+  do not independently trigger retry. A deadline cannot mask an observed ordinary
   failure. User cancellation never retries; package deadline cleanup is distinct.
 - Default to one additional attempt; allow bounded suite overrides. Keep one
   retry owner: disable framework/consumer retries, or disable package retries

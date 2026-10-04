@@ -23,7 +23,7 @@ and install that archive in another project:
 npm pack
 
 # In your project (adjust the path)
-npm install --save-dev /path/to/project-checks/project-checks-0.1.3.tgz
+npm install --save-dev /path/to/project-checks/project-checks-0.1.4.tgz
 ```
 
 After a maintainer publishes it under this name, installation will be
@@ -78,6 +78,7 @@ npm test
 npx project-checks --workers 2
 npx project-checks --no-cache
 npx project-checks --config config/checks.json
+npx project-checks --file test/example.test.mjs
 npx project-checks resources
 ```
 
@@ -157,6 +158,46 @@ other tests among the shared inputs. Newly added tests run; removed tests leave
 the selection. With the full-project default, editing a test invalidates every
 test because sibling tests can be shared fixtures in any language.
 
+For independent tests, map dependency folders to test folders or individual files
+in JSON. Folder keys end in `/`; all matching folder and exact-file entries add
+dependencies together. `inputs` remains the shared dependency list:
+
+```json
+{
+  "inputs": [],
+  "excludeTestsFromInputs": true,
+  "testInputs": {
+    "test/": ["src/common", "test/helpers"],
+    "test/api/": ["src/api", "node_modules/example-client"],
+    "test/api/upload.test.mjs": ["fixtures/uploads"]
+  },
+  "retryTimeouts": true
+}
+```
+
+With `excludeTestsFromInputs: true`, folder/glob dependencies exclude every
+runnable test in the configured inventory. Each selected test still hashes its
+own file. Adding/removing test files within existing folders does not invalidate
+siblings. Directory presence, including empty fixture folders, remains an input:
+adding/removing directories can invalidate consumers of the containing folder.
+Helpers and fixtures remain dependencies. If a test imports another runnable test, extract
+the shared code to a helper or explicitly list that runnable file as a literal
+dependency; explicit file dependencies still invalidate their consumers.
+The option defaults to false to preserve existing sibling-as-fixture behavior.
+
+Use `files: ["test/api/upload.test.mjs"]` or repeatable CLI `--file` to run a
+subset while retaining the full configured inventory. Do not narrow `pattern`
+for focused runs with independent-test exclusion. Unused `testInputs` entries
+do not invalidate selected units; the config file itself is a dependency only
+when selected by `inputs`/`testInputs`. Include every imported helper and installed
+dependency used by each scope; mappings do not infer imports or package closures.
+
+`cacheIdentity` optionally replaces the absolute project root in snapshot identity
+for deliberate reuse between equivalent checkouts of the same project. Commands,
+environment values, dependency contents, and symlink targets still contribute;
+meaningful absolute paths in those values can prevent cross-checkout reuse.
+Use a stable project-specific identity and the same suite/cache directory.
+
 Paths and globs are relative to `root`. Literal directories recursively include
 hidden files; glob patterns follow Node's
 [glob behavior](https://nodejs.org/api/fs.html#fspromisesglobpattern-options).
@@ -178,6 +219,23 @@ export default {
 Inputs outside the project (global interpreters, external dependency environments,
 browser binaries, services) need a `fingerprint` callback that returns their
 current identity, or `cache: false`. The callback is evaluated with each snapshot.
+When files use different external fixtures, supply programmatic
+`testFixtureInputs(id)` instead: return a sync/async array of literal file or
+directory paths, root-relative or absolute. The package hashes those paths only
+for that selected file, alongside its own file and JSON `testInputs`. For
+example, a browser lane can bind Chromium to lifecycle tests and WebKit to page
+tests without a Chromium update invalidating WebKit-only files. The callback
+receives canonical root-relative IDs on every snapshot, including focused runs.
+Fixture code declares paths and any required safety checks; it need not compute
+hashes or manage passing evidence. Missing declared paths fail; an empty array
+declares no extra inputs. This trusted programmatic callback can name external
+paths, while JSON inputs remain root-relative. Existing symlink traversal applies;
+fixtures that require containment must check their bundle before returning paths.
+Explicit fixture declarations ignore ordinary `ignore` rules, so an engine bundle
+excluded from a broad SDK input can still be tracked for its actual consumers.
+Fixture directories inside or resolving into `cacheDirectory` are rejected.
+Load the JSON config and add this fixture callback before calling `runTests`.
+The existing common `fingerprint` API remains available for compatibility.
 Passing-test caching assumes deterministic tests against the selected inputs.
 `cache: false` and `--no-cache` execute all tests without reading or writing evidence.
 They still check that inputs stay unchanged during execution.
@@ -197,17 +255,25 @@ inside Node's own test runner.
 | `root` | Working directory | Project root; loaded configs resolve beside their file |
 | `testDirectory` | `test` | One folder containing tests |
 | `pattern` | `**/*.test.{js,mjs,cjs}` | A glob or array of globs relative to the test folder |
+| `files` | All discovered files | Selected root-relative IDs from the full configured inventory |
 | `command` | Current Node, `--test --test-concurrency=1 {file}` | Executable and argument array |
 | `inputs` | `['.']` | Shared input paths/globs relative to root |
+| `testInputs` | `{}` | Additive dependency arrays by exact test ID or folder prefix ending in `/` |
+| `excludeTestsFromInputs` | `false` | Omit runnable tests from dependency folders/globs; own and explicit file inputs remain |
 | `ignore` | `.git`, `.test-cache`, `__pycache__` trees | Replaces default root-relative exclusions |
 | `workers` | Automatically tuned CPU/RAM-derived count | Positive integer fixed override |
 | `resources` | See below | Resource policy |
 | `cache` | `true` | Read/write passing evidence |
 | `cacheDirectory` | `.test-cache/project-checks` | Evidence storage, relative to root or absolute |
+| `cacheIdentity` | Absolute project root | Stable project identity for equivalent-checkout reuse |
+| `retryTimeouts` | `false` | Retry verified timeouts once after normal work drains |
+| `retryTimeoutMs` | `60000` | Node default test timeout on retry; explicit test timeouts still apply |
+| `timeoutMs` | None | Wall deadline per command attempt, including retries |
 | `suite` | `tests` | Cache namespace |
 | `env` | Inherit environment | String overrides; undefined removes a variable |
 | `ignoreEnv` | `[]` | Additional environment names excluded from evidence |
 | `fingerprint` | None | Sync/async callback returning an extra identity string |
+| `testFixtureInputs` | None | Programmatic sync/async callback `(id) => string[]` declaring literal fixture input paths |
 | `signal` | None | AbortSignal for cancellation |
 | `logger` | `console` | Object with `log`/`error`, or `false` |
 | `stdio` | `inherit` | Child output: `inherit` or `ignore` |
@@ -275,6 +341,35 @@ work drains. Cancellation stops admission and terminates direct child processes,
 with a forced kill after two seconds if necessary. Commands that spawn background
 processes are responsible for cleaning up those descendants.
 
+When `retryTimeouts` is enabled, verified Node timeouts and package wall deadlines
+queue one complete-file retry after all normal files finish. Retries run serially;
+with a shared `Admission`, an exclusive reservation also drains other active
+commands and blocks new admissions until the retry closes. Independent processes
+or pools are outside that reservation. Cancellation never starts a retry.
+A second timeout fails. Ordinary assertion/hook failures are retained even when
+the same file times out and its retry passes; that file receives no evidence.
+Every attempt retains its console output. Only a complete passing retry against
+the original unchanged inputs can supply evidence.
+
+Node detection uses structured reporter failure types and verified causes, never
+test names or error text. A preload observes the owned launcher/native test
+workers' process events while preserving the original event result and Node's
+rejection/handler decisions; inherited fork fixtures are excluded. This retains
+ordinary asynchronous failures that Node otherwise reduces to informational
+diagnostics. Cancelled children of a
+verified timed-out parent inherit that timeout. Some Node versions discard native
+hook-timeout metadata; unverifiable
+hook errors remain failures without retry. Set `timeoutMs` to bound hung commands
+in any framework; it does not classify ordinary framework failures.
+
+Verified Node execution and wall deadlines require Linux or macOS. Each attempt
+owns a process group; termination, forced cleanup and quiescence checks cover its
+inherited descendants even after the launcher exits. Cleanup completes before
+admission is released or a retry begins. Unsupported platforms and unconfirmed
+cleanup fail closed. Commands remain responsible for processes they deliberately
+detach into other groups. Runs without these options keep the direct-child
+cleanup contract above.
+
 For integrations that supply their own discovery and fingerprints, use
 `runCachedUnits`:
 
@@ -284,7 +379,7 @@ import { runCachedUnits } from 'project-checks';
 const result = await runCachedUnits({
   cacheDirectory: '/project/.test-cache/custom',
   suite: 'custom',
-  workers: 2,
+  resources: {},
   units: [{ id: 'integration', identity: 'adapter-v1' }],
   snapshot: async () => ({
     common: await hashSharedInputs(),
@@ -299,6 +394,82 @@ array or an explicit identity for its execution behavior. Include the project
 identity and every shared dependency in `common`. Supply `environment` when an
 adapter uses a child environment different from `process.env`. Adapters own their
 discovery/fingerprint completeness and cancellation of their own commands.
+Pass `resources: {}` without `workers` to select the package's adaptive admission
+algorithm without local limits, just as `runTests` does. Fixture collectors need
+no local worker pool. The low-level API retains its single-worker default when
+both options are omitted.
+
+To reuse JSON dependency mappings with custom fixtures, use the same snapshot
+builder as `runTests`:
+
+```js
+import { createFileSnapshot, loadConfig, runCachedUnits } from 'project-checks';
+
+const config = await loadConfig('checks.json');
+const inputs = await createFileSnapshot(config);
+try {
+  const initial = await inputs.snapshot();
+  const result = await runCachedUnits({
+    cacheDirectory: '/project/.test-cache/fixtures',
+    resources: {},
+    units: Object.keys(initial.units).map(id => ({ id, identity: 'fixture-v1' })),
+    snapshot: inputs.snapshot,
+    execute: unit => runFixture(unit),
+  });
+  process.exitCode = result.exitCode;
+} finally {
+  await inputs.close();
+}
+```
+
+`createFileSnapshot(config)` resolves defaults/root, preserves the full inventory
+for `files` selection, and hashes each own file, mapped dependencies and package
+implementation exactly as `runTests`. It neither runs commands nor binds their
+environment; `runCachedUnits` owns those identities. Declare external fixture paths
+with `testFixtureInputs` so the package hashes them. `close()` drains hashing
+and rejects subsequent snapshots; always call it in `finally`.
+
+### Retained fixture artifacts
+
+`runCachedUnits` accepts two optional callbacks, supplied together:
+
+- `restoreEvidence(unit, { files, metadata })` validates domain format, atomically
+  materializes the contribution for this invocation, and returns `true`. The
+  package checks file identities first; missing, corrupt or legacy bindings rerun
+  the unit without calling this callback. Return `false` for incompatible domain
+  format. A false return or error must leave no partial
+  aggregate contribution; stage and clean up within the callback.
+  After a successful restoration the package rechecks file identities. A change
+  fails the invocation and removes passing evidence; no aggregation should follow.
+- `saveEvidence(unit)` validates and persists the eligible passing artifact,
+  returning `{ files: ['/absolute/artifact.json'], metadata: optionalDomainJSON }`.
+  Declare a nonempty array of persisted regular files. The package rejects
+  directories and symlinks before reading them, computes file identities with its
+  existing input walker, and stores the bindings in the same passing record.
+  This runs only after a complete successful attempt against unchanged inputs.
+  Throw on invalid artifacts. The package checks cancellation and source stability
+  again after this callback before atomically publishing the existing pass record.
+
+Both callbacks, including cache-hit materialization, hold package admission so an
+exclusive retry cannot overlap their work. Errors reject the run after active
+work drains. Metadata is stored in the existing pass record; do not put secrets in
+it. With `cache: false`, restoration and record I/O are skipped, but `saveEvidence`
+still validates current artifacts for aggregation and the package hashes their
+declared files. Failed attempts and mixed
+ordinary-failure retries never call it. Orphan artifact bytes without a matching
+passing record are uncertified. Callbacks own artifact staging, atomic writes,
+cleanup and cancellation of their own I/O; the package provides no second cache
+or coverage engine. Artifact output must be excluded from source inputs.
+
+Adapters may opt into `retryTimeouts` and accept `execute(unit, context)` where
+`context.retry` identifies the second attempt and
+`context.reportTimeout({ ordinaryFailure: boolean })` certifies a verified timeout
+while preserving any observed ordinary failure. `execute` still returns an integer.
+`runCommand` also retains its integer result: use `timeoutMs`, `nodeTest: true`
+for direct Node test commands, and `onTimeout: context.reportTimeout` to connect
+its structured timeout classification. Include adapter execution policy in the
+unit identity or snapshot. `Admission.acquire({ exclusive: true, signal })` waits
+for an exclusive slot; pair each successful acquire with `release()`.
 
 The other exports are `defineConfig`, `loadConfig`, `runCommand`,
 `environmentIdentity`, `detectResources` and `selectConcurrency`.

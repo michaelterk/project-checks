@@ -1,9 +1,9 @@
 import { readFile, readdir, realpath } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import { defineConfig, defaultIgnore } from './config.mjs';
 import { runCachedUnits } from './cache.mjs';
 import { commandEnvironment, runCommand } from './command.mjs';
-import { createSnapshot, createSnapshotContext, discoverTests } from './inputs.mjs';
+import { createSnapshot, createSnapshotContext, discoverTests, selectTests } from './inputs.mjs';
 import { digest, inside } from './util.mjs';
 
 async function implementationIdentity() {
@@ -11,7 +11,7 @@ async function implementationIdentity() {
   return digest(JSON.stringify(await Promise.all(files.map(async name => [name, digest(await readFile(join(import.meta.dirname, name)))]))));
 }
 
-export async function runTests(options = {}) {
+async function normalizeConfig(options) {
   defineConfig(options);
   const root = await realpath(resolve(options.root ?? process.cwd()));
   const config = {
@@ -23,18 +23,44 @@ export async function runTests(options = {}) {
     cacheDirectory: resolve(root, options.cacheDirectory ?? '.test-cache/project-checks'),
   };
   if (inside(config.cacheDirectory, root) || inside(config.cacheDirectory, resolve(root, config.testDirectory))) throw new Error('cacheDirectory must not contain the project root or testDirectory');
-  const files = await discoverTests(config);
+  return config;
+}
+
+function fileSnapshot(config) {
+  const identity = async () => digest(JSON.stringify([
+    await implementationIdentity(), config.retryTimeouts ?? false, config.retryTimeoutMs ?? 60000,
+    config.timeoutMs, config.excludeTestsFromInputs ?? false,
+  ]));
+  const context = createSnapshotContext({ signal: config.signal });
+  return { snapshot: createSnapshot(config, identity, context), close: context.close };
+}
+
+export async function createFileSnapshot(options = {}) {
+  return fileSnapshot(await normalizeConfig(options));
+}
+
+export async function runTests(options = {}) {
+  const config = await normalizeConfig(options);
+  const { root } = config;
+  const files = selectTests(config, await discoverTests(config));
   if (!files.length) throw new Error(`No test files found in ${config.testDirectory}`);
   const env = commandEnvironment(options.env);
   const logger = options.logger === false ? null : options.logger ?? console;
   const template = options.command ?? [process.execPath, '--test', '--test-concurrency=1', '{file}'];
   const units = files.map(id => ({ id, command: template.map(argument => argument.replaceAll('{file}', id)) }));
-  const context = createSnapshotContext({ signal: options.signal });
+  const nodeTest = template.includes('--test') && /^node(?:\.exe)?$/.test(basename(template[0]));
+  const retryTimeouts = options.retryTimeouts ?? false;
+  const retryTimeoutMs = options.retryTimeoutMs ?? 60000;
+  const inputs = fileSnapshot(config);
   try { return await runCachedUnits({
     cacheDirectory: config.cacheDirectory, suite: options.suite ?? 'tests', units, workers: options.workers, resources: options.resources ?? {},
-    cache: options.cache ?? true, signal: options.signal, logger,
+    cache: options.cache ?? true, signal: options.signal, logger, retryTimeouts,
     environment: env, ignoreEnv: options.ignoreEnv,
-    snapshot: createSnapshot(config, implementationIdentity, context),
-    execute: unit => runCommand(unit.command, { cwd: root, env, signal: options.signal, stdio: options.stdio ?? 'inherit', logger }),
-  }); } finally { await context.close(); }
+    snapshot: inputs.snapshot,
+    execute: (unit, { retry, reportTimeout }) => runCommand(unit.command, {
+      cwd: root, env, signal: options.signal, stdio: options.stdio ?? 'inherit', logger,
+      timeoutMs: options.timeoutMs, nodeTest: nodeTest && retryTimeouts,
+      testTimeoutMs: retry ? retryTimeoutMs : undefined, onTimeout: reportTimeout,
+    }),
+  }); } finally { await inputs.close(); }
 }

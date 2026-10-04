@@ -54,6 +54,8 @@ export class Admission {
       Number.isFinite(available) ? Math.floor((available - this.reserve) / this.memory) : Infinity));
     this.weight = this.selected.cpuBudget / (initial + 1e-6);
     this.active = 0;
+    this.pendingExclusive = 0;
+    this.exclusive = false;
     this.peak = 0;
     this.spare = 0;
     this.pressured = 0;
@@ -97,16 +99,22 @@ export class Admission {
     this.wake();
   }
 
-  async acquire() {
+  async acquire({ exclusive = false, signal } = {}) {
     this.timer ??= setInterval(() => this.tick(), 1000);
-    while (true) {
+    const abort = () => this.wake();
+    signal?.addEventListener('abort', abort, { once: true });
+    if (exclusive) this.pendingExclusive++;
+    try { while (true) {
       this.signal?.throwIfAborted();
+      signal?.throwIfAborted();
       if (this.closed) throw new Error('Resource admission stopped');
       const available = this.reading.availableMemoryMiB;
       const fits = this.selected.memoryBudgetMiB >= this.memory && (!Number.isFinite(available) || available >= this.reserve + this.memory);
       const pressured = this.reading.memoryPressure > 0.05;
-      if (this.active < this.limit && fits && !pressured) {
+      const room = exclusive ? this.active === 0 : !this.exclusive && this.pendingExclusive === 0 && this.active < this.limit;
+      if (room && fits && !pressured) {
         this.active++;
+        this.exclusive = exclusive;
         this.peak = Math.max(this.peak, this.active);
         this.blockedSince = undefined;
         return;
@@ -119,11 +127,16 @@ export class Admission {
         const wake = () => { this.waiters.delete(wake); resolve(); };
         this.waiters.add(wake);
       });
+    } } finally {
+      signal?.removeEventListener('abort', abort);
+      if (exclusive) this.pendingExclusive--;
+      this.wake();
     }
   }
 
   release() {
     this.active--;
+    this.exclusive = false;
     this.wake();
   }
 
