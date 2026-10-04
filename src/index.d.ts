@@ -1,5 +1,7 @@
 export interface ResourcePolicy {
   cpuPercent?: number;
+  /** Aggregate OS CPU cap as a percentage of available CPUs. Default: 90; range (0, 100]. */
+  cpuQuotaPercent?: number;
   reserveCpus?: number;
   /** Free RAM headroom to retain before admitting another worker, in MiB. */
   reserveMemoryMiB?: number;
@@ -12,6 +14,8 @@ export interface ResourcePolicy {
 
 export interface HostResources {
   cpus: number;
+  /** Inherited kernel CPU-time limit, when detected; Infinity means unbounded. */
+  cpuQuotaCpus?: number;
   memoryMiB: number;
 }
 
@@ -46,7 +50,7 @@ export interface TestConfig {
   excludeTestsFromInputs?: boolean;
   /** Exclusions relative to root. Replaces default .git/.test-cache/__pycache__ exclusions. */
   ignore?: string[];
-  /** Fixed override; omitted starts at half the CPU budget and tunes within resource caps. */
+  /** Worker cap; omitted starts at half the CPU budget and tunes within resource caps. */
   workers?: number;
   resources?: ResourcePolicy;
   cache?: boolean;
@@ -120,7 +124,9 @@ export interface EvidenceFiles {
 /** One invocation-owned pool; close only after every sharing suite has settled. */
 export class Admission {
   constructor(policy: ResourcePolicy, units: number, options?: { host?: HostResources; signal?: AbortSignal; workers?: number });
+  /** Maximum queued workers, bounded by explicit workers and resource caps. */
   readonly capacity: number;
+  /** Current CPU-feedback limit; may fall below an explicit worker cap. */
   readonly limit: number;
   active: number;
   peak: number;
@@ -144,7 +150,7 @@ export interface CachedUnitsOptions<T extends TestUnit = TestUnit> {
    * Also called with cache:false; package checks files but stores no passing record. */
   saveEvidence?(unit: T): EvidenceFiles | Promise<EvidenceFiles>;
   workers?: number;
-  /** Automatically adjusts CPU weight during fresh work when workers is omitted. */
+  /** Adjusts CPU admission during fresh work, including explicit worker caps. */
   resources?: ResourcePolicy;
   /** Reuse one pool across suites; the caller owns its final close. */
   admission?: Admission;
@@ -185,3 +191,6 @@ export function runCommand(command: string[], options?: CommandOptions): Promise
 export function environmentIdentity(environment?: Record<string, string | undefined>, ignoreEnv?: string[]): string;
 export function detectResources(): HostResources;
 export function selectConcurrency(policy?: ResourcePolicy, resources?: HostResources): Concurrency;
+
+/** Linux user-systemd scope covering this command and all descendant processes. */
+export function runWithCpuQuota(command: string[], options?: { resources?: ResourcePolicy; cwd?: string; env?: Record<string, string | undefined>; signal?: AbortSignal; stdio?: 'inherit' | 'ignore' }): Promise<number>;

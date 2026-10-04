@@ -7,7 +7,7 @@ import { command, digest, integer, keys, object, text } from './util.mjs';
 import { Admission } from './admission.mjs';
 import { createSnapshotContext } from './inputs.mjs';
 
-const ignoredEnvironment = /^(?:PWD|OLDPWD|SHLVL|_|NODE_TEST_CONTEXT|TMPDIR|TMP|TEMP|TERM|COLORTERM|FORCE_COLOR|NO_COLOR|NODE_DISABLE_COLORS|npm_lifecycle_event|npm_lifecycle_script|npm_command|npm_package_(?:name|version|json)|npm_config_(?:cache|logs_dir|loglevel|progress|timing|color|fund|audit|update_notifier))$/;
+const ignoredEnvironment = /^(?:INVOCATION_ID|PWD|OLDPWD|SHLVL|_|NODE_TEST_CONTEXT|TMPDIR|TMP|TEMP|TERM|COLORTERM|FORCE_COLOR|NO_COLOR|NODE_DISABLE_COLORS|npm_lifecycle_event|npm_lifecycle_script|npm_command|npm_package_(?:name|version|json)|npm_config_(?:cache|logs_dir|loglevel|progress|timing|color|fund|audit|update_notifier))$/;
 
 export function environmentIdentity(env = process.env, ignoreEnv = []) {
   const ignored = new Set(ignoreEnv);
@@ -49,7 +49,7 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
   const key = unit => digest(JSON.stringify([base, suite, unit.id, before.units[unit.id], unit.identity ?? unit.command]));
   if (cache) await mkdir(cacheDirectory, { recursive: true });
   const results = new Array(units.length);
-  const admission = sharedAdmission ?? (workers === undefined && resources !== undefined ? new Admission(resources, units.length, { signal }) : null);
+  const admission = sharedAdmission ?? (resources !== undefined ? new Admission(resources, units.length, { signal, workers }) : null);
   const artifacts = saveEvidence ? createSnapshotContext({ signal }) : null;
   async function bindEvidence(value) {
     keys(value, ['files', 'metadata'], 'evidence');
@@ -66,7 +66,7 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
     });
     return { ...plain, files, identities };
   }
-  workers = sharedAdmission ? sharedAdmission.capacity : workers ?? admission?.capacity ?? 1;
+  workers = admission?.capacity ?? workers ?? 1;
   let cursor = 0;
   let fatal;
   let stopped = false;

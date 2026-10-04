@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { readdir } from 'node:fs/promises';
+import { readFile, readdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
@@ -18,11 +18,12 @@ test('packed package installs into an independent project and exposes imports, r
   const [archive] = JSON.parse(invokeNpm(['pack', '--json', '--ignore-scripts', '--pack-destination', directory]));
   const names = archive.files.map(file => file.path);
   assert.ok(names.includes('LICENSE'));
+  assert.ok(names.includes('project-checks.config.json'));
   assert.ok(names.includes('src/index.d.ts'));
   assert.ok(names.includes('bin/project-checks.mjs'));
   assert.ok(names.includes('examples/python/test/test_calculator.py'));
   assert.ok(names.includes('examples/node/test/add.test.mjs'));
-  assert.ok(names.every(name => ['package.json', 'README.md', 'CONTRIBUTING.md', 'LICENSE'].includes(name) || name.startsWith('src/') || name.startsWith('bin/') || name.startsWith('examples/')));
+  assert.ok(names.every(name => ['package.json', 'README.md', 'CONTRIBUTING.md', 'LICENSE', 'project-checks.config.json'].includes(name) || name.startsWith('src/') || name.startsWith('bin/') || name.startsWith('examples/')));
   assert.ok(names.every(name => !name.includes('__pycache__') && !name.includes('.test-cache')));
   const consumer = join(directory, 'consumer');
   await put(consumer, 'package.json', JSON.stringify({ name: 'independent-consumer', private: true, type: 'module' }));
@@ -36,6 +37,8 @@ test('packed package installs into an independent project and exposes imports, r
     if (first.passed !== 1 || second.cached !== 1) process.exit(1);
   `], { cwd: consumer, encoding: 'utf8' });
   assert.equal(imported.status, 0, imported.stderr);
+  const defaults = JSON.parse(await readFile(join(consumer, 'node_modules/project-checks/project-checks.config.json'), 'utf8'));
+  assert.equal(defaults.resources.cpuQuotaPercent, 90);
   const required = spawnSync(process.execPath, ['-e', `const { selectConcurrency } = require('project-checks'); if (selectConcurrency({}, {cpus: 2, memoryMiB: 2048}).workers !== 2) process.exit(1);`], { cwd: consumer, encoding: 'utf8' });
   assert.equal(required.status, 0, required.stderr);
   const executable = join(consumer, 'node_modules/.bin/project-checks');

@@ -1,0 +1,16 @@
+{
+  "testDirectory": "test",
+  "pattern": "**/*.test.{js,mjs,cjs}",
+  "inputs": ["."],
+  "cache": true,
+  "cacheDirectory": ".test-cache/project-checks",
+  "resources": {
+    "cpuPercent": 100,
+    "cpuQuotaPercent": 90,
+    "reserveCpus": 0,
+    "reserveMemoryMiB": 0,
+    "cpusPerWorker": 1,
+    "memoryMiBPerWorker": 256,
+    "divisor": 1
+  }
+}

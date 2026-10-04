@@ -261,7 +261,7 @@ inside Node's own test runner.
 | `testInputs` | `{}` | Additive dependency arrays by exact test ID or folder prefix ending in `/` |
 | `excludeTestsFromInputs` | `false` | Omit runnable tests from dependency folders/globs; own and explicit file inputs remain |
 | `ignore` | `.git`, `.test-cache`, `__pycache__` trees | Replaces default root-relative exclusions |
-| `workers` | Automatically tuned CPU/RAM-derived count | Positive integer fixed override |
+| `workers` | Automatically tuned CPU/RAM-derived count | Positive integer worker cap |
 | `resources` | See below | Resource policy |
 | `cache` | `true` | Read/write passing evidence |
 | `cacheDirectory` | `.test-cache/project-checks` | Evidence storage, relative to root or absolute |
@@ -283,28 +283,32 @@ and empty test selections fail explicitly.
 
 The resource policy uses 100% of detected available CPUs, zero reserves,
 1 CPU and 256 MiB per worker, and `divisor: 1`. Set `cpuPercent`, `reserveCpus`,
-`reserveMemoryMiB`, `cpusPerWorker`, `memoryMiBPerWorker`, `maxWorkers` and
+`cpuQuotaPercent`, `reserveMemoryMiB`, `cpusPerWorker`, `memoryMiBPerWorker`, `maxWorkers` and
 `divisor` as needed. `cpusPerWorker` is the estimate for the static
 `selectConcurrency` API; automatic runs replace it with a run-local weight. The CPU and
 memory budgets each constrain concurrency. `divisor` shares the original host
-budget for nested orchestration; the caller supplies that share. Explicit
-`workers` retains fixed concurrency and overrides automatic admission.
+budget for nested orchestration; the caller supplies that share. With a resource
+policy, explicit `workers` sets an upper bound; CPU and memory admission still apply.
 Programmatic callers can pass one `Admission` instance to several
 `runCachedUnits` calls. It bounds their combined active commands and retains
 one learned CPU weight; each suite keeps its own snapshot and passing evidence.
-The caller closes that pool after all calls settle. A fixed `workers` option on
-`Admission` disables tuning and stays within its RAM, unit and maximum-worker caps.
+The caller closes that pool after all calls settle. Explicit `workers` on
+`Admission` also bounds cache-lookup concurrency, within RAM, unit and worker caps.
 Input fingerprinting bounds filesystem work at eight operations within one
 invocation, with fresh metadata on every snapshot. Content digests and path-only
 exclusion decisions are reused; listings and snapshots are not.
 
-Without explicit `workers`, the CPU ceiling is capped at 95% of detected host
-capacity, leaving roughly 5% for other VM work even when `cpuPercent` is higher.
-Fresh commands start at half this CPU budget (rounded down, minimum one), clamped by live free RAM, the reserve and hard caps.
+Admission targets at most `resources.cpuQuotaPercent` of detected host CPU capacity (default 90%), reserving roughly
+10% by default for other work even when `cpuPercent` is higher. Automatic runs start at half
+this budget (rounded down, minimum one), clamped by live free RAM and hard caps.
+Explicit worker caps set the initial count and still respond to CPU feedback.
 They automatically adjust the effective `cpusPerWorker`. Three consecutive one-second
-samples of spare CPU and RAM permit one additional worker; sustained CPU or
-memory pressure reduces new admissions.
-Usage at the ceiling holds the count; sustained usage above it reduces admissions.
+samples of spare CPU and RAM permit one additional worker only when its estimated
+CPU cost fits the budget. The first over-budget sample reduces future admissions;
+sustained CPU or memory pressure also reduces them. Usage at the ceiling holds
+the count. This is sampled admission control, not an OS CPU quota: running
+commands finish normally, a single command can exceed the target, and short
+bursts or unrelated host processes can consume the reserve.
 `maxWorkers` and configured RAM reservations remain bounds, including a cap of one for suites requiring serial execution.
 
 The total RAM budget limits reservations; a live headroom check pauses admission
@@ -505,3 +509,44 @@ npm pack --dry-run
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for release checks.
+
+
+## OS CPU quota
+
+The CLI runner requires Linux cgroup v2, `systemd-run`, and a running user systemd
+manager with the CPU controller enabled. Before starting tests it creates a
+unique user scope for the whole invocation and verifies the kernel's `cpu.max`.
+All descendants share its aggregate CPU budget, including detached workers.
+Scope cleanup drains remaining descendants on exit or cancellation. Setup
+failures stop the run rather than silently removing the quota.
+
+The package ships `project-checks.config.json` with its default test and resource
+settings; absent project configuration uses these defaults. Copy that file into
+your project to customize it. A local `project-checks.config.json` overrides the
+packaged defaults field by field, including nested resource settings. Omitted
+settings retain their defaults. Existing `project-checks.config.{mjs,js,json}`
+files remain supported; an explicit `--config` selects a file directly.
+Set `resources.cpuQuotaPercent` in your local configuration (or the existing
+JavaScript config) to a number greater than 0 and at most 100; the default is 90.
+On eight available CPUs, 90% allows 7.2 CPUs of aggregate time, measured in 10 ms
+periods. Bursts within a period can use all CPUs; other processes can consume the
+remaining capacity. Admission uses the same ceiling to avoid excessive launches.
+
+```json
+{ "resources": { "cpuQuotaPercent": 90 } }
+```
+
+Wrap custom test entrypoints, including compilation, with the same package quota:
+
+```sh
+project-checks exec --config project-checks.config.json -- node custom-runner.mjs
+```
+
+Programmatic entrypoints can call `runWithCpuQuota(command, { resources, cwd,
+env, signal })`. Callback APIs such as `runCachedUnits` remain in-process; wrap
+the entrypoint once rather than assigning a separate quota to every worker.
+Systemd scope IDs are excluded from passing-cache identity. Nested invocations
+reuse an existing equal or tighter inherited kernel quota;
+its enclosing scope owner is responsible for detached-descendant cleanup. A
+stricter quota inside a package-owned scope fails explicitly; configure the
+outer runner instead.

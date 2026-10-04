@@ -28,6 +28,16 @@ test('invalid policies fail and resource detection reports the current host', ()
   for (const key of ['divisor', 'maxWorkers', 'memoryMiBPerWorker']) {
     for (const value of [0, -1, 1.5, NaN, Infinity]) assert.throws(() => selectConcurrency({ [key]: value }, host), new RegExp(key));
   }
+  for (const cpuQuotaPercent of [0, -1, 101, NaN, Infinity, '90', null]) assert.throws(() => selectConcurrency({ cpuQuotaPercent }, host), /cpuQuotaPercent/);
   assert.throws(() => selectConcurrency({ unknown: 1 }, host), /Unknown/);
   assert.throws(() => selectConcurrency({ cpuPercent: Number.MAX_VALUE }, host), /Adjusted CPUs/);
+});
+
+
+test('inherited fractional quotas bound resource shares without shrinking CPU capacity', () => {
+  const host = { cpus: 8, memoryMiB: 16384, cpuQuotaCpus: 7.2 };
+  assert.equal(selectConcurrency({}, host).cpuBudget, 7.2);
+  assert.equal(selectConcurrency({ divisor: 2 }, host).cpuBudget, 3.6);
+  assert.equal(selectConcurrency({}, { ...host, cpuQuotaCpus: 0.8 }).cpuBudget, 0.8);
+  for (const cpuQuotaCpus of [0, -1, NaN, '7']) assert.throws(() => selectConcurrency({}, { ...host, cpuQuotaCpus }), /Inherited CPU/);
 });

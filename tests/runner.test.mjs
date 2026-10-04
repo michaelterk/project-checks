@@ -167,7 +167,11 @@ test('cache-disabled runs execute every time and create no cache directory', asy
 
 test('config paths resolve beside the config file and absent auto config uses cwd', async t => {
   const root = await temporary(t);
-  assert.deepEqual(await loadConfig(undefined, { cwd: root }), { root });
+  const defaults = await loadConfig(undefined, { cwd: root });
+  assert.equal(defaults.root, root);
+  assert.equal(defaults.resources.cpuQuotaPercent, 90);
+  defaults.resources.cpuQuotaPercent = 1;
+  assert.equal((await loadConfig(undefined, { cwd: root })).resources.cpuQuotaPercent, 90);
   const file = await put(root, 'config/project-checks.config.json', JSON.stringify({ root: '..', testDirectory: 'checks' }));
   assert.equal((await loadConfig(file)).root, root);
   const module = await put(root, 'project-checks.config.mjs', 'export default { workers: 2 };');
@@ -330,4 +334,22 @@ test('shared folders exclude sibling tests while explicit runnable dependencies 
   assert.deepEqual((await runTests(options)).results.map(result => result.cached), [true, false]);
   await put(root, 'test/a.test.mjs', source + '\n// changed imported fixture');
   assert.equal((await runTests(options)).passed, 2);
+});
+
+
+test('local JSON settings override packaged defaults without dropping omitted resources', async t => {
+  const root = await temporary(t);
+  await put(root, 'project-checks.config.json', JSON.stringify({ testDirectory: 'checks', resources: { cpuQuotaPercent: 95, maxWorkers: 2 } }));
+  const config = await loadConfig(undefined, { cwd: root });
+  assert.equal(config.root, root);
+  assert.equal(config.testDirectory, 'checks');
+  assert.equal(config.cache, true);
+  assert.equal(config.resources.cpuQuotaPercent, 95);
+  assert.equal(config.resources.maxWorkers, 2);
+  assert.equal(config.resources.memoryMiBPerWorker, 256);
+  await put(root, 'project-checks.config.mjs', 'export default { cache: undefined, resources: { cpuQuotaPercent: undefined, maxWorkers: 3 } };');
+  const javascript = await loadConfig(undefined, { cwd: root });
+  assert.equal(javascript.cache, true);
+  assert.equal(javascript.resources.cpuQuotaPercent, 90);
+  assert.equal(javascript.resources.maxWorkers, 3);
 });

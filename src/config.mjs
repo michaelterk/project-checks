@@ -3,6 +3,7 @@ import { dirname, isAbsolute, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { command, integer, keys, text } from './util.mjs';
 import { selectConcurrency } from './resources.mjs';
+import defaultConfig from '../project-checks.config.json' with { type: 'json' };
 
 const options = ['root', 'testDirectory', 'pattern', 'files', 'command', 'inputs', 'testInputs', 'excludeTestsFromInputs', 'ignore', 'workers', 'resources', 'cache', 'cacheDirectory', 'cacheIdentity', 'suite', 'env', 'ignoreEnv', 'fingerprint', 'testFixtureInputs', 'signal', 'logger', 'stdio', 'retryTimeouts', 'retryTimeoutMs', 'timeoutMs'];
 export const defaultIgnore = ['**/.git', '**/.git/**', '**/.test-cache', '**/.test-cache/**', '**/__pycache__', '**/__pycache__/**'];
@@ -75,8 +76,14 @@ export async function loadConfig(filename, { cwd = process.cwd() } = {}) {
       catch (error) { if (error.code !== 'ENOENT') throw error; }
     }
   }
-  if (!file) return { root: resolve(cwd) };
+  if (!file) return { ...structuredClone(defaultConfig), root: resolve(cwd) };
   const value = file.endsWith('.json') ? JSON.parse(await readFile(file, 'utf8')) : (await import(pathToFileURL(file).href)).default;
   defineConfig(value);
-  return { ...value, root: resolve(dirname(file), value.root ?? '.') };
+  const overrides = Object.fromEntries(Object.entries(value).filter(([, setting]) => setting !== undefined));
+  const resources = Object.fromEntries(Object.entries(value.resources ?? {}).filter(([, setting]) => setting !== undefined));
+  return {
+    ...structuredClone(defaultConfig), ...overrides,
+    resources: { ...defaultConfig.resources, ...resources },
+    root: resolve(dirname(file), value.root ?? '.'),
+  };
 }

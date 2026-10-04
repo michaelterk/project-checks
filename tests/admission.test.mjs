@@ -33,7 +33,7 @@ test('saturation holds; sustained pressure raises the weight without stopping ac
   await admission.acquire();
   for (let count = 0; count < 3; count++) admission.tick();
   await admission.acquire();
-  reading.busyCpus = 1.9;
+  reading.busyCpus = 1.8;
   for (let count = 0; count < 6; count++) admission.tick();
   assert.equal(admission.limit, 2);
   reading.pressure = 0.2;
@@ -151,14 +151,14 @@ test('missing CPU telemetry retains half-CPU startup and sampling reports live R
   reading.pressure = NaN;
   await admission.acquire();
   for (let count = 0; count < 12; count++) admission.tick();
-  assert.ok(Math.abs(admission.weight - 1.9) < 0.00001);
+  assert.ok(Math.abs(admission.weight - 1.8) < 0.00001);
   assert.equal(admission.limit, 1);
   const sample = resourceSampler()();
   assert.ok(sample.availableMemoryMiB >= 0);
 });
 
 
-test('fixed shared overrides remain bounded by capacity and do not retune', async t => {
+test('explicit worker caps remain resource-bounded under spare CPU', async t => {
   const admission = new Admission({ reserveMemoryMiB: 512, memoryMiBPerWorker: 512 }, 20, {
     host: { cpus: 8, memoryMiB: 2048 }, workers: 9,
     sample: () => ({ busyCpus: 0, pressure: 0, memoryPressure: 0, availableMemoryMiB: 2048 }),
@@ -172,17 +172,61 @@ test('fixed shared overrides remain bounded by capacity and do not retune', asyn
   assert.ok(admission.capacity * admission.memory <= admission.selected.memoryBudgetMiB);
 });
 
-test('CPU ceiling reserves 5% and lowers admissions above it without pressure', async t => {
-  for (const cpuPercent of [undefined, 200]) {
-    const { admission, reading } = fixture(t, { cpuPercent }, { cpus: 8, memoryMiB: 8192 });
-    assert.equal(admission.selected.cpuBudget, 7.6);
-    for (let i = 0; i < 3; i++) await admission.acquire();
-    reading.busyCpus = 7.6;
+test('CPU ceiling reserves 10% and immediately lowers future admissions above it', async t => {
+  for (const workers of [undefined, 4]) for (const cpuPercent of [undefined, 200]) {
+    const reading = { busyCpus: 0, pressure: 0, memoryPressure: 0, availableMemoryMiB: 8192 };
+    const admission = new Admission({ cpuPercent, maxWorkers: 4 }, 8, {
+      workers, host: { cpus: 8, memoryMiB: 8192 }, sample: () => ({ ...reading }),
+    });
+    t.after(() => admission.close());
+    assert.equal(admission.selected.cpuBudget, 7.2);
+    const initial = admission.limit;
+    for (let i = 0; i < initial; i++) await admission.acquire();
+    reading.busyCpus = 7.2;
     for (let i = 0; i < 3; i++) admission.tick();
-    assert.equal(admission.limit, 3);
+    assert.equal(admission.limit, initial);
     reading.busyCpus = 7.7;
+    admission.tick();
+    assert.equal(admission.limit, initial - 1);
+    assert.equal(admission.active, initial);
     for (let i = 0; i < 3; i++) admission.tick();
-    assert.equal(admission.limit, 2);
-    assert.equal(admission.active, 3);
+    assert.equal(admission.limit, initial - 1);
+    admission.release();
+    admission.tick();
+    assert.equal(admission.limit, initial - 2);
+  }
+});
+
+test('growth accounts for the next worker instead of filling the CPU reserve', async t => {
+  const { admission, reading } = fixture(t, {}, { cpus: 8, memoryMiB: 8192 });
+  for (let i = 0; i < 3; i++) await admission.acquire();
+  reading.busyCpus = 6;
+  for (let i = 0; i < 6; i++) admission.tick();
+  assert.equal(admission.limit, 3);
+  reading.busyCpus = 5.4;
+  for (let i = 0; i < 3; i++) admission.tick();
+  assert.equal(admission.limit, 4);
+});
+
+test('fixed worker count bounds lookup capacity as well as execution', t => {
+  for (const [workers, expected] of [[1, 1], [2, 2], [20, 4]]) {
+    const admission = new Admission({ maxWorkers: 4 }, 8, {
+      workers, host: { cpus: 8, memoryMiB: 8192 },
+      sample: () => ({ busyCpus: 0, pressure: 0, availableMemoryMiB: 8192 }),
+    });
+    t.after(() => admission.close());
+    assert.equal(admission.capacity, expected);
+    assert.equal(admission.limit, expected);
+  }
+});
+
+
+test('configured quota percent defines admission CPU headroom', t => {
+  for (const cpuQuotaPercent of [80, 90, 95, 100]) {
+    const admission = new Admission({ cpuQuotaPercent }, 8, {
+      host: { cpus: 8, memoryMiB: 8192 }, sample: () => ({ busyCpus: 0, availableMemoryMiB: 8192 }),
+    });
+    t.after(() => admission.close());
+    assert.equal(admission.selected.cpuBudget, 8 * cpuQuotaPercent / 100);
   }
 });

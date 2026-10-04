@@ -94,6 +94,7 @@ test('effective environment and command identity invalidate evidence', async t =
 });
 
 test('unknown environment values matter; display and explicit scheduling values do not', () => {
+  assert.equal(environmentIdentity({ INVOCATION_ID: 'first-scope' }), environmentIdentity({ INVOCATION_ID: 'second-scope' }));
   assert.equal(environmentIdentity({ FORCE_COLOR: '0' }), environmentIdentity({ FORCE_COLOR: '1' }));
   assert.equal(environmentIdentity({ MY_WORKERS: '1' }, ['MY_WORKERS']), environmentIdentity({ MY_WORKERS: '8' }, ['MY_WORKERS']));
   assert.notEqual(environmentIdentity({ RUN_AXE: '0' }), environmentIdentity({ RUN_AXE: '1' }));
@@ -158,6 +159,9 @@ test('resource admission preserves cache evidence, input fencing and fixed worke
   assert.equal((await runCachedUnits(f.options)).cached, 2);
   f.inputs.common = 'changed';
   f.options.workers = 2;
+  assert.equal((await runCachedUnits(f.options)).workers, 1);
+  f.options.resources.maxWorkers = 2;
+  f.inputs.common = 'fixed-two';
   assert.equal((await runCachedUnits(f.options)).workers, 2);
   assert.equal(peak, 2);
   delete f.options.workers;
@@ -196,4 +200,34 @@ test('shared admission globally bounds suites and survives one suite failing', a
   assert.equal(pool.closed, undefined);
   assert.equal(pool.active, 0);
   assert.ok(pool.peak <= 2);
+});
+
+
+test('serial shared admission bounds work queued before acquisition', async t => {
+  const f = await fixture(t);
+  const pool = new Admission({ maxWorkers: 4 }, 2, {
+    workers: 1, host: { cpus: 8, memoryMiB: 8192 },
+    sample: () => ({ busyCpus: 0, pressure: 0, availableMemoryMiB: 8192 }),
+  });
+  t.after(() => pool.close());
+  let release;
+  let entered;
+  const held = new Promise(resolve => { release = resolve; });
+  const started = new Promise(resolve => { entered = resolve; });
+  const acquire = pool.acquire.bind(pool);
+  let attempts = 0;
+  pool.acquire = async options => {
+    attempts++;
+    entered();
+    await held;
+    return acquire(options);
+  };
+  const running = runCachedUnits({ ...f.options, admission: pool, cache: false, execute: () => 0 });
+  await started;
+  const queued = attempts;
+  release();
+  const result = await running;
+  assert.equal(queued, 1);
+  assert.equal(result.passed, 2);
+  assert.equal(pool.peak, 1);
 });
