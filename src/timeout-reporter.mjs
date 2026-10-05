@@ -7,6 +7,10 @@ function timeout(error) {
     seen.add(error);
     if (error.code === 'ERR_TEST_FAILURE' && error.failureType === 'testTimeoutFailure') return true;
     if (error.code !== 'ERR_TEST_FAILURE') return false;
+    // Node can unwrap its timeout error to this string when reporting a hook.
+    // Accept only that native hook-failure signature, never ordinary Error text.
+    if (error.failureType === 'hookFailed' && typeof error.cause === 'string' &&
+        /^test timed out after (?:0|[1-9]\d*)(?:\.\d+)?ms$/.test(error.cause)) return true;
     error = error.cause;
   }
   return false;

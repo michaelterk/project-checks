@@ -157,7 +157,7 @@ async function nodeFixture(t, body) {
   const root = await temporary(t);
   await put(root, '.test-cache/count', '0');
   await put(root, 'test/one.test.mjs', `
-    import test, { before } from 'node:test';
+    import test, { after, before } from 'node:test';
     import assert from 'node:assert/strict';
     import { readFileSync, writeFileSync } from 'node:fs';
     const attempt = Number(readFileSync('.test-cache/count', 'utf8')) + 1;
@@ -329,11 +329,49 @@ test('structured timeout detection preserves a configured console reporter', asy
   assert.equal(await f.count(), 2);
 });
 
-test('printed timeout text, TimeoutError names and unverifiable hook causes do not trigger retry', async t => {
+test('native before-hook deadlines retry the whole file and retain only a complete pass', async t => {
+  const f = await nodeFixture(t, "before(() => attempt === 1 ? delay() : undefined, { timeout: 20 }); test('body', () => {});");
+  assert.equal((await runTests(f.options)).exitCode, 0);
+  assert.equal(await f.count(), 2);
+  assert.equal((await runTests(f.options)).cached, 1);
+  assert.equal(await f.count(), 2);
+});
+
+test('native after-hook deadlines retry the whole file and retain only a complete pass', async t => {
+  const f = await nodeFixture(t, "after(() => attempt === 1 ? delay() : undefined, { timeout: 20 }); test('body', () => {});");
+  assert.equal((await runTests(f.options)).exitCode, 0);
+  assert.equal(await f.count(), 2);
+  assert.equal((await runTests(f.options)).cached, 1);
+  assert.equal(await f.count(), 2);
+});
+
+test('a second native hook deadline fails without passing evidence', async t => {
+  const f = await nodeFixture(t, "before(delay, { timeout: 20 }); test('body', () => {});");
+  assert.equal((await runTests(f.options)).exitCode, 1);
+  assert.equal(await f.count(), 2);
+  assert.deepEqual(await readdir(join(f.root, '.test-cache/project-checks')), []);
+});
+
+test('a native hook deadline beside an ordinary failure keeps the file failed without evidence', async t => {
+  const f = await nodeFixture(t, `
+    test('assertion', () => { if (attempt === 1) assert.fail('ordinary failure'); });
+    test('group', async t => {
+      t.before(() => attempt === 1 ? delay() : undefined, { timeout: 20 });
+      await t.test('child', () => {});
+    });
+  `);
+  assert.equal((await runTests(f.options)).exitCode, 1);
+  assert.equal(await f.count(), 2);
+  assert.deepEqual(await readdir(join(f.root, '.test-cache/project-checks')), []);
+});
+
+test('printed timeout text, TimeoutError names and ordinary hook causes do not trigger retry', async t => {
   for (const body of [
     "test('TimeoutError timed out', () => { console.log('testTimeoutFailure'); assert.fail('timed out'); });",
     "test('body', () => { const error = new Error('timeout'); error.name = 'TimeoutError'; throw error; });",
-    "before(delay, { timeout: 20 }); test('body', () => {});",
+    "before(() => { throw new Error('test timed out after 20ms'); }); test('body', () => {});",
+    "before(() => { throw 'timed out'; }); test('body', () => {});",
+    "before(() => { throw 'test timed out after 20ms: ordinary failure'; }); test('body', () => {});",
   ]) {
     const f = await nodeFixture(t, body);
     assert.equal((await runTests(f.options)).exitCode, 1);

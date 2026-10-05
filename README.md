@@ -493,15 +493,16 @@ the same file times out and its retry passes; that file receives no evidence.
 Every attempt retains its console output. Only a complete passing retry against
 the original unchanged inputs can supply evidence.
 
-Node detection uses structured reporter failure types and verified causes, never
-test names or error text. A preload observes the owned launcher/native test
-workers' process events while preserving the original event result and Node's
-rejection/handler decisions; inherited fork fixtures are excluded. This retains
-ordinary asynchronous failures that Node otherwise reduces to informational
-diagnostics. Cancelled children of a
-verified timed-out parent inherit that timeout. Some Node versions discard native
-hook-timeout metadata; unverifiable
-hook errors remain failures without retry. Set `timeoutMs` to bound hung commands
+Node detection uses structured reporter failure types and causes, never test names
+or printed output. Node 24 native hook deadlines are recognized when their hook
+failure contains the exact timeout cause. A hook deliberately throwing that same
+string is indistinguishable to Node's reporter and also retries once. A preload
+observes the owned launcher/native test workers' process events while preserving
+the original event result and Node's rejection/handler decisions; inherited fork
+fixtures are excluded. This retains ordinary asynchronous failures that Node
+otherwise reduces to informational diagnostics. Cancelled children of a verified
+timed-out parent inherit that timeout. Hook failures without a matching
+timeout cause remain failures without retry. Set `timeoutMs` to bound hung commands
 in any framework; it does not classify ordinary framework failures.
 
 Verified Node execution, Playwright execution, and wall deadlines require Linux
