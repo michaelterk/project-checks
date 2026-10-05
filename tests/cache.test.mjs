@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
 import { readFile, readdir, writeFile } from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import { join } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import test from 'node:test';
 import { Admission, cacheKey, cacheRecordName, runCachedUnits } from '../src/index.mjs';
 import { temporary } from './helpers.mjs';
@@ -17,6 +20,108 @@ async function fixture(t) {
   };
   return { directory, calls, options, inputs };
 }
+
+function observeRecordReads(t, directory, observe) {
+  const original = fs.readFile;
+  t.mock.method(fs, 'readFile', (file, ...args) =>
+    typeof file === 'string' && file.startsWith(`${directory}/`) && file.endsWith('.json')
+      ? observe(file, () => original(file, ...args)) : original(file, ...args));
+  syncBuiltinESMExports();
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+}
+
+test('upfront plans share 16 concurrent reads and never reread records during execution', async t => {
+  const directory = await temporary(t);
+  const ids = Array.from({ length: 40 }, (_, index) => `file-${index}`);
+  const inputs = { common: 'shared', units: Object.fromEntries(ids.map(id => [id, 'v1'])) };
+  const options = suite => ({
+    suite, cacheDirectory: directory, workers: 1, logger: null,
+    units: ids.map(id => ({ id, identity: 'fixture' })), snapshot: () => inputs,
+  });
+  for (const suite of ['one', 'two']) await runCachedUnits({ ...options(suite), execute: () => 0 });
+  const changed = ids.filter((_, index) => index % 2);
+  for (const id of changed) inputs.units[id] = 'v2';
+  const owners = new Map(['one', 'two'].flatMap(suite => ids.map(id =>
+    [join(directory, cacheRecordName(suite, id)), suite])));
+  const reads = new Map();
+  const active = { one: 0, two: 0 };
+  let peak = 0;
+  observeRecordReads(t, directory, async (file, read) => {
+    const suite = owners.get(file);
+    active[suite]++;
+    peak = Math.max(peak, active.one + active.two);
+    reads.set(file, (reads.get(file) ?? 0) + 1);
+    try { await delay(5); return await read(); }
+    finally { active[suite]--; }
+  });
+  const calls = { one: [], two: [] };
+  const lines = { one: [], two: [] };
+  const results = await Promise.all(['one', 'two'].map(suite => runCachedUnits({
+    ...options(suite), logger: { log: line => lines[suite].push(line) },
+    execute: unit => {
+      assert.equal(ids.every(id => reads.has(join(directory, cacheRecordName(suite, id)))), true);
+      assert.equal(active[suite], 0);
+      assert.ok(lines[suite].some(line => /Will run: 20 \| Will skip: 20/.test(line)));
+      calls[suite].push(unit.id);
+      return 0;
+    },
+  })));
+  assert.equal(peak, 16);
+  assert.equal(reads.size, 80);
+  assert.ok([...reads.values()].every(count => count === 1));
+  for (let index = 0; index < results.length; index++) {
+    assert.deepEqual([results[index].passed, results[index].cached], [20, 20]);
+    assert.deepEqual(results[index].results.map(result => result.id), ids);
+    assert.deepEqual(calls[['one', 'two'][index]], changed);
+  }
+});
+
+test('cache scan errors drain concurrent reads before rejection and start no commands', async t => {
+  const f = await fixture(t);
+  let active = 0;
+  let completed = 0;
+  observeRecordReads(t, f.directory, async (file, read) => {
+    active++;
+    try {
+      await delay(file.endsWith(cacheRecordName('fixture', 'first')) ? 5 : 20);
+      if (file.endsWith(cacheRecordName('fixture', 'first'))) throw new Error('cache scan failed');
+      return await read();
+    } finally { active--; completed++; }
+  });
+  await assert.rejects(runCachedUnits(f.options), /cache scan failed/);
+  assert.equal(active, 0);
+  assert.equal(completed, 2);
+  assert.deepEqual(f.calls, []);
+});
+
+test('cancellation drains an active cache scan and leaves the shared read queue reusable', async t => {
+  const f = await fixture(t);
+  f.options.execute = () => 0;
+  await runCachedUnits(f.options);
+  const entered = Promise.withResolvers();
+  const release = Promise.withResolvers();
+  let active = 0;
+  observeRecordReads(t, f.directory, async (_file, read) => {
+    if (++active === 2) entered.resolve();
+    try { await release.promise; return await read(); }
+    finally { active--; }
+  });
+  const controller = new AbortController();
+  const reason = new Error('cancelled during cache scan');
+  let settled = false;
+  const running = runCachedUnits({ ...f.options, signal: controller.signal, execute: () => {
+    throw new Error('cancelled scan must never execute');
+  } }).finally(() => { settled = true; });
+  const rejected = assert.rejects(running, error => error === reason);
+  await entered.promise;
+  controller.abort(reason);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(settled, false);
+  release.resolve();
+  await rejected;
+  assert.equal(active, 0);
+  assert.equal((await runCachedUnits(f.options)).cached, 2);
+});
 
 test('retains passes after failure and runs only failed, changed or newly discovered units', async t => {
   const f = await fixture(t);

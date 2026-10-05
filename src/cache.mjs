@@ -8,6 +8,30 @@ import { Admission } from './admission.mjs';
 import { createSnapshotContext } from './inputs.mjs';
 import { withProgress } from './progress.mjs';
 
+// Share the read limit across concurrent suites without occupying test workers.
+const scanConcurrency = 16;
+const cacheReads = [];
+let activeCacheReads = 0;
+function readCacheRecord(filename, signal) {
+  return new Promise((resolve, reject) => {
+    cacheReads.push({ filename, signal, resolve, reject });
+    drainCacheReads();
+  });
+}
+function drainCacheReads() {
+  while (activeCacheReads < scanConcurrency && cacheReads.length) {
+    const { filename, signal, resolve, reject } = cacheReads.shift();
+    activeCacheReads++;
+    Promise.resolve().then(() => {
+      signal?.throwIfAborted();
+      return readFile(filename, 'utf8');
+    }).then(resolve, reject).finally(() => {
+      activeCacheReads--;
+      drainCacheReads();
+    });
+  }
+}
+
 // Record routing is independent of validity; neither identifier enters the key.
 export function cacheRecordName(suite, unitId) {
   return `${digest(`${suite}\0${unitId}`)}.json`;
@@ -79,24 +103,68 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
   let checking;
   const retries = [];
   const check = () => checking ??= takeSnapshot().finally(() => { checking = undefined; });
+  const plan = units.map(unit => ({
+    filename: cache ? join(cacheDirectory, cacheRecordName(suite, unit.id)) : undefined,
+    expected: cacheKey(before, unit.id), cached: false,
+  }));
+  async function scanUnit(index) {
+    const entry = plan[index];
+    let cached;
+    try { cached = JSON.parse(await readCacheRecord(entry.filename, signal)); }
+    catch (error) { if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error; }
+    signal?.throwIfAborted();
+    entry.cached = cached?.key === entry.expected && cached?.passed === true;
+    if (entry.cached && restoreEvidence) entry.evidence = cached.evidence;
+    if (!entry.cached) await rm(entry.filename, { force: true });
+  }
+  async function restoreUnit(index) {
+    const entry = plan[index];
+    if (!entry.cached) return;
+    const unit = units[index];
+    entry.cached = false;
+    await admission?.acquire({ signal });
+    try {
+      signal?.throwIfAborted();
+      if (stopped) return;
+      try {
+        let verified;
+        try {
+          const { identities, ...declaration } = entry.evidence ?? {};
+          const bound = await bindEvidence(declaration);
+          if (isDeepStrictEqual(bound.identities, identities)) verified = declaration;
+        } catch { signal?.throwIfAborted(); }
+        const restored = verified ? await restoreEvidence(unit, verified) : false;
+        if (typeof restored !== 'boolean') throw new TypeError('restoreEvidence must return a boolean');
+        signal?.throwIfAborted();
+        if (restored && !isDeepStrictEqual((await bindEvidence(verified)).identities, entry.evidence.identities)) {
+          throw new Error(`Artifacts changed during restoration of ${suite}/${unit.id}; suite has not passed.`);
+        }
+        entry.cached = restored;
+      } catch (error) {
+        await rm(entry.filename, { force: true });
+        throw error;
+      }
+      if (!entry.cached) await rm(entry.filename, { force: true });
+    } finally {
+      delete entry.evidence;
+      admission?.release();
+    }
+  }
+  async function scan(operation, limit = scanConcurrency) {
+    let next = 0;
+    await Promise.all(Array.from({ length: Math.min(limit, units.length) }, async () => {
+      try {
+        while (!stopped && next < units.length) {
+          signal?.throwIfAborted();
+          await operation(next++);
+        }
+      } catch (error) { if (!stopped) fatal = error; stopped = true; if (!sharedAdmission) admission?.close(); }
+    }));
+    if (stopped) throw fatal;
+  }
   async function runUnit(index, retry = false, originalFailure = 0) {
     const unit = units[index];
-    const filename = cache ? join(cacheDirectory, cacheRecordName(suite, unit.id)) : undefined;
-    const expected = cacheKey(before, unit.id);
-    let cached;
-    if (cache && !retry) {
-      try { cached = JSON.parse(await readFile(filename, 'utf8')); }
-      catch (error) { if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error; }
-    }
-    const hit = cached?.key === expected && cached?.passed === true;
-    if (hit && !restoreEvidence) {
-      logger?.log(`==> Reusing successful ${suite}/${unit.id}`);
-      diagnostics?.file(suite, unit.id, "cache-hit");
-      progress && progress.file(suite, unit.id, 'cache-hit');
-      results[index] = { id: unit.id, exitCode: 0, cached: true };
-      return;
-    }
-    if (cache && !hit) await rm(filename, { force: true });
+    const { filename, expected } = plan[index];
     await admission?.acquire({ exclusive: retry, signal });
     if (retry) normalPhase?.(true);
     let status;
@@ -106,34 +174,6 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
     try {
       signal?.throwIfAborted();
       if (stopped) return;
-      if (hit) {
-        let restored;
-        try {
-          let verified;
-          try {
-            const { identities, ...declaration } = cached.evidence ?? {};
-            const bound = await bindEvidence(declaration);
-            if (isDeepStrictEqual(bound.identities, identities)) verified = declaration;
-          } catch { signal?.throwIfAborted(); }
-          restored = verified ? await restoreEvidence(unit, verified) : false;
-          if (typeof restored !== 'boolean') throw new TypeError('restoreEvidence must return a boolean');
-          signal?.throwIfAborted();
-          if (restored && !isDeepStrictEqual((await bindEvidence(verified)).identities, cached.evidence.identities)) {
-            throw new Error(`Artifacts changed during restoration of ${suite}/${unit.id}; suite has not passed.`);
-          }
-        } catch (error) {
-          await rm(filename, { force: true });
-          throw error;
-        }
-        if (restored) {
-          logger?.log(`==> Reusing successful ${suite}/${unit.id}`);
-          diagnostics?.file(suite, unit.id, "cache-hit");
-          progress && progress.file(suite, unit.id, 'cache-hit');
-      results[index] = { id: unit.id, exitCode: 0, cached: true };
-          return;
-        }
-        await rm(filename, { force: true });
-      }
       logger?.log(`==> ${retry ? 'Retrying timeout file alone (once)' : 'Running'} ${suite}/${unit.id}`);
       progress && progress.file(suite, unit.id, 'file-start');
       executing = true;
@@ -183,15 +223,35 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
   }
   async function worker() {
     try {
-      while (!stopped && cursor < units.length) {
+      while (!stopped && cursor < runnable.length) {
         signal?.throwIfAborted();
-        const index = cursor++;
+        const index = runnable[cursor++];
         await runUnit(index);
       }
     } catch (error) { if (!stopped) fatal = error; stopped = true; if (!sharedAdmission) admission?.close(); }
   }
-  const concurrency = Math.min(workers, units.length);
+  const runnable = [];
+  let concurrency;
   try {
+    const started = performance.now();
+    if (cache) {
+      logger?.log(`CACHE_SCAN: ${suite} | Scanning ${units.length} test files | Concurrency: ${scanConcurrency}`);
+      const prepare = async () => {
+        await scan(scanUnit);
+        if (restoreEvidence) await scan(restoreUnit, Math.min(scanConcurrency, workers));
+      };
+      await (diagnostics ? diagnostics.span(suite, 'cache-scan', prepare) : prepare());
+    }
+    signal?.throwIfAborted();
+    for (let index = 0; index < units.length; index++) {
+      if (!plan[index].cached) { runnable.push(index); continue; }
+      const { id } = units[index];
+      results[index] = { id, exitCode: 0, cached: true };
+      diagnostics?.file(suite, id, 'cache-hit');
+      progress && progress.file(suite, id, 'cache-hit');
+    }
+    logger?.log(`CACHE_SCAN: ${suite} | Will run: ${runnable.length} | Will skip: ${units.length - runnable.length} | Duration: ${((performance.now() - started) / 1000).toFixed(2)}s${cache ? '' : ' | Cache disabled'}`);
+    concurrency = Math.min(workers, runnable.length);
     await Promise.all(Array.from({ length: concurrency }, worker));
     if (stopped) throw fatal;
     for (const { index, originalFailure } of retries) {
@@ -216,6 +276,6 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
     passed: results.filter(result => result.exitCode === 0 && !result.cached).length,
     failed: results.filter(result => result.exitCode !== 0).length,
     cached: results.filter(result => result.cached).length,
-    workers: admission ? admission.peak || admission.limit : concurrency, inputsChanged, results,
+    workers: admission ? admission.peak || admission.limit : Math.min(workers, units.length), inputsChanged, results,
   };
 }
