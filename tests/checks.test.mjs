@@ -23,7 +23,6 @@ const options = { workers: 1, logger: false };
 test('JSON dependencies build before tests; failed prerequisites block only their consumers', async t => {
   const root = await project(t, {
     'test/a.test.mjs': "import {readFileSync} from 'node:fs'; if (readFileSync('built','utf8') !== 'ready') throw Error('build missing');",
-    'built': 'ready',
     'checks.json': JSON.stringify({ checks: {
       build: { command: [process.execPath, '-e', "require('node:fs').writeFileSync('built','ready')"] },
       broken: { command: [process.execPath, '-e', 'process.exit(7)'] },
@@ -288,4 +287,36 @@ test('Playwright focused uncached checks and snapshot updates preserve every sel
   commands.length = 0;
   assert.equal((await runChecks([{ id: 'browser', config: { ...suite, frameworkArgs: ['--update-snapshots'] } }], options)).exitCode, 0);
   assert.deepEqual(commands, [['playwright', 'test', ...selectors, '--update-snapshots']]);
+});
+
+
+test('dependent configuration and cache snapshots observe completed clean and changed builds', async t => {
+  const root = await project(t, { 'test/a.test.mjs': '' });
+  let executions = 0;
+  const definitions = version => [
+    { id: 'build', cwd: root, command: [process.execPath, '-e', `require('node:fs').writeFileSync('built', '${version}')`] },
+    { id: 'tests', dependsOn: ['build'], config: async () => {
+      assert.equal(await readFile(join(root, 'built'), 'utf8'), version, 'configuration loads after its build');
+      return { ...config(root), inputs: ['built'], setup: () => ({ execute: async () => { executions++; return 0; } }) };
+    } },
+  ];
+  assert.equal((await runChecks(definitions('first'), options)).exitCode, 0);
+  assert.equal(executions, 1);
+  assert.equal((await runChecks(definitions('first'), options)).results.find(item => item.id === 'tests').cached, 1);
+  assert.equal(executions, 1);
+  assert.equal((await runChecks(definitions('changed'), options)).exitCode, 0);
+  assert.equal(executions, 2, 'changed build invalidates the dependent cache before executing');
+});
+
+test('failed prerequisites never load dependent configuration or fixtures', async t => {
+  const root = await project(t, { 'test/a.test.mjs': '' });
+  let loaded = false;
+  const result = await runChecks([
+    { id: 'broken', command: [process.execPath, '-e', 'process.exit(7)'] },
+    { id: 'blocked', dependsOn: ['broken'], config: () => { loaded = true; throw Error('should not load'); } },
+    { id: 'independent', config: config(root) },
+  ], options);
+  assert.equal(loaded, false);
+  assert.equal(result.results.find(item => item.id === 'blocked').skipped, true);
+  assert.equal(result.results.find(item => item.id === 'independent').exitCode, 0);
 });

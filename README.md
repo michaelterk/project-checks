@@ -145,11 +145,11 @@ process.exitCode = (await runChecks(checks)).exitCode;
 ```
 
 `loadChecks` expands targets and dependencies without executing checks.
-`runChecks` owns shared admission, cancellation and cleanup. It loads every
-selected suite's configuration and scans its tests before executing any checks.
-Configuration factories and input callbacks must therefore be ready before
-build commands or tests run. Prerequisites still control execution and fixture
-setup; a failed prerequisite prevents that dependent from running. Duplicate IDs,
+`runChecks` owns shared admission, cancellation and cleanup. It loads and scans
+independent suites together before executing checks. Dependent configuration
+factories and cache scans wait for successful prerequisites, so generated inputs
+exist and reflect the completed build. A failed prerequisite prevents its
+dependent from loading configuration, scanning evidence or running fixtures. Duplicate IDs,
 unknown dependencies and cycles fail. Final verification rechecks participating
 suite inputs and loaded JSON configurations before the invocation succeeds.
 
@@ -215,22 +215,19 @@ project-checks coverage --config project-checks.project.json --target complete
 
 ## Cache behavior and inputs
 
-`runChecks` performs one global scan across all selected suites, including nested
-projects, before starting build commands, fixture setup or tests. All passing
-records enter one shared queue with up to 16 concurrent reads. Coverage and
-other retained artifacts are validated and restored under resource admission
-before a file is counted as skippable. One combined console summary reports the
-number of files planned to run or be skipped and the scan duration. The runner
-then schedules only the files
-that need execution using its in-memory plan. Missing or corrupt records and
-incompatible artifacts rerun. Builds and fixture setup retain their dependency
-order after the scan. Input changes caused by those steps fail the existing
-input verification; they cannot certify a stale plan as a passing invocation.
-Retries and final input verification retain their existing checks. Standalone
-`runTests` and `runCachedUnits` calls scan their own selected files.
+`runChecks` scans initially ready suites together, including independent nested
+projects, before starting commands, fixture setup or tests. Dependent suites load
+configuration and scan only after their prerequisites pass. All passing records
+enter one shared queue with up to 16 concurrent reads. Coverage and other retained
+artifacts are validated and restored under resource admission before a file is
+counted as skippable. A combined summary covers initially ready suites; dependent
+suites report their plans as prerequisites finish. The runner schedules files
+from these in-memory plans. Missing or corrupt records and incompatible artifacts
+rerun. Fixture setup, retries and final input verification retain their existing
+checks. Standalone `runTests` and `runCachedUnits` scan their own selected files.
 
 ```text
-CACHE_SCAN: checks | Scanning all selected test files | Concurrency: 16
+CACHE_SCAN: checks | Scanning initially ready test files | Concurrency: 16
 CACHE_SCAN: checks | Will run: 32 | Will skip: 208 | Total: 240 | Duration: 0.12s
 ```
 

@@ -20,7 +20,7 @@ function observeRecords(t, directory, observe) {
 const config = (root, suite) => ({ root, suite, inputs: [], coverage: false });
 const project = async t => realpath(await temporary(t));
 
-test('one global scan reads every suite once through 16 slots before builds, setup or tests', async t => {
+test('one initial scan reads independent suites once through 16 slots before commands, setup or tests', async t => {
   const root = await project(t);
   for (let index = 0; index < 40; index++) await put(root, `test/${index}.test.mjs`, 'old');
   const cacheDirectory = join(root, '.test-cache/project-checks');
@@ -45,12 +45,8 @@ test('one global scan reads every suite once through 16 slots before builds, set
     assert.equal(active, 0);
     assert.ok(lines.some(line => /CACHE_SCAN: checks \| Will run: 40 \| Will skip: 40 \| Total: 80/.test(line)));
   };
-  definitions[0].dependsOn = ['build'];
-  definitions[1].dependsOn = ['one'];
   for (const definition of definitions) definition.config.setup = async () => {
     assertScanned();
-    assert.equal(await readFile(join(root, 'built'), 'utf8'), 'ready');
-    if (definition.id === 'two') assert.equal(commands, 20, 'dependent setup waits for the first suite');
     return { execute: () => { assertScanned(); commands++; return 0; } };
   };
   const result = await runChecks([
@@ -78,7 +74,7 @@ test('global scan failure drains siblings and never starts builds or setup', asy
   });
   await assert.rejects(runChecks([
     { id: 'build', cwd: root, command: [process.execPath, '-e', "require('node:fs').writeFileSync('built','unsafe')"] },
-    ...['one', 'two'].map(id => ({ id, dependsOn: ['build'], config: {
+    ...['one', 'two'].map(id => ({ id, config: {
       ...config(root, id), setup: () => { setup++; return { execute: () => 0 }; },
     } })),
   ], { logger: false, workers: 1 }), error => error === failure);
@@ -116,7 +112,7 @@ test('cancellation drains the global scan and releases suites waiting at its bar
   } }], { logger: false })).exitCode, 0);
 });
 
-test('nested selected projects produce one combined cached and uncached plan', async t => {
+test('nested dependent projects report plans after their prerequisites', async t => {
   const root = await project(t);
   await put(root, 'test/a.test.mjs', '');
   await put(root, 'cached.json', JSON.stringify({ inputs: [], coverage: false, suite: 'cached' }));
@@ -132,8 +128,9 @@ test('nested selected projects produce one combined cached and uncached plan', a
   });
   assert.equal(result.exitCode, 0);
   const scans = lines.filter(line => line.startsWith('CACHE_SCAN:'));
-  assert.equal(scans.length, 2);
-  assert.match(scans[1], /Will run: 1 \| Will skip: 1 \| Total: 2/);
+  assert.equal(scans.length, 3);
+  assert.match(scans[1], /Will run: 0 \| Will skip: 1 \| Total: 1/);
+  assert.match(scans[2], /Will run: 1 \| Will skip: 0 \| Total: 1/);
   assert.ok(lines.indexOf(scans[1]) < lines.findIndex(line => line.startsWith('==> Running')));
 });
 
@@ -155,7 +152,7 @@ test('setup changes after a cached global plan fail final verification', async t
   assert.equal((await runTests({ ...suite, logger: false, stdio: 'ignore' })).cached, 0);
 });
 
-test('failed prerequisites block fixture setup after every suite has scanned', async t => {
+test('failed prerequisites block dependent cache scans and fixture setup', async t => {
   const root = await project(t);
   await put(root, 'test/a.test.mjs', '');
   let blockedSetup = 0, closed = 0;
