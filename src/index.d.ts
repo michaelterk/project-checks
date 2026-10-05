@@ -52,6 +52,7 @@ export interface TestConfig {
   excludeTestsFromInputs?: boolean;
   /** Exclusions relative to root. Replaces default .git/.test-cache/__pycache__ exclusions. */
   ignore?: string[];
+  directoryIgnore?: { directories?: string[]; files?: string[] };
   /** Worker cap; omitted starts at half the CPU budget and tunes within resource caps. */
   workers?: number;
   resources?: ResourcePolicy;

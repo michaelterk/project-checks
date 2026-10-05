@@ -23,11 +23,27 @@ and install that archive in another project:
 npm pack
 
 # In your project (adjust the path)
-npm install --save-dev /path/to/project-checks/project-checks-0.3.5.tgz
+npm install --save-dev /path/to/project-checks/project-checks-0.3.6.tgz
 ```
 
 After a maintainer publishes it under this name, installation will be
 `npm install --save-dev project-checks`.
+
+### Ordinary directory inputs
+
+The packaged `project-checks.config.json` defines the default `directoryIgnore`
+policy; programmatic runners and local JSON configurations inherit it. Supplying
+a `directoryIgnore` object replaces the whole policy; `{}` disables it.
+
+`directoryIgnore` separates directory patterns from disposable file patterns:
+`{ directories: ["**/node_modules", "**/dist"], files: ["**/*.[mM][dD]"] }`.
+These rules apply only while walking input folders. A broad `inputs: ["."]` scan
+omits incidental dependencies, build directories and Markdown. An explicitly
+declared `node_modules/example` or `dist/server` root still binds every meaningful
+nested directory, including package `dist/` and nested dependencies. Disposable
+file rules, such as Markdown exclusion, continue to apply inside explicit roots.
+Unlike `ignore`, this option does not filter test discovery or external
+`testFixtureInputs`; those remain the adapter's responsibility.
 
 ## Import
 
@@ -246,16 +262,18 @@ or interruption. A failed test reruns on the next invocation. Corrupt evidence
 also reruns. Input snapshots are checked after successful commands and again
 before reporting suite success, including when all tests were cached.
 
-The default `inputs: ['.']` fingerprints the full project tree: hidden files,
-tests, configuration, installed dependencies and symlink targets. `.git`,
-`.test-cache` and Python `__pycache__` directories are excluded. Symlink cycles
+The default `inputs: ['.']` fingerprints ordinary project files, subject to the
+packaged `directoryIgnore` policy. Declare dependencies and tested build outputs
+explicitly to bind their bytes. Other hidden files, tests, source configuration
+and symlink targets remain inputs. `.git`, `.test-cache` and Python `__pycache__`
+directories are excluded. Symlink cycles
 retain their targets without being traversed repeatedly. The configured cache
 directory is always excluded. Validity uses only existence and SHA-256 content
 hashes. File/directory names, root paths, attributes, commands, environment,
 runtime identities and retry settings do not enter the validity key. Directory
 presence has no byte content and is represented by existence with a null hash.
 Suite and test IDs select the cache record; they are not part of its validity.
-Defaults favor complete input tracking, which can be expensive for large trees.
+Broad source folders can still be expensive; use the smallest complete input set.
 
 For per-file reuse after editing a test, explicitly select shared source,
 dependencies, configuration and fixtures:
@@ -383,6 +401,7 @@ inside Node's own test runner.
 | `inputs` | `['.']` | Shared input paths/globs relative to root |
 | `testInputs` | `{}` | Dependency mapping or sync/async callback returning relative paths/globs |
 | `excludeTestsFromInputs` | `false` | Omit runnable tests from dependency folders/globs; own and explicit file inputs remain |
+| `directoryIgnore` | Packaged JSON folder/file policy | Replaces the complete traversal policy; explicit dependency/output subtrees retain their directories |
 | `ignore` | `.git`, `.test-cache`, `__pycache__` trees | Replaces default root-relative exclusions |
 | `workers` | Automatically tuned CPU/RAM-derived count | Positive integer worker cap |
 | `resources` | See below | Resource policy |

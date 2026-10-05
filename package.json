@@ -1,6 +1,6 @@
 {
   "name": "project-checks",
-  "version": "0.3.5",
+  "version": "0.3.6",
   "description": "Configurable test commands with resource-aware concurrency and verified passing-test caching.",
   "license": "MIT",
   "repository": { "type": "git", "url": "git+https://github.com/michaelterk/project-checks.git" },

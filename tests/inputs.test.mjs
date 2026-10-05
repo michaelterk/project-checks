@@ -270,3 +270,68 @@ test('ancestor symlink cycles contribute existence without their names or target
   await rm(join(config.root, 'src/renamed'));
   assert.deepEqual(await snapshot(), before);
 });
+
+
+test('directory policies prune incidental folders and files while explicit dependency and output roots remain bound', async t => {
+  const config = await fixture(t);
+  const directories = ['.venv', 'test-cache', '.test-cache', 'node_modules', '.coverage', '.data', 'tmp', 'output', 'stage', '.local', '.astro', 'temp', 'dist', 'runtime'];
+  config.inputs = ['.'];
+  config.directoryIgnore = { directories: directories.map(name => `**/${name}`), files: ['**/.gitignore', '**/*.[mM][dD]', '**/.env', '**/.env.*'] };
+  await put(config.root, 'src/module.mjs', 'source');
+  const snapshot = createSnapshot(config);
+  t.after(() => snapshot.close());
+  const before = await snapshot();
+  for (const directory of directories) await put(config.root, `${directory}/ignored.bin`, 'incidental');
+  for (const file of ['README.md', 'NOTES.MD', '.gitignore', '.env', '.env.local']) await put(config.root, file, 'incidental');
+  assert.deepEqual(await snapshot(), before);
+  await put(config.root, 'src/template.mjs', 'meaningful');
+  assert.notDeepEqual(await snapshot(), before, 'directory names are not substring matches');
+
+  const dependency = await put(config.root, 'node_modules/example/index.mjs', 'dependency');
+  const nested = await put(config.root, 'node_modules/example/node_modules/nested/index.mjs', 'nested dependency');
+  const output = await put(config.root, 'dist/server/entry.mjs', 'built output');
+  const packageBuild = await put(config.root, 'node_modules/example/dist/esm/index.mjs', 'actual runtime entrypoint');
+  const packageData = await put(config.root, 'node_modules/example/runtime/data.bin', 'meaningful runtime data');
+  config.inputs.push('node_modules/example', 'dist/server');
+  const selected = createSnapshot(config);
+  t.after(() => selected.close());
+  for (const file of [dependency, nested, output, packageBuild, packageData]) {
+    const before = await selected();
+    await writeFile(file, 'changed meaningful bytes');
+    assert.notDeepEqual(await selected(), before, file);
+  }
+  const markdown = await selected();
+  await put(config.root, 'node_modules/example/README.md', 'new documentation');
+  assert.deepEqual(await selected(), markdown, 'unrelated directory rules still apply inside an explicit package');
+});
+
+test('directory policies leave test discovery and external fixture binding unchanged', async t => {
+  const config = await fixture(t);
+  config.directoryIgnore = { directories: ['**/test', '**/runtime'] };
+  const runtime = await temporary(t);
+  const input = await put(runtime, 'runtime/input.bin', 'fixture');
+  config.inputs = [];
+  config.testFixtureInputs = () => [runtime];
+  const snapshot = createSnapshot(config);
+  t.after(() => snapshot.close());
+  const before = await snapshot();
+  assert.deepEqual(Object.keys(before.units), ['test/a.test.mjs']);
+  await writeFile(input, 'changed fixture');
+  assert.notDeepEqual(await snapshot(), before);
+});
+
+
+test('packaged JSON directory defaults apply to raw snapshots and explicit overrides replace them', async t => {
+  const config = await fixture(t);
+  const file = await put(config.root, 'src/node_modules/package/index.mjs', 'first');
+  const defaults = createSnapshot(config);
+  t.after(() => defaults.close());
+  const before = await defaults();
+  await writeFile(file, 'changed dependency');
+  assert.deepEqual(await defaults(), before);
+  const explicit = createSnapshot({ ...config, directoryIgnore: {} });
+  t.after(() => explicit.close());
+  const bound = await explicit();
+  await writeFile(file, 'another dependency');
+  assert.notDeepEqual(await explicit(), bound);
+});

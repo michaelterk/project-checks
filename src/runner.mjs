@@ -4,7 +4,7 @@ import { Admission } from './admission.mjs';
 import { withProcessSignal } from './cancellation.mjs';
 import { readFile, realpath } from 'node:fs/promises';
 import { basename, join, resolve, delimiter } from 'node:path';
-import { defineConfig, defaultIgnore } from './config.mjs';
+import { defineConfig, defaultIgnore, defaultDirectoryIgnore } from './config.mjs';
 import { runCachedUnits } from './cache.mjs';
 import { commandEnvironment, runCommand } from './command.mjs';
 import { createSnapshot, createSnapshotContext, discoverTests, selectTests } from './inputs.mjs';
@@ -23,6 +23,7 @@ async function normalizeConfig(options) {
     pattern: options.pattern ?? '**/*.test.{js,mjs,cjs}',
     inputs: options.inputs ?? ['.'],
     ignore: options.ignore ?? defaultIgnore,
+    directoryIgnore: options.directoryIgnore ?? structuredClone(defaultDirectoryIgnore),
     cacheDirectory: resolve(root, options.cacheDirectory ?? '.test-cache/project-checks'),
   };
   if (inside(config.cacheDirectory, root) || inside(config.cacheDirectory, resolve(root, config.testDirectory)))

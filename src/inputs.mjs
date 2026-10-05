@@ -3,7 +3,21 @@ import { createReadStream } from 'node:fs';
 import { glob, lstat, readdir, readlink, realpath } from 'node:fs/promises';
 import { dirname, join, matchesGlob, relative, resolve } from 'node:path';
 import { digest, inside, slash, text } from './util.mjs';
-import { defineConfig } from './config.mjs';
+import { defineConfig, defaultDirectoryIgnore } from './config.mjs';
+
+// Generic folder rules do not prune an explicitly selected dependency/output
+// subtree. Disposable file rules still apply within that explicit subtree.
+function directoryExclusions(config, root) {
+  const { directories = [], files = [] } = config.directoryIgnore ?? defaultDirectoryIgnore;
+  const ancestors = [];
+  for (let file = root; inside(config.root, file); file = dirname(file)) {
+    ancestors.push(slash(relative(config.root, file)));
+    if (file === config.root) break;
+  }
+  const explicit = ancestors.some(id => directories.some(pattern => matchesGlob(id, pattern)));
+  const patterns = explicit ? files : [...directories, ...files];
+  return file => patterns.some(pattern => matchesGlob(slash(relative(config.root, file)), pattern));
+}
 
 // One queue bounds leaf work. Visitors enqueue children without awaiting them.
 export function createSnapshotContext({ signal } = {}) {
@@ -74,7 +88,7 @@ export function createSnapshotContext({ signal } = {}) {
       const values = new Array(files.length);
       let remaining = 0;
       const failures = [];
-      function enqueue(file, ancestors, assign) {
+      function enqueue(file, ancestors, assign, directoryExcluded) {
         remaining++;
         run(async () => {
           if (failures.length) return;
@@ -94,7 +108,7 @@ export function createSnapshotContext({ signal } = {}) {
             const value = ['symlink', readlinkTarget, null];
             assign(value);
             if (ancestors.has(target)) value[2] = ['cycle', target];
-            else enqueue(target, ancestors, identity => { value[2] = identity; });
+            else enqueue(target, ancestors, identity => { value[2] = identity; }, directoryExcluded);
           } else if (info.isFile()) {
             assign(['file', await fileIdentity(file, info)]);
           } else if (info.isDirectory()) {
@@ -104,15 +118,15 @@ export function createSnapshotContext({ signal } = {}) {
             }
             if (ancestors.has(canonical)) { assign(['cycle', canonical]); return; }
             const nested = new Set(ancestors).add(canonical);
-            const entries = (await readdir(file)).sort().filter(name => !exclude(join(file, name)) && !excludedFiles.has(join(file, name))).map(name => [name, null]);
+            const entries = (await readdir(file)).sort().filter(name => !exclude(join(file, name)) && !directoryExcluded(join(file, name)) && !excludedFiles.has(join(file, name))).map(name => [name, null]);
             assign(['directory', entries]);
-            for (const entry of entries) enqueue(join(file, entry[0]), nested, identity => { entry[1] = identity; });
+            for (const entry of entries) enqueue(join(file, entry[0]), nested, identity => { entry[1] = identity; }, directoryExcluded);
           } else throw new Error(`Unsupported input type: ${file}`);
         }).catch(error => { if (!failures.length) failures.push(error); }).finally(() => {
           if (!--remaining) failures.length ? reject(failures[0]) : resolveIdentities(values);
         });
       }
-      files.forEach((file, index) => enqueue(file, new Set(), identity => { values[index] = identity; }));
+      files.forEach((file, index) => enqueue(file, new Set(), identity => { values[index] = identity; }, directoryExclusions(config, file)));
       if (!remaining) resolveIdentities(values);
     });
   }
@@ -202,7 +216,12 @@ export function createSnapshot(config, context = createSnapshotContext()) {
     for (const file of [...selected].sort()) {
       let parent = dirname(file);
       while (inside(config.root, parent) && parent !== config.root && !selected.has(parent)) parent = dirname(parent);
-      if (file !== config.root && selected.has(parent) && !excludedFiles.has(file)) continue;
+      if (file !== config.root && selected.has(parent) && !excludedFiles.has(file)) {
+        const excluded = directoryExclusions(config, parent);
+        let current = file;
+        while (current !== parent && !excluded(current)) current = dirname(current);
+        if (current === parent) continue;
+      }
       roots.push(file);
     }
     return roots;
@@ -248,7 +267,7 @@ export function createSnapshot(config, context = createSnapshotContext()) {
       if (error.code === 'ENOENT') return config.cacheDirectory;
       throw error;
     }) : undefined;
-    const fixtureIdentities = await context.identify(fixturePaths, { ...config, ignore: [], fixtureCacheDirectory, allowMissing: true });
+    const fixtureIdentities = await context.identify(fixturePaths, { ...config, ignore: [], directoryIgnore: {}, fixtureCacheDirectory, allowMissing: true });
     const fixtureValues = new Map(fixturePaths.map((file, index) => [file, fixtureIdentities[index]]));
     const common = contentFingerprint(roots.map(file => values.get(file)));
     const units = {};

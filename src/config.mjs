@@ -6,8 +6,9 @@ import { command, integer, keys, text } from './util.mjs';
 import { selectConcurrency } from './resources.mjs';
 import defaultConfig from '../project-checks.config.json' with { type: 'json' };
 
-const options = ['extends', 'root', 'testDirectory', 'pattern', 'files', 'command', 'inputs', 'testInputs', 'excludeTestsFromInputs', 'ignore', 'workers', 'resources', 'cache', 'cacheDirectory', 'suite', 'env', 'testFixtureInputs', 'signal', 'logger', 'stdio', 'retryTimeouts', 'retryTimeoutMs', 'timeoutMs', 'admission', 'snapshotContext', 'diagnostics', 'progress', 'durationHints', 'initialDurations', 'select', 'setup', 'filters', 'engine', 'coverage', 'frameworkArgs', 'normalizeNpmEnvironment'];
-export const defaultIgnore = ['**/.git', '**/.git/**', '**/.test-cache', '**/.test-cache/**', '**/__pycache__', '**/__pycache__/**'];
+const options = ['extends', 'root', 'testDirectory', 'pattern', 'files', 'command', 'inputs', 'testInputs', 'excludeTestsFromInputs', 'ignore', 'directoryIgnore', 'workers', 'resources', 'cache', 'cacheDirectory', 'suite', 'env', 'testFixtureInputs', 'signal', 'logger', 'stdio', 'retryTimeouts', 'retryTimeoutMs', 'timeoutMs', 'admission', 'snapshotContext', 'diagnostics', 'progress', 'durationHints', 'initialDurations', 'select', 'setup', 'filters', 'engine', 'coverage', 'frameworkArgs', 'normalizeNpmEnvironment'];
+export const defaultDirectoryIgnore = defaultConfig.directoryIgnore;
+export const defaultIgnore = defaultConfig.ignore;
 
 function patterns(value, label, allowEmpty = false) {
   if (!Array.isArray(value) || (!allowEmpty && !value.length)) throw new TypeError(`${label} must be ${allowEmpty ? 'an' : 'a nonempty'} array of relative paths or glob patterns`);
@@ -33,6 +34,10 @@ export function defineConfig(config) {
   }
   if (config.excludeTestsFromInputs !== undefined && typeof config.excludeTestsFromInputs !== 'boolean') throw new TypeError('excludeTestsFromInputs must be a boolean');
   for (const key of ['inputs', 'ignore']) if (config[key] !== undefined) patterns(config[key], key, true);
+  if (config.directoryIgnore !== undefined) {
+    keys(config.directoryIgnore, ['directories', 'files'], 'directoryIgnore');
+    for (const key of ['directories', 'files']) if (config.directoryIgnore[key] !== undefined) patterns(config.directoryIgnore[key], `directoryIgnore.${key}`, true);
+  }
   if (config.testInputs !== undefined && typeof config.testInputs !== 'function') {
     keys(config.testInputs, Object.keys(config.testInputs), 'testInputs');
     for (const [id, inputs] of Object.entries(config.testInputs)) {

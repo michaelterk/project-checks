@@ -52,7 +52,7 @@ test('explicit shared inputs allow individual test edits and additions to rerun 
   assert.equal((await runTests(f.options)).total, 2);
 });
 
-test('default inputs include hidden files, sibling tests, installed dependencies and symlink targets', async t => {
+test('default folder scans omit incidental environments and dependencies but bind explicit packages, siblings and symlink targets', async t => {
   const f = await fixture(t);
   const external = await temporary(t);
   const linked = await put(external, 'value', 'first');
@@ -63,11 +63,15 @@ test('default inputs include hidden files, sibling tests, installed dependencies
   await put(f.root, 'test/a.test.mjs', f.source('../') + '\n// sibling dependency');
   assert.equal((await runTests(f.options)).passed, 2);
   await put(f.root, 'node_modules/example/index.js', 'second');
+  assert.equal((await runTests(f.options)).cached, 2);
+  f.options.inputs = ['.', 'node_modules/example'];
+  assert.equal((await runTests(f.options)).passed, 2);
+  await put(f.root, 'node_modules/example/index.js', 'third');
   assert.equal((await runTests(f.options)).passed, 2);
   await put(external, 'value', 'second');
   assert.equal((await runTests(f.options)).passed, 2);
   await put(f.root, '.env', 'FLAG=second');
-  assert.equal((await runTests(f.options)).passed, 2);
+  assert.equal((await runTests(f.options)).cached, 2);
 });
 
 test('environment overrides do not alter file-content evidence', async t => {

@@ -1,7 +1,9 @@
 {
   "testDirectory": "test",
   "pattern": "**/*.test.{js,mjs,cjs}",
-  "inputs": ["."],
+  "inputs": [
+    "."
+  ],
   "cache": true,
   "cacheDirectory": ".test-cache/project-checks",
   "resources": {
@@ -12,5 +14,46 @@
     "cpusPerWorker": 1,
     "memoryMiBPerWorker": 256,
     "divisor": 1
-  }
+  },
+  "directoryIgnore": {
+    "directories": [
+      "**/.git",
+      "**/.venv",
+      "**/test-cache",
+      "**/.test-cache",
+      "**/node_modules",
+      "**/.coverage",
+      "**/.data",
+      "**/tmp",
+      "**/output",
+      "**/stage",
+      "**/.local",
+      "**/.astro",
+      "**/temp",
+      "**/dist",
+      "**/runtime",
+      "**/__pycache__",
+      "**/.dev-tools"
+    ],
+    "files": [
+      "**/.gitignore",
+      "**/*.[mM][dD]",
+      "**/.env",
+      "**/.env.*",
+      "**/*.pyc",
+      "**/*.pyo",
+      "**/*.orig",
+      "**/.DS_Store",
+      "**/.guajiron-run.lock",
+      "**/.vscode/settings.json"
+    ]
+  },
+  "ignore": [
+    "**/.git",
+    "**/.git/**",
+    "**/.test-cache",
+    "**/.test-cache/**",
+    "**/__pycache__",
+    "**/__pycache__/**"
+  ]
 }
