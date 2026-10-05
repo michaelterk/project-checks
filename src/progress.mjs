@@ -18,8 +18,8 @@ export function createProgress({ logger = console, suites } = {}) {
     const count = state => values.filter(value => value === state).length;
     const success = count('success'), cached = count('cached');
     const failed = count('failed'), timedOut = count('timed-out');
-    return { success, cached, failed, timedOut, running: count('running'),
-      finished: success + cached + failed + timedOut, run: values.length - cached };
+    return { success, cached, failed, timedOut, running: count('running'), queued: count('queued'), validating: count('validating'),
+      finished: success + cached + failed + timedOut, run: values.filter(value => !['cached', 'queued', 'cancelled'].includes(value)).length };
   }
   function report(force = false) {
     if (closed || !totals.size || suites?.some(suite => !totals.has(suite))) return;
@@ -28,7 +28,7 @@ export function createProgress({ logger = console, suites } = {}) {
     lastPrinted = now;
     const value = counts();
     const total = [...totals.values()].reduce((sum, count) => sum + count, 0);
-    output(`TEST_PROGRESS: ${value.finished} out of ${total} test files finished | Skipped because cache: ${value.cached} | Failed: ${value.failed} | Timed out: ${value.timedOut} | Running: ${value.running}`);
+    output(`TEST_PROGRESS: ${value.finished} out of ${total} test files finished | Skipped because cache: ${value.cached} | Failed: ${value.failed} | Timed out: ${value.timedOut} | Queued: ${value.queued} | Running: ${value.running} | Validating: ${value.validating}`);
   }
   // Append ordinary lines in redirected logs; never repaint the terminal.
   const timer = logger ? setInterval(() => report(true), 5000) : undefined;
@@ -37,12 +37,16 @@ export function createProgress({ logger = console, suites } = {}) {
       if (closed) return;
       if (totals.get(suite) === total) return;
       totals.set(suite, total);
+      if (total === 0) for (const key of files.keys()) if (key.startsWith(`${suite}\0`)) files.delete(key);
       report(true);
     },
     file(suite, file, event, fields = {}) {
       if (closed) return;
       const key = `${suite}\0${file}`;
-      if (event === 'file-start') files.set(key, 'running');
+      if (event === 'file-queued') files.set(key, 'queued');
+      else if (event === 'file-cancelled') files.set(key, 'cancelled');
+      else if (event === 'file-validating') files.set(key, 'validating');
+      else if (event === 'file-start') files.set(key, 'running');
       else if (event === 'cache-hit') files.set(key, 'cached');
       else if (event === 'file-end') files.set(key,
         fields.timedOut ? 'timed-out' : fields.status === 0 ? 'success'

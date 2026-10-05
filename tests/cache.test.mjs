@@ -30,7 +30,7 @@ function observeRecordReads(t, directory, observe) {
   t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
 }
 
-test('upfront plans share 16 concurrent reads and never reread records during execution', async t => {
+test('upfront plans share 32 concurrent reads and never reread records during execution', async t => {
   const directory = await temporary(t);
   const ids = Array.from({ length: 40 }, (_, index) => `file-${index}`);
   const inputs = { common: 'shared', units: Object.fromEntries(ids.map(id => [id, 'v1'])) };
@@ -66,7 +66,7 @@ test('upfront plans share 16 concurrent reads and never reread records during ex
       return 0;
     },
   })));
-  assert.equal(peak, 16);
+  assert.equal(peak, 32);
   assert.equal(reads.size, 80);
   assert.ok([...reads.values()].every(count => count === 1));
   for (let index = 0; index < results.length; index++) {

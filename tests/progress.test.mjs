@@ -184,3 +184,44 @@ test('stdout redirected to a file contains visible progress and final summary', 
   assert.match(output, /\nTEST_SUMMARY: Tests run: 1.*Duration: [\d.]+s \| PASS\n/);
   assert.doesNotMatch(output, /[\r\x1b]/);
 });
+
+test('queued and validating files are distinct from executing commands until evidence drains', async t => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const root = await temporary(t);
+  await put(root, 'artifact', 'coverage');
+  const saving = Promise.withResolvers(), release = Promise.withResolvers();
+  const { lines, logger } = capture();
+  const starts = [];
+  const running = runCachedUnits({
+    cache: false, workers: 1, logger,
+    units: ['a', 'b'].map(id => ({ id, identity: 'fixture' })),
+    snapshot: () => ({ common: 'stable', units: { a: 'stable', b: 'stable' } }),
+    execute: unit => { starts.push(unit.id); return 0; },
+    restoreEvidence: () => true,
+    saveEvidence: async unit => {
+      if (unit.id === 'a') { saving.resolve(); await release.promise; }
+      return { files: [join(root, 'artifact')] };
+    },
+  });
+  await saving.promise;
+  t.mock.timers.tick(5000);
+  assert.deepEqual(starts, ['a']);
+  assert.match(lines.at(-1), /0 out of 2.*Queued: 1 \| Running: 0 \| Validating: 1/);
+  release.resolve();
+  assert.equal((await running).exitCode, 0);
+  assert.match(lines.at(-2), /2 out of 2.*Queued: 0 \| Running: 0 \| Validating: 0/);
+});
+
+
+test('cancellation clears queued counts without counting unstarted files as run', async () => {
+  const controller = new AbortController();
+  const { lines, logger } = capture();
+  await assert.rejects(runCachedUnits({
+    cache: false, workers: 1, signal: controller.signal, logger,
+    units: ['a', 'b'].map(id => ({ id, identity: 'fixture' })),
+    snapshot: () => ({ common: 'stable', units: { a: 'stable', b: 'stable' } }),
+    execute: () => { controller.abort(); controller.signal.throwIfAborted(); },
+  }), { name: 'AbortError' });
+  assert.match(lines.at(-2), /Queued: 0 \| Running: 0 \| Validating: 0/);
+  assert.match(lines.at(-1), /Tests run: 1.*INTERRUPTED/);
+});

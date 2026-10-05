@@ -20,7 +20,7 @@ function observeRecords(t, directory, observe) {
 const config = (root, suite) => ({ root, suite, inputs: [], coverage: false });
 const project = async t => realpath(await temporary(t));
 
-test('all independent and dependent suites are queued before the first of 16 scan workers reads', async t => {
+test('all independent and dependent suites are queued before the first of 32 scan workers reads', async t => {
   const root = await project(t);
   for (let index = 0; index < 40; index++) await put(root, `test/${index}.test.mjs`, 'old');
   const cacheDirectory = join(root, '.test-cache/project-checks');
@@ -35,7 +35,7 @@ test('all independent and dependent suites are queued before the first of 16 sca
   const lines = [];
   observeRecords(t, cacheDirectory, async (file, read) => {
     assert.equal(slowConfigReady, true, 'a fast suite cannot start scanning while another configuration is still loading');
-    assert.ok(lines.some(line => /Queued: 80 test files \| Concurrency: 16/.test(line)));
+    assert.ok(lines.some(line => /Queued: 80 test files \| Concurrency: 32/.test(line)));
     active++;
     peak = Math.max(peak, active);
     reads.set(file, (reads.get(file) ?? 0) + 1);
@@ -69,7 +69,7 @@ test('all independent and dependent suites are queued before the first of 16 sca
     ...definitions,
   ], { logger, workers: 1 });
   assert.equal(result.exitCode, 0);
-  assert.equal(peak, 16);
+  assert.equal(peak, 32);
   assert.ok([...reads.values()].every(count => count === 1));
   assert.equal(commands, 40);
   assert.equal(lines.filter(line => line.startsWith('CACHE_SCAN:')).length, 3);
@@ -93,7 +93,7 @@ test('global scan failure drains siblings and never starts builds or setup', asy
       ...config(root, id), setup: () => { setup++; return { execute: () => 0 }; },
     } })),
   ], { logger: false, workers: 1 }), error => error === failure);
-  assert.equal(entered, 16, 'the remaining queued files never start I/O after a fatal scan failure');
+  assert.equal(entered, 32, 'the remaining queued files never start I/O after a fatal scan failure');
   assert.equal(active, 0);
   assert.equal(setup, 0);
   await assert.rejects(readFile(join(root, 'built')), { code: 'ENOENT' });
@@ -154,7 +154,7 @@ test('nested dependent projects populate one complete queue with cached and unca
   assert.equal(result.exitCode, 0);
   const scans = lines.filter(line => line.startsWith('CACHE_SCAN:'));
   assert.equal(scans.length, 3);
-  assert.match(scans[1], /Queued: 2 test files \| Concurrency: 16/);
+  assert.match(scans[1], /Queued: 2 test files \| Concurrency: 32/);
   assert.match(scans[2], /Will run: 1 \| Will skip: 1 \| Total: 2/);
   assert.ok(lines.indexOf(scans[2]) < lines.findIndex(line => line.startsWith('==> Running')));
 });

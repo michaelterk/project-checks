@@ -16,7 +16,7 @@ function cpuTimes() {
     total += Object.values(times).reduce((sum, value) => sum + value, 0);
     idle += times.idle;
   }
-  return { total, idle, count: processors.length, pressure: pressureTime('cpu'), memoryPressure: pressureTime('memory'), time: performance.now() };
+  return { total, idle, count: processors.length, pressure: pressureTime('cpu'), memoryPressure: pressureTime('memory'), ioPressure: pressureTime('io'), time: performance.now() };
 }
 
 export function resourceSampler() {
@@ -29,6 +29,7 @@ export function resourceSampler() {
       busyCpus: total > 0 ? current.count * (1 - (current.idle - previous.idle) / total) : NaN,
       pressure: elapsed > 0 ? (current.pressure - previous.pressure) / (elapsed * 1000) : NaN,
       memoryPressure: elapsed > 0 ? (current.memoryPressure - previous.memoryPressure) / (elapsed * 1000) : NaN,
+      ioPressure: elapsed > 0 ? (current.ioPressure - previous.ioPressure) / (elapsed * 1000) : NaN,
       availableMemoryMiB: process.availableMemory() / 1024 ** 2,
     };
     previous = current;

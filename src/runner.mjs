@@ -63,7 +63,7 @@ export async function runTests(options = {}, lifecycle = {}) {
   return withProgress(options, progress => withProcessSignal(options.signal, signal => runTestsWithSignal({ ...options, progress, signal }, lifecycle)));
 }
 
-async function runTestsWithSignal(options, { retained, normalPhase, cacheScan, queueScan }) {
+async function runTestsWithSignal(options, { retained, normalPhase, cacheScan, queueScan, executeFiles }) {
   const config = await normalizeConfig(options);
   const { root } = config;
   if (config.coverage?.report) config.ignore = [...config.ignore, config.coverage.report, `${config.coverage.report}.*.tmp`];
@@ -135,7 +135,7 @@ async function runTestsWithSignal(options, { retained, normalPhase, cacheScan, q
         execute: (unit, { reportTimeout }) => (fixture?.execute ?? runCommand)(unit.command, {
           cwd: root, env, signal: config.signal, playwrightTest: true, onTimeout: reportTimeout, timeoutMs: config.timeoutMs,
         }),
-      }, { queueScan, cacheScan, prepareExecution });
+      }, { queueScan, cacheScan, prepareExecution, executeFiles });
     }
     const retryTimeouts = options.retryTimeouts ?? false;
     const retryTimeoutMs = options.retryTimeoutMs ?? 60000;
@@ -197,7 +197,7 @@ async function runTestsWithSignal(options, { retained, normalPhase, cacheScan, q
         if (status === 0) hints.record(unit.id, (performance.now() - started) / 1000);
         return status;
       },
-    }, { queueScan, cacheScan, prepareExecution });
+    }, { queueScan, cacheScan, prepareExecution, executeFiles });
     diagnostics?.event('snapshot-final', { suite: config.suite, call: snapshotCalls, seconds: lastSnapshotSeconds });
     if (!result.inputsChanged) await hints.save();
     if (!result.exitCode && artifacts && files.length === selection.length) {

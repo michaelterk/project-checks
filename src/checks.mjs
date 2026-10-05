@@ -1,4 +1,5 @@
 import { resolve } from 'node:path';
+import { createFileQueue } from './file-queue.mjs';
 import { Admission } from './admission.mjs';
 import { withProcessSignal } from './cancellation.mjs';
 import { loadConfig } from './config.mjs';
@@ -59,7 +60,7 @@ export async function runChecks(definitions, options = {}) {
     const pending = new Map(), completed = new Map(), launched = new Set(), suites = new Map();
     const retained = [];
     const blocked = new Error('Check prerequisite failed');
-    let executing = false, scanning = false;
+    let executing = false, scanning = false, fileQueue;
     const scanned = Promise.withResolvers();
     scanned.promise.catch(() => {});
     const phases = new Map(definitions.map(({ id }) => {
@@ -117,9 +118,10 @@ export async function runChecks(definitions, options = {}) {
         launched.add(id);
         const failed = (definition.dependsOn ?? []).some(dependency => completed.get(dependency).exitCode);
         if (definition.config !== undefined) {
-          if (failed) { progress && progress.files(id, 0); suites.get(id).permission.reject(blocked); }
+          if (failed) { progress && progress.files(id, 0); fileQueue.skip(id); suites.get(id).permission.reject(blocked); }
           else {
             phases.get(id)(true);
+            fileQueue.enable(id);
             suites.get(id).permission.resolve();
           }
         } else {
@@ -161,10 +163,12 @@ export async function runChecks(definitions, options = {}) {
             } : false;
             return { id, ...await runTests({ ...config, signal, admission, snapshotContext, logger: logger ?? false, progress: suiteProgress }, {
               retained, normalPhase: phases.get(id),
+              executeFiles: () => fileQueue.run(id),
               queueScan: jobs => { queued.resolve(jobs); return scanned.promise; },
               cacheScan: plan => { ready.resolve(plan); return permission.promise; },
             }) };
           } catch (error) {
+            fileQueue?.skip(id, error);
             if (error === blocked) return { id, exitCode: 1, skipped: true };
             ready.reject(error);
             if (!executing) controller.abort(error);
@@ -183,7 +187,7 @@ export async function runChecks(definitions, options = {}) {
         await scanCacheJobs(jobs.map(run => async () => {
           try { signal.throwIfAborted(); await run(); }
           catch (error) { controller.abort(error); throw error; }
-        }));
+        }), options.resources);
       } finally {
         scanning = false;
         if (signal.aborted) scanned.reject(signal.reason);
@@ -196,6 +200,7 @@ export async function runChecks(definitions, options = {}) {
       const total = prepared.reduce((sum, { value }) => sum + value.total, 0);
       const cached = prepared.reduce((sum, { value }) => sum + value.cached, 0);
       if (testDefinitions.length) logger?.log(`CACHE_SCAN: checks | Will run: ${total - cached} | Will skip: ${cached} | Total: ${total} | Duration: ${((performance.now() - started) / 1000).toFixed(2)}s`);
+      fileQueue = createFileQueue([...suites.keys()].map((id, index) => ({ id, jobs: prepared[index].value.jobs })), admission, signal);
       executing = true;
       launchReady();
       let settled;
@@ -217,6 +222,7 @@ export async function runChecks(definitions, options = {}) {
         stopPreparation();
         await Promise.all(pending.values());
       }
+      await fileQueue?.close();
       signal.removeEventListener('abort', stopPreparation);
       try {
         const closed = await Promise.allSettled(retained.map(handle => handle.close()));

@@ -23,7 +23,7 @@ and install that archive in another project:
 npm pack
 
 # In your project (adjust the path)
-npm install --save-dev /path/to/project-checks/project-checks-0.3.6.tgz
+npm install --save-dev /path/to/project-checks/project-checks-0.4.0.tgz
 ```
 
 After a maintainer publishes it under this name, installation will be
@@ -237,7 +237,7 @@ project-checks coverage --config project-checks.project.json --target complete
 `runChecks` runs required builds, then collects every selected suite, including
 nested projects and suites with test dependencies. It populates one shared queue
 with a scan job for every selected test file before any scan worker starts.
-The 16 workers drain this complete queue; suites do not feed additional jobs as
+The scan pool starts with 32 workers and drains this complete queue; suites do not feed additional jobs as
 earlier jobs finish. Each job checks its cache record and validates and restores
 retained artifacts under resource admission. Cache-disabled files enter the plan
 as runnable without reading evidence.
@@ -245,14 +245,23 @@ as runnable without reading evidence.
 One combined summary reports the number of files planned to run or be skipped.
 Build prerequisites run before the queue is populated; other commands, fixture
 setup and test execution follow their dependency order after scanning finishes.
-The runner schedules files from its in-memory plans. Missing or corrupt records
-and incompatible artifacts rerun. Retries and final input verification retain
+After scanning, every cache miss enters one invocation-wide execution queue
+before any test file starts. Enqueue order follows check definition order, then
+each suite's discovery order (or its configured stable duration-hint order).
+One dispatcher assigns the earliest dependency-ready file when admission grants
+a worker; suites have no independent file-worker loops. Files blocked by test
+dependencies do not occupy workers, and regain their original position when
+ready. An earlier ready suite retains its position while its fixture prepares,
+without holding a worker slot. Each file keeps its suite's configuration, fixture,
+snapshot, coverage artifacts, and evidence checks. Its worker remains occupied
+through post-command validation and evidence persistence. Missing or corrupt
+records and incompatible artifacts rerun. Retries and final input verification retain
 their existing checks. Standalone `runTests` and `runCachedUnits` scan their own
 selected files.
 
 ```text
-CACHE_SCAN: checks | Collecting all selected test files | Concurrency: 16
-CACHE_SCAN: checks | Queued: 240 test files | Concurrency: 16
+CACHE_SCAN: checks | Collecting all selected test files | Concurrency: 32
+CACHE_SCAN: checks | Queued: 240 test files | Concurrency: 32
 CACHE_SCAN: checks | Will run: 32 | Will skip: 208 | Total: 240 | Duration: 0.12s
 ```
 
@@ -439,7 +448,17 @@ Programmatic callers can pass one `Admission` instance to several
 one learned CPU weight; each suite keeps its own snapshot and passing evidence.
 The caller closes that pool after all calls settle. Explicit `workers` on
 `Admission` bounds artifact restoration and execution, within RAM, unit and
-worker caps. Lightweight passing-record reads use the separate shared limit of 16.
+worker caps. Lightweight passing-record reads use a separate shared adaptive
+pool, starting at 32 workers. Once per second, a queued backlog can add eight
+workers when measured CPU use predicts room for those workers within the active
+CPU budgets, free RAM covers the reserve plus a worker estimate, and CPU, memory,
+and I/O pressure each remain at or below 5%. Scan batches share the strictest
+active resource policy. CPU saturation or pressure reduces future admissions by
+eight, down to the initial 32; active scans drain normally. Each idle pool resets
+to 32. Linux I/O pressure comes from `/proc/pressure/io` (`some` stall time over
+the sampling interval); unavailable I/O data falls back to CPU and memory checks.
+Missing CPU or available-memory telemetry prevents growth. Artifact validation
+and restoration also retain command admission, independently of scan concurrency.
 Input fingerprinting bounds filesystem work at eight operations within one
 invocation, with fresh metadata on every snapshot. Content digests and path-only
 exclusion decisions are reused; listings and snapshots are not.
@@ -486,13 +505,17 @@ progress and summary lines through their logger by default. Output remains
 visible when redirected or piped to a log; it does not use terminal repainting.
 
 ```text
-TEST_PROGRESS: 42 out of 100 test files finished | Skipped because cache: 12 | Failed: 1 | Timed out: 0 | Running: 4
+TEST_PROGRESS: 42 out of 100 test files finished | Skipped because cache: 12 | Failed: 1 | Timed out: 0 | Queued: 52 | Running: 4 | Validating: 2
 TEST_SUMMARY: Tests run: 88 | Success: 85 | Skipped because cache: 12 | Failed: 2 | Timed out: 1 | Duration: 123.45s | FAIL
 ```
 
 The total counts selected test files, including cached files, rather than
 individual framework test cases or classes. Custom adapters count their units;
 framework actions such as Playwright snapshot updates count one command unit.
+Queued files await execution; running files have an executing command; validating
+files have finished their command and still occupy a worker for input/evidence
+checks. A file becomes finished after those checks settle. Suite aggregate coverage
+and invocation-wide final validation follow file completion.
 Retries replace the original file outcome and do not count as additional tests.
 The final `Timed out` count includes only verified timeouts still failing after
 the configured retry; a successful retry counts as success. `Failed` excludes

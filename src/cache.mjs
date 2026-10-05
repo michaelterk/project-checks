@@ -8,40 +8,12 @@ import { Admission } from './admission.mjs';
 import { createSnapshotContext } from './inputs.mjs';
 import { withProgress } from './progress.mjs';
 
-// Share scan capacity across invocations without occupying test workers.
-export const scanConcurrency = 16;
-const scanJobs = [];
-let nextScanJob = 0;
-let activeScanJobs = 0;
-function enqueueScanJobs(operations) {
-  const promises = operations.map(run => new Promise((resolve, reject) => {
-    scanJobs.push({ run, resolve, reject });
-  }));
-  // Populate the complete batch before allowing the first worker to start.
-  drainScanJobs();
-  return promises;
-}
-function drainScanJobs() {
-  while (activeScanJobs < scanConcurrency && nextScanJob < scanJobs.length) {
-    const { run, resolve, reject } = scanJobs[nextScanJob];
-    scanJobs[nextScanJob++] = undefined;
-    activeScanJobs++;
-    Promise.resolve().then(run).finally(() => {
-      activeScanJobs--;
-      drainScanJobs();
-    }).then(resolve, reject);
-  }
-  if (nextScanJob === scanJobs.length) { scanJobs.length = 0; nextScanJob = 0; }
-}
-function readCacheRecord(filename, signal) {
-  return enqueueScanJobs([() => {
-    signal?.throwIfAborted();
-    return readFile(filename, 'utf8');
-  }])[0];
-}
+import { createScanQueue, scanConcurrency } from './scan-queue.mjs';
+export { scanConcurrency } from './scan-queue.mjs';
 
-export async function scanCacheJobs(operations) {
-  const settled = await Promise.allSettled(enqueueScanJobs(operations));
+const scanQueue = createScanQueue();
+export async function scanCacheJobs(operations, resources) {
+  const settled = await Promise.allSettled(scanQueue.enqueue(operations, resources));
   const failure = settled.find(result => result.status === 'rejected');
   if (failure) throw failure.reason;
 }
@@ -58,11 +30,11 @@ export function cacheKey(snapshot, unitId) {
   return digest(JSON.stringify([snapshot.common, snapshot.units[unitId]]));
 }
 
-export async function runCachedUnits(options, { queueScan, cacheScan, prepareExecution } = {}) {
-  return withProgress(options, progress => withProcessSignal(options.signal, signal => runUnits({ ...options, progress, signal }, { queueScan, cacheScan, prepareExecution })));
+export async function runCachedUnits(options, { queueScan, cacheScan, prepareExecution, executeFiles } = {}) {
+  return withProgress(options, progress => withProcessSignal(options.signal, signal => runUnits({ ...options, progress, signal }, { queueScan, cacheScan, prepareExecution, executeFiles })));
 }
 
-async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, workers, resources, execute, cache = true, signal, logger = console, admission: sharedAdmission, retryTimeouts = false, restoreEvidence, saveEvidence, diagnostics, normalPhase, progress }, { queueScan, cacheScan, prepareExecution }) {
+async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, workers, resources, execute, cache = true, signal, logger = console, admission: sharedAdmission, retryTimeouts = false, restoreEvidence, saveEvidence, diagnostics, normalPhase, progress }, { queueScan, cacheScan, prepareExecution, executeFiles }) {
   if (workers !== undefined) integer(workers, 'workers');
   if (typeof retryTimeouts !== 'boolean') throw new TypeError('retryTimeouts must be a boolean');
   text(suite, 'suite');
@@ -116,12 +88,13 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
   let inputsChanged = false;
   let checking;
   const retries = [];
+  const startedFiles = new Set();
   const check = () => checking ??= takeSnapshot().finally(() => { checking = undefined; });
   const plan = units.map(unit => ({
     filename: cache ? join(cacheDirectory, cacheRecordName(suite, unit.id)) : undefined,
     expected: cacheKey(before, unit.id), cached: false,
   }));
-  async function scanUnit(index, read = readCacheRecord) {
+  async function scanUnit(index, read = filename => readFile(filename, 'utf8')) {
     signal?.throwIfAborted();
     const entry = plan[index];
     let cached;
@@ -177,10 +150,10 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
     }));
     if (stopped) throw fatal;
   }
-  async function runUnit(index, retry = false, originalFailure = 0) {
+  async function runUnit(index, retry = false, originalFailure = 0, admitted = false) {
     const unit = units[index];
     const { filename, expected } = plan[index];
-    await admission?.acquire({ exclusive: retry, signal });
+    if (!admitted) await admission?.acquire({ exclusive: retry, signal });
     if (retry) normalPhase?.(true);
     let status;
     let timedOut = false;
@@ -190,6 +163,7 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
       signal?.throwIfAborted();
       if (stopped) return;
       logger?.log(`==> ${retry ? 'Retrying timeout file alone (once)' : 'Running'} ${suite}/${unit.id}`);
+      startedFiles.add(index);
       progress && progress.file(suite, unit.id, 'file-start');
       executing = true;
       status = await execute(unit, { retry, reportTimeout: outcome => {
@@ -201,14 +175,14 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
       signal?.throwIfAborted();
       // A timeout is never a pass, even if a custom adapter returns zero.
       status = originalFailure || status || (timedOut ? 1 : 0);
-      progress && progress.file(suite, unit.id, 'file-end', { status, timedOut });
-      finished = true;
+      progress && progress.file(suite, unit.id, 'file-validating');
       results[index] = { id: unit.id, exitCode: status, cached: false };
       if (!retry && retryTimeouts && timedOut) retries.push({ index, originalFailure: ordinaryFailure ? status : 0 });
-      if (status !== 0) return;
+      if (status !== 0) { finished = true; return; }
       if (!isDeepStrictEqual(before, await check()) || inputsChanged) {
         logger?.error(`Inputs changed during ${suite}/${unit.id}; no passing evidence saved.`);
         inputsChanged = true;
+        finished = true;
         return;
       }
       let evidence;
@@ -219,6 +193,7 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
         if (!isDeepStrictEqual(before, await takeSnapshot()) || inputsChanged) {
           logger?.error(`Inputs changed while saving ${suite}/${unit.id}; no passing evidence saved.`);
           inputsChanged = true;
+          finished = true;
           return;
         }
         signal?.throwIfAborted();
@@ -231,9 +206,10 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
           await rename(temporary, filename);
         } finally { await rm(temporary, { force: true }); }
       }
+      finished = true;
     } finally {
-      if (executing && !finished) progress && progress.file(suite, unit.id, 'file-end', { status: 'interrupted' });
-      admission?.release();
+      if (executing) progress && progress.file(suite, unit.id, 'file-end', finished ? { status, timedOut } : { status: 'interrupted' });
+      if (!admitted) admission?.release();
     }
   }
   async function worker() {
@@ -260,30 +236,41 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
     } else if (cache) {
       if (!cacheScan) logger?.log(`CACHE_SCAN: ${suite} | Scanning ${units.length} test files | Concurrency: ${scanConcurrency}`);
       const prepare = async () => {
-        await scan(scanUnit);
+        await scanCacheJobs(units.map((_, index) => async () => {
+          if (stopped) return;
+          try { await scanUnit(index); }
+          catch (error) { if (!stopped) fatal = error; stopped = true; throw error; }
+        }), resources);
+        if (stopped) throw fatal;
         if (restoreEvidence) await scan(restoreUnit, Math.min(scanConcurrency, workers));
       };
       await (diagnostics ? diagnostics.span(suite, 'cache-scan', prepare) : prepare());
     }
     signal?.throwIfAborted();
+    for (let index = 0; index < units.length; index++) {
+      const { id } = units[index];
+      if (!plan[index].cached) {
+        runnable.push(index);
+        progress && progress.file(suite, id, 'file-queued');
+        continue;
+      }
+      results[index] = { id, exitCode: 0, cached: true };
+      diagnostics?.file(suite, id, 'cache-hit');
+      progress && progress.file(suite, id, 'cache-hit');
+    }
     if (cacheScan) {
       await cacheScan({
-        total: units.length, cached: plan.filter(entry => entry.cached).length,
+        total: units.length, cached: units.length - runnable.length,
+        jobs: runnable.map(index => () => runUnit(index, false, 0, true)),
       });
       signal?.throwIfAborted();
       await prepareExecution?.();
       signal?.throwIfAborted();
     }
-    for (let index = 0; index < units.length; index++) {
-      if (!plan[index].cached) { runnable.push(index); continue; }
-      const { id } = units[index];
-      results[index] = { id, exitCode: 0, cached: true };
-      diagnostics?.file(suite, id, 'cache-hit');
-      progress && progress.file(suite, id, 'cache-hit');
-    }
     if (!cacheScan) logger?.log(`CACHE_SCAN: ${suite} | Will run: ${runnable.length} | Will skip: ${units.length - runnable.length} | Duration: ${((performance.now() - started) / 1000).toFixed(2)}s${cache ? '' : ' | Cache disabled'}`);
     concurrency = Math.min(workers, runnable.length);
-    await Promise.all(Array.from({ length: concurrency }, worker));
+    if (executeFiles) await executeFiles();
+    else await Promise.all(Array.from({ length: concurrency }, worker));
     if (stopped) throw fatal;
     for (const { index, originalFailure } of retries) {
       normalPhase?.(false);
@@ -292,7 +279,11 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
       await runUnit(index, true, originalFailure);
     }
   }
-  finally { await artifacts?.close(); if (!sharedAdmission) admission?.close(); }
+  finally {
+    for (const index of runnable) if (!startedFiles.has(index)) progress && progress.file(suite, units[index].id, 'file-cancelled');
+    await artifacts?.close();
+    if (!sharedAdmission) admission?.close();
+  }
   if (stopped) throw fatal;
   signal?.throwIfAborted();
   if (!isDeepStrictEqual(before, await takeSnapshot())) {
