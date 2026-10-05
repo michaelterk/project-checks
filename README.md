@@ -23,7 +23,7 @@ and install that archive in another project:
 npm pack
 
 # In your project (adjust the path)
-npm install --save-dev /path/to/project-checks/project-checks-0.3.2.tgz
+npm install --save-dev /path/to/project-checks/project-checks-0.3.3.tgz
 ```
 
 After a maintainer publishes it under this name, installation will be
