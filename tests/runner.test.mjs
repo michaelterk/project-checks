@@ -21,7 +21,7 @@ async function fixture(t) {
   `;
   await put(root, 'test/a.test.mjs', source('../'));
   await put(root, 'test/nested/b.test.mjs', source('../../'));
-  const options = { root, workers: 2, logger: false, stdio: 'ignore' };
+  const options = { root, workers: 2, coverage: false, logger: false, stdio: 'ignore' };
   return { root, options, source };
 }
 
@@ -136,7 +136,7 @@ test('custom commands receive literal paths with spaces without shell expansion'
   const root = await temporary(t);
   await put(root, 'checks/a $(echo unsafe).spec', 'input');
   const result = await runTests({
-    root, testDirectory: 'checks', pattern: '*.spec', logger: false, stdio: 'ignore',
+    root, testDirectory: 'checks', pattern: '*.spec', coverage: false, logger: false, stdio: 'ignore',
     command: [process.execPath, '-e', `const fs = require('node:fs'); fs.readFileSync(process.argv[1]);`, '{file}'],
   });
   assert.equal(result.exitCode, 0);
@@ -148,7 +148,7 @@ test('changes and new discoveries during execution prevent passing evidence', as
   const root = await temporary(t);
   await put(root, 'test/one.test.mjs', 'first');
   const result = await runTests({
-    root, workers: 1, logger: false, stdio: 'ignore',
+    root, workers: 1, coverage: false, logger: false, stdio: 'ignore',
     command: [process.execPath, '-e', `require('node:fs').writeFileSync('test/new.test.mjs', 'new');`, '{file}'],
   });
   assert.equal(result.exitCode, 1);
@@ -159,7 +159,7 @@ test('changes and new discoveries during execution prevent passing evidence', as
 test('cache-disabled runs execute every time and create no cache directory', async t => {
   const root = await temporary(t);
   await put(root, 'test/one.test.mjs', "import test from 'node:test'; test('ok', () => {});");
-  const options = { root, cache: false, logger: false, stdio: 'ignore' };
+  const options = { root, cache: false, coverage: false, logger: false, stdio: 'ignore' };
   assert.equal((await runTests(options)).passed, 1);
   assert.equal((await runTests(options)).passed, 1);
   assert.deepEqual(await readdir(root), ['test']);
@@ -217,7 +217,7 @@ test('explicit cacheIdentity shares equivalent checkouts while retaining input a
   const first = await fixture(t);
   const second = await fixture(t);
   const cacheDirectory = await temporary(t);
-  const config = { cacheDirectory, cacheIdentity: 'same-project', inputs: ['src', 'test'], workers: 1, logger: false, stdio: 'ignore' };
+  const config = { cacheDirectory, cacheIdentity: 'same-project', inputs: ['src', 'test'], workers: 1, coverage: false, logger: false, stdio: 'ignore' };
   assert.equal((await runTests({ ...config, root: first.root })).passed, 2);
   assert.equal((await runTests({ ...config, root: second.root })).cached, 2);
   await put(second.root, 'src/value.mjs', 'export const value = 2;');
@@ -234,7 +234,7 @@ test('JSON per-test dependencies invalidate only their consumers, including focu
   for (const name of ['a', 'b']) await put(root, `test/${name}.test.mjs`, "import test from 'node:test'; test('ok', () => {});");
   const config = {
     inputs: ['shared'], testInputs: { 'test/a.test.mjs': ['src/a.mjs'], 'test/b.test.mjs': ['src/b.mjs'] },
-    workers: 1, logger: false, stdio: 'ignore',
+    workers: 1, coverage: false, logger: false, stdio: 'ignore',
   };
   const file = await put(root, 'checks.json', JSON.stringify(config));
   const run = async (overrides = {}) => runTests({ ...await loadConfig(file), ...overrides });
@@ -275,7 +275,7 @@ test('folder dependencies exclude full runnable inventory, retain helpers and sh
   const options = {
     root, inputs: [], excludeTestsFromInputs: true,
     testInputs: { 'test/': ['test', 'src/common'], 'test/a.test.mjs': ['src/a'] },
-    workers: 1, logger: false, stdio: 'ignore',
+    workers: 1, coverage: false, logger: false, stdio: 'ignore',
   };
   assert.equal((await runTests(options)).passed, 2);
   await put(root, 'test/a.test.mjs', source + '\n// changed own file');
@@ -306,7 +306,7 @@ test('empty fixture directory presence remains an input with independent-test ex
     import { existsSync } from 'node:fs';
     test('fixture exists', () => assert.ok(existsSync('fixtures/empty')));
   `);
-  const options = { root, inputs: [], testInputs: { 'test/a.test.mjs': ['fixtures'] }, excludeTestsFromInputs: true, workers: 1, logger: false, stdio: 'ignore' };
+  const options = { root, inputs: [], testInputs: { 'test/a.test.mjs': ['fixtures'] }, excludeTestsFromInputs: true, workers: 1, coverage: false, logger: false, stdio: 'ignore' };
   assert.equal((await runTests(options)).passed, 1);
   assert.equal((await runTests(options)).cached, 1);
   await rm(join(root, 'fixtures/empty'), { recursive: true });
@@ -326,7 +326,7 @@ test('shared folders exclude sibling tests while explicit runnable dependencies 
   const source = "import test from 'node:test'; test('ok', () => {});";
   for (const id of ['a', 'b']) await put(root, `test/${id}.test.mjs`, source);
   await put(root, 'test/helper.mjs', 'helper');
-  const options = { root, inputs: ['test'], excludeTestsFromInputs: true, workers: 1, logger: false, stdio: 'ignore' };
+  const options = { root, inputs: ['test'], excludeTestsFromInputs: true, workers: 1, coverage: false, logger: false, stdio: 'ignore' };
   await runTests(options);
   await put(root, 'test/a.test.mjs', source + '\n// changed');
   assert.deepEqual((await runTests(options)).results.map(result => result.cached), [false, true]);

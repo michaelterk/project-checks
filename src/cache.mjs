@@ -18,7 +18,7 @@ export async function runCachedUnits(options) {
   return withProcessSignal(options.signal, signal => runUnits({ ...options, signal }));
 }
 
-async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, workers, resources, execute, environment = process.env, ignoreEnv = [], cache = true, signal, logger = console, admission: sharedAdmission, retryTimeouts = false, restoreEvidence, saveEvidence, diagnostics }) {
+async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, workers, resources, execute, environment = process.env, ignoreEnv = [], cache = true, signal, logger = console, admission: sharedAdmission, retryTimeouts = false, restoreEvidence, saveEvidence, diagnostics, normalPhase }) {
   if (workers !== undefined) integer(workers, 'workers');
   if (typeof retryTimeouts !== 'boolean') throw new TypeError('retryTimeouts must be a boolean');
   text(suite, 'suite');
@@ -92,6 +92,7 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
     }
     if (cache && !hit) await rm(filename, { force: true });
     await admission?.acquire({ exclusive: retry, signal });
+    if (retry) normalPhase?.(true);
     let status;
     let timedOut = false;
     let ordinaryFailure = false;
@@ -179,6 +180,7 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
     await Promise.all(Array.from({ length: concurrency }, worker));
     if (stopped) throw fatal;
     for (const { index, originalFailure } of retries) {
+      normalPhase?.(false);
       signal?.throwIfAborted();
       if (!isDeepStrictEqual(before, await check())) inputsChanged = true;
       await runUnit(index, true, originalFailure);

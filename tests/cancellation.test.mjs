@@ -41,7 +41,7 @@ async function nodeFixture(t, api = 'runTests') {
   `);
   const command = [process.execPath, '--import', join(root, 'preload.mjs'), '--test', 'test/one.test.mjs'];
   const call = api === 'runTests'
-    ? `runTests({ root: ${JSON.stringify(root)}, inputs: [], retryTimeouts: true, workers: 1, logger: false, stdio: 'ignore', command: ${JSON.stringify([...command.slice(0, -1), '{file}'])} })`
+    ? `runTests({ root: ${JSON.stringify(root)}, inputs: [], coverage: false, retryTimeouts: true, workers: 1, logger: false, stdio: 'ignore', command: ${JSON.stringify([...command.slice(0, -1), '{file}'])} })`
     : api === 'runCommand'
       ? `runCommand(${JSON.stringify(command)}, { cwd: ${JSON.stringify(root)}, nodeTest: true, stdio: 'ignore', logger: null })`
       : `runCachedUnits({ cacheDirectory: 'cache', units: [{ id: 'one', identity: 'one' }], workers: 1, retryTimeouts: true, logger: null, snapshot: () => ({ common: 'constant', units: { one: 'constant' } }), execute: () => runCommand(${JSON.stringify(command)}, { cwd: ${JSON.stringify(root)}, nodeTest: true, stdio: 'ignore', logger: null }) })`;

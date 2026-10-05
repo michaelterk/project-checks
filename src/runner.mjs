@@ -1,6 +1,9 @@
+import { isDeepStrictEqual } from 'node:util';
+import { createCoverage } from './coverage.mjs';
+import { Admission } from './admission.mjs';
 import { withProcessSignal } from './cancellation.mjs';
 import { readFile, readdir, realpath } from 'node:fs/promises';
-import { basename, join, resolve } from 'node:path';
+import { basename, join, resolve, delimiter } from 'node:path';
 import { defineConfig, defaultIgnore } from './config.mjs';
 import { runCachedUnits } from './cache.mjs';
 import { commandEnvironment, runCommand } from './command.mjs';
@@ -9,7 +12,7 @@ import { digest, inside } from './util.mjs';
 import { createDurationHints } from './durations.mjs';
 
 async function implementationIdentity() {
-  const files = (await readdir(import.meta.dirname)).filter((name) => name.endsWith('.mjs')).sort();
+  const files = (await readdir(import.meta.dirname)).filter((name) => name.endsWith('.mjs') || name.endsWith('.py')).sort();
   return digest(
     JSON.stringify(
       await Promise.all(files.map(async (name) => [name, digest(await readFile(join(import.meta.dirname, name)))])),
@@ -73,32 +76,81 @@ export async function createFileSnapshot(options = {}) {
   return fileSnapshot(await normalizeConfig(options));
 }
 
-export async function runTests(options = {}) {
-  return withProcessSignal(options.signal, (signal) => runTestsWithSignal({ ...options, signal }));
+export async function runTests(options = {}, lifecycle = {}) {
+  return withProcessSignal(options.signal, (signal) => runTestsWithSignal({ ...options, signal }, lifecycle));
 }
 
-async function runTestsWithSignal(options) {
+async function runTestsWithSignal(options, { retained, normalPhase }) {
   const config = await normalizeConfig(options);
   const { root } = config;
+  if (config.coverage?.report) config.ignore = [...config.ignore, config.coverage.report, `${config.coverage.report}.*.tmp`];
   const diagnostics = config.diagnostics;
   const span = (stage, operation, fields) =>
     diagnostics ? diagnostics.span(config.suite, stage, operation, fields) : operation();
-  const files = selectTests(config, await span('test-discovery', () => discoverTests(config)));
+  const inventory = await span('test-discovery', () => discoverTests(config));
+  const selection = selectTests({ ...config, files: undefined }, inventory);
+  const files = selectTests({ ...config, files: options.files ?? selection }, inventory);
+  if (files.some(id => !selection.includes(id))) throw new Error('File is outside the selected suite');
   if (!files.length) throw new Error(`No test files found in ${config.testDirectory}`);
   diagnostics?.files(config.suite, files.length);
   const context = config.snapshotContext ?? createSnapshotContext({ signal: config.signal });
   config.snapshotContext = context;
-  let inputs;
+  let inputs, artifacts, fixture;
+  let before;
+  const admission = options.admission ?? new Admission(options.resources ?? {}, files.length + 1, { signal: config.signal, workers: options.workers });
+  let deferred = false;
+  const close = async () => {
+    try { await fixture?.close?.(); }
+    finally { try { await artifacts?.close(); } finally { await inputs?.close(); } }
+  };
   try {
     const hints = await span('duration-hints', () => createDurationHints(config, files, context));
     const env = commandEnvironment(options.env);
+    if (config.normalizeNpmEnvironment) {
+      for (const name of ['INIT_CWD', 'NODE', 'npm_execpath', 'npm_node_execpath', 'npm_config_local_prefix', 'npm_config_prefix', 'npm_config_user_agent']) delete env[name];
+      env.PATH = [join(root, 'node_modules/.bin'), ...(env.PATH ?? '').split(delimiter).filter(directory => !directory.endsWith('/node_modules/.bin') && !directory.endsWith('/node-gyp-bin'))].join(delimiter);
+    }
     const logger = options.logger === false ? null : (options.logger ?? console);
     const template = options.command ?? [process.execPath, '--test', '--test-concurrency=1', '{file}'];
-    const units = files.map((id) => ({ id, command: template.map((argument) => argument.replaceAll('{file}', id)) }));
-    const nodeTest = template.includes('--test') && /^node(?:\.exe)?$/.test(basename(template[0]));
+    const fileArgument = id => options.engine === 'playwright' ? `${resolve(root, id).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$` : id;
+    const units = files.map(id => ({ id, command: typeof template === 'function' ? template(id) : template.map(argument => argument.replaceAll('{file}', fileArgument(id))) }));
+    const nodeTest = options.engine === 'node' || (!options.engine && units.every(unit => unit.command.includes('--test') && /^node(?:\.exe)?$/.test(basename(unit.command[0]))));
+    const pythonTest = !options.engine && units.every(unit => /^python[0-9.]*(?:\.exe)?$/.test(basename(unit.command[0])));
+    const filters = options.filters ?? [];
+    if (filters.length && !nodeTest) throw new Error('Node filters require a Node test suite');
+    if (filters.length) {
+      config.cache = false;
+      for (const unit of units) unit.command.splice(unit.command.indexOf('--test') + 1, 0, ...filters);
+    }
+    const definition = config.coverage ?? (nodeTest ? {} : pythonTest ? { provider: 'python', python: units[0].command[0] } : false);
+    // Partial files can contribute coverage; filters never contribute complete evidence.
+    if (definition !== false && !filters.length) {
+      config.coverage = definition;
+      config.cacheIdentity = root;
+      artifacts = await createCoverage(config, env);
+      for (const unit of units) {
+        unit.command = artifacts.command(unit.command);
+        unit.identity = JSON.stringify([unit.command, artifacts.identity]);
+      }
+    }
+    fixture = await options.setup?.({ signal: config.signal });
+    if (options.engine === 'playwright' && options.frameworkArgs?.length) {
+      if (typeof template === 'function') throw new Error('Playwright actions require a command template');
+      const action = { id: 'framework-action', command: [...template.flatMap(argument => argument.includes('{file}')
+        ? (options.files?.length ? files.map(id => argument.replaceAll('{file}', fileArgument(id))) : []) : [argument]), ...options.frameworkArgs] };
+      return await runCachedUnits({
+        suite: `${config.suite}/action`, cache: false, resources: {}, admission, signal: config.signal, logger,
+        units: [action], snapshot: async () => ({ common: 'uncached-action', units: { 'framework-action': 'uncached-action' } }),
+        retryTimeouts: config.retryTimeouts, normalPhase, environment: env,
+        execute: (unit, { reportTimeout }) => (fixture?.execute ?? runCommand)(unit.command, {
+          cwd: root, env, signal: config.signal, playwrightTest: true, onTimeout: reportTimeout, timeoutMs: config.timeoutMs,
+        }),
+      });
+    }
     const retryTimeouts = options.retryTimeouts ?? false;
     const retryTimeoutMs = options.retryTimeoutMs ?? 60000;
     inputs = fileSnapshot(config);
+    before = await inputs.snapshot();
     let snapshotCalls = 0;
     let lastSnapshotSeconds = 0;
     const result = await runCachedUnits({
@@ -107,13 +159,15 @@ async function runTestsWithSignal(options) {
       units,
       workers: options.workers,
       resources: options.resources ?? {},
-      cache: options.cache ?? true,
+      cache: config.cache ?? true,
       signal: options.signal,
       logger,
       retryTimeouts,
+      normalPhase,
       environment: env,
       ignoreEnv: options.ignoreEnv,
-      admission: options.admission,
+      admission,
+      ...(artifacts ? { saveEvidence: artifacts.saveEvidence, restoreEvidence: artifacts.restoreEvidence } : {}),
       diagnostics,
       snapshot: () => {
         const call = ++snapshotCalls;
@@ -131,14 +185,17 @@ async function runTestsWithSignal(options) {
         diagnostics?.file(config.suite, unit.id, 'file-start', { retry });
         let status;
         try {
-          status = await runCommand(unit.command, {
+          const execute = fixture?.execute ?? runCommand;
+          status = await execute(unit.command, {
             cwd: root,
-            env,
+            env: artifacts ? await artifacts.environment(unit) : env,
+            retry, reportTimeout,
             signal: options.signal,
             stdio: options.stdio ?? 'inherit',
             logger,
             timeoutMs: options.timeoutMs,
-            nodeTest: nodeTest && retryTimeouts,
+            nodeTest,
+            playwrightTest: options.engine === 'playwright',
             testTimeoutMs: retry ? retryTimeoutMs : undefined,
             onTimeout: reportTimeout,
           });
@@ -154,10 +211,46 @@ async function runTestsWithSignal(options) {
     });
     diagnostics?.event('snapshot-final', { suite: config.suite, call: snapshotCalls, seconds: lastSnapshotSeconds });
     if (!result.inputsChanged) await hints.save();
+    if (!result.exitCode && artifacts && files.length === selection.length) {
+      await admission.acquire({ signal: config.signal });
+      try { result.exitCode = await artifacts.aggregate(units); }
+      finally { admission.release(); }
+    }
+    const verify = async () => {
+      if (!isDeepStrictEqual(before, await inputs.snapshot())) throw new Error('Check inputs changed during invocation');
+    };
+    if (!result.exitCode) {
+      await verify();
+      if (artifacts && files.length === selection.length) await artifacts.saveSummary(before);
+    }
+    if (retained) {
+      retained.push({ verify, close });
+      deferred = true;
+    }
     return result;
   } finally {
-    await inputs?.close();
-    if (!options.snapshotContext) await context.close();
+    try { if (!deferred) await close(); }
+    finally {
+      if (!options.snapshotContext) await context.close();
+      if (!options.admission) admission.close();
+    }
     options.signal?.throwIfAborted();
   }
+}
+
+export async function reportCoverage(options) {
+  const config = await normalizeConfig(options);
+  if (config.coverage === false) return null;
+  config.coverage ??= {};
+  config.cacheIdentity = config.root;
+  if (config.coverage.report) config.ignore = [...config.ignore, config.coverage.report, `${config.coverage.report}.*.tmp`];
+  const inputs = fileSnapshot({ ...config, files: undefined });
+  try {
+    const file = config.coverage.report ? resolve(config.root, config.coverage.report) : join(config.cacheDirectory, 'coverage', encodeURIComponent(config.suite), 'latest.json');
+    let summary;
+    try { summary = JSON.parse(await readFile(file, 'utf8')); }
+    catch (error) { if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error; }
+    return { suite: config.suite, minimum: { lines: 80, branches: 80, functions: 80, ...config.coverage.minimum },
+      actual: summary?.actual, stale: !summary || summary.runtime !== process.version || !isDeepStrictEqual(summary.definition, config.coverage) || !isDeepStrictEqual(summary.snapshot, await inputs.snapshot()), measuredAt: summary?.measuredAt };
+  } finally { await inputs.close(); }
 }

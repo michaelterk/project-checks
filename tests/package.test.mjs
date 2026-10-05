@@ -27,13 +27,14 @@ test('packed package installs into an independent project and exposes imports, r
   assert.ok(names.every(name => !name.includes('__pycache__') && !name.includes('.test-cache')));
   const consumer = join(directory, 'consumer');
   await put(consumer, 'package.json', JSON.stringify({ name: 'independent-consumer', private: true, type: 'module' }));
+  await put(consumer, 'project-checks.config.json', JSON.stringify({ coverage: false }));
   await put(consumer, 'test/smoke.test.mjs', "import test from 'node:test'; test('ok', () => {});");
   const install = spawnSync(process.execPath, [npm, 'install', '--ignore-scripts', '--no-audit', '--no-fund', ...npmArgs, join(directory, archive.filename)], { cwd: consumer, encoding: 'utf8' });
   assert.equal(install.status, 0, install.stderr);
   const imported = spawnSync(process.execPath, ['--input-type=module', '-e', `
     import { runTests, defineConfig } from 'project-checks';
-    const first = await runTests(defineConfig({ logger: false, stdio: 'ignore' }));
-    const second = await runTests({ logger: false, stdio: 'ignore' });
+    const first = await runTests(defineConfig({ coverage: false, logger: false, stdio: 'ignore' }));
+    const second = await runTests({ coverage: false, logger: false, stdio: 'ignore' });
     if (first.passed !== 1 || second.cached !== 1) process.exit(1);
   `], { cwd: consumer, encoding: 'utf8' });
   assert.equal(imported.status, 0, imported.stderr);
@@ -51,7 +52,7 @@ test('CLI resolves configuration outside cwd, rejects invalid options, and prese
   const directory = await temporary(t);
   const project = join(directory, 'project');
   await put(project, 'test/fail.test.mjs', "import test from 'node:test'; test('fails', () => { throw new Error('expected failure'); });");
-  const config = await put(project, 'project-checks.config.json', JSON.stringify({ logger: false, stdio: 'ignore', workers: 1 }));
+  const config = await put(project, 'project-checks.config.json', JSON.stringify({ coverage: false, logger: false, stdio: 'ignore', workers: 1 }));
   const execute = args => spawnSync(process.execPath, [cli, ...args], { cwd: directory, encoding: 'utf8' });
   const failed = execute(['run', '--config', config]);
   assert.equal(failed.status, 1, failed.stderr);
@@ -73,7 +74,7 @@ test('CLI file selection retains full inventory and shares passing evidence', as
   const source = "import test from 'node:test'; test('ok', () => {});";
   await put(project, 'test/a.test.mjs', source);
   await put(project, 'test/b.test.mjs', source);
-  await put(project, 'project-checks.config.json', JSON.stringify({ inputs: ['test'], excludeTestsFromInputs: true, logger: false, stdio: 'ignore', workers: 1 }));
+  await put(project, 'project-checks.config.json', JSON.stringify({ inputs: ['test'], excludeTestsFromInputs: true, coverage: false, logger: false, stdio: 'ignore', workers: 1 }));
   const execute = args => spawnSync(process.execPath, [cli, ...args], { cwd: project, encoding: 'utf8' });
   assert.equal(execute([]).status, 0);
   await put(project, 'test/b.test.mjs', source + '\n// changed');
@@ -90,10 +91,10 @@ test('Node example runs through its project config', async t => {
   const config = await loadConfig(join(root, 'examples/node/project-checks.config.mjs'));
   // Use a temporary cache so repository examples remain untouched by tests.
   const cacheDirectory = await temporary(t);
-  const result = await runTests({ ...config, cacheDirectory, logger: false, stdio: 'ignore' });
+  const result = await runTests({ ...config, cacheDirectory, coverage: false, logger: false, stdio: 'ignore' });
   assert.equal(result.exitCode, 0);
   assert.equal(result.passed, 1);
-  assert.equal((await runTests({ ...config, cacheDirectory, logger: false, stdio: 'ignore' })).cached, 1);
+  assert.equal((await runTests({ ...config, cacheDirectory, coverage: false, logger: false, stdio: 'ignore' })).cached, 1);
 });
 
 test('Python example uses the installed interpreter without a version pin', async t => {
@@ -101,9 +102,9 @@ test('Python example uses the installed interpreter without a version pin', asyn
   if (available.status !== 0) return t.skip('python3 is not installed');
   const config = await loadConfig(join(root, 'examples/python/project-checks.config.mjs'));
   const cacheDirectory = await temporary(t);
-  const result = await runTests({ ...config, cacheDirectory, logger: false, stdio: 'ignore', env: { PYTHONDONTWRITEBYTECODE: '1' } });
+  const result = await runTests({ ...config, cacheDirectory, coverage: false, logger: false, stdio: 'ignore', env: { PYTHONDONTWRITEBYTECODE: '1' } });
   assert.equal(result.exitCode, 0);
   assert.equal(result.passed, 1);
-  assert.equal((await runTests({ ...config, cacheDirectory, logger: false, stdio: 'ignore', env: { PYTHONDONTWRITEBYTECODE: '1' } })).cached, 1);
+  assert.equal((await runTests({ ...config, cacheDirectory, coverage: false, logger: false, stdio: 'ignore', env: { PYTHONDONTWRITEBYTECODE: '1' } })).cached, 1);
   assert.ok((await readdir(join(root, 'examples/python/test'))).includes('test_calculator.py'));
 });

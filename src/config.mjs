@@ -1,3 +1,4 @@
+import { validateCoverage } from './coverage.mjs';
 import { readFile, stat } from 'node:fs/promises';
 import { dirname, isAbsolute, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -5,7 +6,7 @@ import { command, integer, keys, text } from './util.mjs';
 import { selectConcurrency } from './resources.mjs';
 import defaultConfig from '../project-checks.config.json' with { type: 'json' };
 
-const options = ['root', 'testDirectory', 'pattern', 'files', 'command', 'inputs', 'testInputs', 'excludeTestsFromInputs', 'ignore', 'workers', 'resources', 'cache', 'cacheDirectory', 'cacheIdentity', 'suite', 'env', 'ignoreEnv', 'fingerprint', 'testFixtureInputs', 'signal', 'logger', 'stdio', 'retryTimeouts', 'retryTimeoutMs', 'timeoutMs', 'admission', 'snapshotContext', 'diagnostics', 'durationHints', 'initialDurations'];
+const options = ['extends', 'root', 'testDirectory', 'pattern', 'files', 'command', 'inputs', 'testInputs', 'excludeTestsFromInputs', 'ignore', 'workers', 'resources', 'cache', 'cacheDirectory', 'cacheIdentity', 'suite', 'env', 'ignoreEnv', 'fingerprint', 'testFixtureInputs', 'signal', 'logger', 'stdio', 'retryTimeouts', 'retryTimeoutMs', 'timeoutMs', 'admission', 'snapshotContext', 'diagnostics', 'durationHints', 'initialDurations', 'select', 'setup', 'filters', 'engine', 'coverage', 'frameworkArgs', 'normalizeNpmEnvironment'];
 export const defaultIgnore = ['**/.git', '**/.git/**', '**/.test-cache', '**/.test-cache/**', '**/__pycache__', '**/__pycache__/**'];
 
 function patterns(value, label, allowEmpty = false) {
@@ -39,7 +40,7 @@ export function defineConfig(config) {
       patterns(inputs, `testInputs[${id}]`, true);
     }
   }
-  if (config.command !== undefined) {
+  if (config.command !== undefined && typeof config.command !== 'function') {
     command(config.command);
     if (!config.command.slice(1).some(value => value.includes('{file}'))) throw new TypeError('command must include {file} in an argument');
   }
@@ -74,10 +75,20 @@ export function defineConfig(config) {
   for (const [name, methods] of [['admission', ['acquire', 'release']], ['snapshotContext', ['run', 'identify']], ['diagnostics', ['event', 'files', 'file', 'span']]]) {
     if (config[name] !== undefined && !methods.every(method => typeof config[name]?.[method] === 'function')) throw new TypeError(`${name} has invalid methods`);
   }
+  if (config.select !== undefined && typeof config.select !== 'function') {
+    keys(config.select, ['include', 'exclude'], 'select');
+    for (const field of ['include', 'exclude']) if (config.select[field] !== undefined) patterns(config.select[field], `select.${field}`, true);
+  }
+  for (const name of ['setup']) if (config[name] !== undefined && typeof config[name] !== 'function') throw new TypeError(`${name} must be a function`);
+  if (config.normalizeNpmEnvironment !== undefined && typeof config.normalizeNpmEnvironment !== 'boolean') throw new TypeError('normalizeNpmEnvironment must be boolean');
+  if (config.frameworkArgs !== undefined && (!Array.isArray(config.frameworkArgs) || config.frameworkArgs.some(value => typeof value !== 'string'))) throw new TypeError('frameworkArgs must be an array of strings');
+  if (config.engine !== undefined && !['node', 'playwright', 'command'].includes(config.engine)) throw new TypeError('engine must be node, playwright or command');
+  if (config.filters !== undefined && (!Array.isArray(config.filters) || config.filters.some(option => typeof option !== 'string' || !/^(?:--test-only|--test-(?:name|skip)-pattern=.+)$/.test(option)))) throw new TypeError('filters must contain complete Node test filter options');
+  if (config.coverage !== undefined && config.coverage !== false) validateCoverage(config.coverage);
   return config;
 }
 
-export async function loadConfig(filename, { cwd = process.cwd() } = {}) {
+export async function loadConfig(filename, { cwd = process.cwd(), ancestors = [], sources } = {}) {
   let file;
   if (filename !== undefined) file = resolve(cwd, text(filename, 'config filename'));
   else {
@@ -88,13 +99,17 @@ export async function loadConfig(filename, { cwd = process.cwd() } = {}) {
     }
   }
   if (!file) return { ...structuredClone(defaultConfig), root: resolve(cwd) };
-  const value = file.endsWith('.json') ? JSON.parse(await readFile(file, 'utf8')) : (await import(pathToFileURL(file).href)).default;
+  const source = await readFile(file, 'utf8');
+  sources?.set(file, source);
+  const value = file.endsWith('.json') ? JSON.parse(source) : (await import(pathToFileURL(file).href)).default;
   defineConfig(value);
+  if (ancestors.includes(file)) throw new Error(`Config extends cycle: ${file}`);
+  const inherited = value.extends ? await loadConfig(resolve(dirname(file), value.extends), { ancestors: [...ancestors, file], sources }) : structuredClone(defaultConfig);
   const overrides = Object.fromEntries(Object.entries(value).filter(([, setting]) => setting !== undefined));
   const resources = Object.fromEntries(Object.entries(value.resources ?? {}).filter(([, setting]) => setting !== undefined));
   return {
-    ...structuredClone(defaultConfig), ...overrides,
-    resources: { ...defaultConfig.resources, ...resources },
+    ...inherited, ...overrides,
+    resources: { ...inherited.resources, ...resources },
     root: resolve(dirname(file), value.root ?? '.'),
   };
 }

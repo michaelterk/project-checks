@@ -34,6 +34,8 @@ export interface Logger {
 export interface TestConfig {
   /** Project root. Defaults to cwd; loadConfig resolves it beside the config file. */
   root?: string;
+  /** JSON configuration inherited before local field overrides. */
+  extends?: string;
   /** One directory containing the test files. Default: test. */
   testDirectory?: string;
   /** Globs relative to testDirectory. Default: **\/*.test.{js,mjs,cjs}. */
@@ -41,7 +43,7 @@ export interface TestConfig {
   /** Select IDs from the full configured inventory without changing dependency discovery. */
   files?: string[];
   /** Argument array with {file} placeholders; executed directly without a shell. */
-  command?: string[];
+  command?: string[] | ((id: string) => string[]);
   /** Shared input paths/globs, relative to root. Default: every project file. */
   inputs?: string[];
   /** Additive dependencies by root-relative test ID or folder prefix ending in '/'. */
@@ -81,6 +83,13 @@ export interface TestConfig {
   /** Learn source-bound longest-first hints separately from passing evidence. Default: false. */
   durationHints?: boolean;
   initialDurations?: Record<string, number>;
+  select?: { include?: string[]; exclude?: string[] } | ((id: string) => boolean);
+  filters?: string[];
+  normalizeNpmEnvironment?: boolean;
+  frameworkArgs?: string[];
+  engine?: 'node' | 'playwright' | 'command';
+  coverage?: false | CoverageConfig;
+  setup?: (context: { signal: AbortSignal }) => CheckFixture | Promise<CheckFixture>;
 }
 
 export interface UnitResult {
@@ -220,3 +229,37 @@ export interface Diagnostics {
 }
 export function createSnapshotContext(options?: { signal?: AbortSignal }): SnapshotContext;
 export function createDiagnostics(options?: { logger?: Logger | false }): Diagnostics;
+
+export interface CoverageConfig {
+  provider?: 'v8' | 'python';
+  /** Each omitted metric defaults to 80, independently. */
+  minimum?: { lines?: number; branches?: number; functions?: number };
+  include?: string[];
+  exclude?: string[];
+  python?: string;
+  configFile?: string;
+  report?: string;
+}
+export interface CheckFixture {
+  execute?: (command: string[], options: CommandOptions & { retry: boolean; reportTimeout: (details: { ordinaryFailure: boolean }) => void }) => Promise<number>;
+  close?: () => void | Promise<void>;
+}
+export interface CheckDefinition {
+  id: string;
+  dependsOn?: string[];
+  config?: string | TestConfig | ((context: { signal: AbortSignal }) => TestConfig | Promise<TestConfig>);
+  command?: string[];
+  cwd?: string;
+  env?: Record<string, string | undefined>;
+  verify?: () => void | Promise<void>;
+}
+export function loadChecks(filename: string, options?: {
+  target?: string | string[]; files?: string[]; filters?: string[]; cache?: boolean; prefix?: string; frameworkArgs?: string[];
+}): Promise<CheckDefinition[]>;
+export function runChecks(definitions: CheckDefinition[], options?: {
+  resources?: ResourcePolicy; workers?: number; signal?: AbortSignal; logger?: Logger | false;
+}): Promise<{ exitCode: number; results: Array<{ id: string; exitCode: number; skipped?: boolean }> }>;
+export function reportCoverage(config: TestConfig): Promise<null | {
+  suite: string; minimum: { lines: number; branches: number; functions: number };
+  actual?: { lines: number; branches: number; functions: number }; stale: boolean; measuredAt?: string;
+}>;

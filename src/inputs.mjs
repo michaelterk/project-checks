@@ -136,6 +136,9 @@ export async function discoverTests({ root, testDirectory, pattern, ignore }) {
 }
 
 export function selectTests(config, inventory) {
+  if (config.select) inventory = inventory.filter(typeof config.select === 'function' ? config.select : id =>
+    (config.select.include ?? ['**']).some(pattern => matchesGlob(id, pattern)) &&
+    !(config.select.exclude ?? []).some(pattern => matchesGlob(id, pattern)));
   if (!config.files) return inventory;
   for (const id of config.files) if (!inventory.includes(id)) throw new Error(`Selected file is not in the configured test inventory: ${id}`);
   const selected = new Set(config.files);

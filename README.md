@@ -117,6 +117,100 @@ Executables must be directly spawnable; shell built-ins and Windows `.cmd`
 wrappers need an explicit interpreter command. Each file must be independently
 runnable. Choose one worker when tests share mutable state or a fixed port.
 
+## Checks and prerequisites
+
+Use a project JSON file to select suites and order builds or other prerequisites:
+
+```json
+{
+  "checks": {
+    "build": { "command": ["npm", "run", "build"] },
+    "unit": {
+      "config": "project-checks.unit.json",
+      "fixture": "tests/check-fixtures.mjs",
+      "dependsOn": ["build"]
+    }
+  },
+  "targets": { "default": ["unit"], "complete": ["unit"] }
+}
+```
+
+`config` names a suite configuration. Optional `fixture` names a module whose
+default export receives `(config, { signal })` and returns configuration overrides,
+such as runtime inputs, environment or `setup`. Paths resolve beside the project
+JSON. A command check may set `cwd` and `env`; a nested owner uses `project` and
+an optional `target` instead of `config`.
+
+```js
+import { loadChecks, runChecks } from 'project-checks';
+
+const checks = await loadChecks('project-checks.project.json', { target: 'complete' });
+process.exitCode = (await runChecks(checks)).exitCode;
+```
+
+`loadChecks` expands targets and dependencies without executing checks.
+`runChecks` owns shared admission, cancellation and cleanup. A dependent suite
+loads its configuration and snapshots its inputs after its prerequisites pass;
+a failed prerequisite prevents that dependent from running. Duplicate IDs,
+unknown dependencies and cycles fail. Final verification rechecks participating
+suite inputs and loaded JSON configurations before the invocation succeeds.
+
+The CLI equivalent is:
+
+```sh
+project-checks checks --config project-checks.project.json --target complete
+```
+
+`loadChecks` also accepts `files`, `filters`, `cache`, `frameworkArgs` and an ID `prefix`. Filters
+use complete Node options such as `--test-name-pattern=example`; filtered runs
+do not reuse or save complete-file evidence. App fixtures own their isolated
+resources; the package invokes their `setup`, `execute` and `close` hooks.
+The CLI accepts `--test-name-pattern`, `--test-skip-pattern` and `--test-only`.
+Arguments after `--` are Playwright framework actions, such as `--update-snapshots`,
+and run without complete-file evidence.
+
+## Coverage
+
+Detected Node and Python test suites collect coverage by default. Every omitted
+minimum independently defaults to 80% for lines, branches and functions. Override
+metrics and source domains in the suite JSON:
+
+```json
+{
+  "suite": "server",
+  "testDirectory": "tests",
+  "coverage": {
+    "provider": "v8",
+    "include": ["src/**/*.mjs"],
+    "exclude": ["**/*.test.mjs"],
+    "minimum": { "lines": 92.5, "branches": 85, "functions": 90 }
+  }
+}
+```
+
+`provider` defaults to `v8`; `include` and `exclude` select its source domain.
+For Python, use `provider: "python"`, an optional `python` interpreter and
+`configFile` pointing to the project's coverage.py configuration. Install
+coverage.py in that interpreter's environment; configure Python source domains
+in `configFile`. The package adds collection to the ordinary Python test command.
+Set `coverage: false` for syntax, browser journeys or other commands that have
+no coverage gate.
+
+The package retains raw contributions with passing-file evidence, validates
+them on reuse, and aggregates every current suite file before enforcing its
+minimums. Fractional minimums are enforced. Partial file selections can retain
+contributions but do not pass the full-suite coverage gate; filtered runs do not
+contribute coverage. Changing only minimums or V8 domain rules rebuilds the gate
+from compatible contributions.
+
+`reportCoverage(config)` returns saved measurements, current minimums and
+staleness without running tests. Optional `coverage.report` selects the saved
+summary path; the default is inside the suite's package cache. For project JSON:
+
+```sh
+project-checks coverage --config project-checks.project.json --target complete
+```
+
 ## Cache behavior and inputs
 
 Only zero-exit tests with unchanged inputs receive passing evidence. Evidence
@@ -258,10 +352,17 @@ inside Node's own test runner.
 | Option | Default | Purpose |
 | --- | --- | --- |
 | `root` | Working directory | Project root; loaded configs resolve beside their file |
+| `extends` | None | Inherit a configuration before applying local overrides |
 | `testDirectory` | `test` | One folder containing tests |
 | `pattern` | `**/*.test.{js,mjs,cjs}` | A glob or array of globs relative to the test folder |
 | `files` | All discovered files | Selected root-relative IDs from the full configured inventory |
-| `command` | Current Node, `--test --test-concurrency=1 {file}` | Executable and argument array |
+| `select` | Full inventory | Suite `include`/`exclude` globs, or a predicate |
+| `command` | Current Node, `--test --test-concurrency=1 {file}` | Argument array or programmatic `(id) => argv` |
+| `engine` | Detect Node/Python commands | Explicit `node`, `playwright` or `command` execution |
+| `coverage` | Detected test engine, 80% per metric | Provider, domain and minimums; `false` disables collection |
+| `filters` | `[]` | Complete Node test filter options; bypass file evidence and coverage |
+| `frameworkArgs` | `[]` | Playwright action arguments; run without file evidence |
+| `setup` | None | Programmatic fixture returning optional `execute` and `close` hooks |
 | `inputs` | `['.']` | Shared input paths/globs relative to root |
 | `testInputs` | `{}` | Dependency mapping or sync/async callback returning relative paths/globs |
 | `excludeTestsFromInputs` | `false` | Omit runnable tests from dependency folders/globs; own and explicit file inputs remain |
@@ -276,6 +377,7 @@ inside Node's own test runner.
 | `timeoutMs` | None | Wall deadline per command attempt, including retries |
 | `suite` | `tests` | Cache namespace |
 | `env` | Inherit environment | String overrides; undefined removes a variable |
+| `normalizeNpmEnvironment` | `false` | Remove npm launch metadata and use the owning project's executable search path |
 | `ignoreEnv` | `[]` | Additional environment names excluded from evidence |
 | `fingerprint` | None | Sync/async callback returning an extra identity string |
 | `testFixtureInputs` | None | Programmatic sync/async callback `(id) => string[]` declaring literal fixture input paths |
@@ -497,8 +599,9 @@ still validates current artifacts for aggregation and the package hashes their
 declared files. Failed attempts and mixed
 ordinary-failure retries never call it. Orphan artifact bytes without a matching
 passing record are uncertified. Callbacks own artifact staging, atomic writes,
-cleanup and cancellation of their own I/O; the package provides no second cache
-or coverage engine. Artifact output must be excluded from source inputs.
+cleanup and cancellation of their own I/O. These low-level hooks support custom
+artifacts; ordinary coverage uses the package's `coverage` configuration instead.
+Artifact output must be excluded from source inputs.
 
 Adapters may opt into `retryTimeouts` and accept `execute(unit, context)` where
 `context.retry` identifies the second attempt and

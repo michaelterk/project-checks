@@ -58,6 +58,7 @@ export class Admission {
     this.weight = this.selected.cpuBudget / (initial + 1e-6);
     this.active = 0;
     this.pendingExclusive = 0;
+    this.normalProducers = 0;
     this.exclusive = false;
     this.peak = 0;
     this.spare = 0;
@@ -72,6 +73,17 @@ export class Admission {
   }
 
   wake() { for (const wake of this.waiters) wake(); }
+
+  beginNormal() {
+    this.normalProducers++;
+    let finished = false;
+    return () => {
+      if (finished) return;
+      finished = true;
+      this.normalProducers--;
+      this.wake();
+    };
+  }
 
   get limit() {
     return Math.min(this.capacity, Math.max(1, Math.floor(this.selected.cpuBudget / this.weight)));
@@ -115,7 +127,7 @@ export class Admission {
       const available = this.reading.availableMemoryMiB;
       const fits = this.selected.memoryBudgetMiB >= this.memory && (!Number.isFinite(available) || available >= this.reserve + this.memory);
       const pressured = this.reading.memoryPressure > 0.05;
-      const room = exclusive ? this.active === 0 : !this.exclusive && this.pendingExclusive === 0 && this.active < this.limit;
+      const room = exclusive ? this.active === 0 && this.normalProducers === 0 : !this.exclusive && (this.pendingExclusive === 0 || this.normalProducers > 0) && this.active < this.limit;
       if (room && fits && !pressured) {
         this.active++;
         this.exclusive = exclusive;

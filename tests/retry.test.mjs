@@ -165,7 +165,7 @@ async function nodeFixture(t, body) {
     const delay = () => new Promise(resolve => setTimeout(resolve, 100));
     ${body}
   `);
-  return { root, options: { root, workers: 1, retryTimeouts: true, logger: false, stdio: 'ignore' },
+  return { root, options: { root, workers: 1, retryTimeouts: true, coverage: false, logger: false, stdio: 'ignore' },
     count: async () => Number(await readFile(join(root, '.test-cache/count'), 'utf8')) };
 }
 

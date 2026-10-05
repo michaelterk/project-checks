@@ -1,6 +1,6 @@
 {
   "name": "project-checks",
-  "version": "0.1.8",
+  "version": "0.2.0",
   "description": "Configurable test commands with resource-aware concurrency and verified passing-test caching.",
   "license": "MIT",
   "repository": { "type": "git", "url": "git+https://github.com/michaelterk/project-checks.git" },
@@ -13,7 +13,7 @@
   "exports": { ".": { "types": "./src/index.d.ts", "default": "./src/index.mjs" } },
   "types": "./src/index.d.ts",
   "bin": { "project-checks": "./bin/project-checks.mjs" },
-  "files": ["src/*.mjs", "src/*.d.ts", "bin/*.mjs", "examples/**/*.mjs", "examples/**/*.py", "README.md", "CONTRIBUTING.md", "LICENSE", "project-checks.config.json"],
+  "files": ["src/*.mjs", "src/*.py", "src/*.d.ts", "bin/*.mjs", "examples/**/*.mjs", "examples/**/*.py", "README.md", "CONTRIBUTING.md", "LICENSE", "project-checks.config.json"],
   "keywords": ["test", "runner", "cache", "concurrency", "cli"],
   "scripts": {
     "test": "node --test tests/*.test.mjs",
