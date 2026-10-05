@@ -95,6 +95,9 @@ test('effective environment and command identity invalidate evidence', async t =
 
 test('unknown environment values matter; display and explicit scheduling values do not', () => {
   assert.equal(environmentIdentity({ INVOCATION_ID: 'first-scope' }), environmentIdentity({ INVOCATION_ID: 'second-scope' }));
+  assert.equal(environmentIdentity({ CODEX_THREAD_ID: 'worker' }), environmentIdentity({ CODEX_THREAD_ID: 'main' }));
+  assert.equal(environmentIdentity({ CODEX_THREAD_ID: 'worker' }), environmentIdentity({}));
+  assert.notEqual(environmentIdentity({ CODEX_OTHER: 'first' }), environmentIdentity({ CODEX_OTHER: 'second' }));
   assert.equal(environmentIdentity({ FORCE_COLOR: '0' }), environmentIdentity({ FORCE_COLOR: '1' }));
   assert.equal(environmentIdentity({ MY_WORKERS: '1' }, ['MY_WORKERS']), environmentIdentity({ MY_WORKERS: '8' }, ['MY_WORKERS']));
   assert.notEqual(environmentIdentity({ RUN_AXE: '0' }), environmentIdentity({ RUN_AXE: '1' }));

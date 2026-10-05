@@ -340,7 +340,7 @@ Passing-test caching assumes deterministic tests against the selected inputs.
 `cache: false` and `--no-cache` execute all tests without reading or writing evidence.
 They still check that inputs stay unchanged during execution.
 
-Display variables, shell bookkeeping and npm's execution metadata are excluded
+Display variables, shell bookkeeping, Codex's `CODEX_THREAD_ID` and npm's execution metadata are excluded
 from environment identity. Other variables invalidate evidence by default.
 `ignoreEnv` can name additional scheduling/output variables; use it only for
 values that do not affect test meaning. Environment overrides supplied through

@@ -8,7 +8,7 @@ import { Admission } from './admission.mjs';
 import { createSnapshotContext } from './inputs.mjs';
 import { withProgress } from './progress.mjs';
 
-const ignoredEnvironment = /^(?:INVOCATION_ID|PWD|OLDPWD|SHLVL|_|NODE_TEST_CONTEXT|TMPDIR|TMP|TEMP|TERM|COLORTERM|FORCE_COLOR|NO_COLOR|NODE_DISABLE_COLORS|npm_lifecycle_event|npm_lifecycle_script|npm_command|npm_package_(?:name|version|json)|npm_config_(?:cache|logs_dir|loglevel|progress|timing|color|fund|audit|update_notifier))$/;
+const ignoredEnvironment = /^(?:INVOCATION_ID|CODEX_THREAD_ID|PWD|OLDPWD|SHLVL|_|NODE_TEST_CONTEXT|TMPDIR|TMP|TEMP|TERM|COLORTERM|FORCE_COLOR|NO_COLOR|NODE_DISABLE_COLORS|npm_lifecycle_event|npm_lifecycle_script|npm_command|npm_package_(?:name|version|json)|npm_config_(?:cache|logs_dir|loglevel|progress|timing|color|fund|audit|update_notifier))$/;
 
 export function environmentIdentity(env = process.env, ignoreEnv = []) {
   const ignored = new Set(ignoreEnv);
