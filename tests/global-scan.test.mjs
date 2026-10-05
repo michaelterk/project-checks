@@ -20,7 +20,7 @@ function observeRecords(t, directory, observe) {
 const config = (root, suite) => ({ root, suite, inputs: [], coverage: false });
 const project = async t => realpath(await temporary(t));
 
-test('one initial scan reads independent suites once through 16 slots before commands, setup or tests', async t => {
+test('all independent and dependent suites are queued before the first of 16 scan workers reads', async t => {
   const root = await project(t);
   for (let index = 0; index < 40; index++) await put(root, `test/${index}.test.mjs`, 'old');
   const cacheDirectory = join(root, '.test-cache/project-checks');
@@ -31,15 +31,21 @@ test('one initial scan reads independent suites once through 16 slots before com
   for (let index = 1; index < 40; index += 2) await writeFile(join(root, `test/${index}.test.mjs`), 'new');
   const reads = new Map();
   let active = 0, peak = 0, commands = 0;
+  let slowConfigReady = false;
+  const lines = [];
   observeRecords(t, cacheDirectory, async (file, read) => {
+    assert.equal(slowConfigReady, true, 'a fast suite cannot start scanning while another configuration is still loading');
+    assert.ok(lines.some(line => /Queued: 80 test files \| Concurrency: 16/.test(line)));
     active++;
     peak = Math.max(peak, active);
     reads.set(file, (reads.get(file) ?? 0) + 1);
     try { await delay(3); return await read(); }
     finally { active--; }
   });
-  const lines = [];
-  const logger = { log: line => lines.push(line), error: line => lines.push(line) };
+  const logger = { log: line => {
+    if (/Queued: 80 test files/.test(line)) assert.equal(reads.size, 0, 'all 80 jobs must be queued before any read');
+    lines.push(line);
+  }, error: line => lines.push(line) };
   const assertScanned = () => {
     assert.equal(reads.size, 80);
     assert.equal(active, 0);
@@ -47,22 +53,31 @@ test('one initial scan reads independent suites once through 16 slots before com
   };
   for (const definition of definitions) definition.config.setup = async () => {
     assertScanned();
+    assert.equal(await readFile(join(root, 'built'), 'utf8'), 'ready');
+    if (definition.id === 'two') assert.equal(commands, 20, 'dependent setup waits for the first suite');
     return { execute: () => { assertScanned(); commands++; return 0; } };
   };
+  definitions[0].dependsOn = ['build'];
+  definitions[1].dependsOn = ['one'];
+  const secondConfig = definitions[1].config;
+  definitions[1].config = async () => { await delay(30); slowConfigReady = true; return secondConfig; };
   const result = await runChecks([
-    { id: 'build', cwd: root, command: [process.execPath, '-e', "require('node:fs').writeFileSync('built','ready')"], verify: assertScanned },
+    { id: 'build', cwd: root, command: [process.execPath, '-e', "require('node:fs').writeFileSync('built','ready')"], verify: () => {
+      if (!slowConfigReady) assert.equal(reads.size, 0);
+    } },
+    { id: 'unrelated', cwd: root, command: [process.execPath, '-e', ''], verify: assertScanned },
     ...definitions,
   ], { logger, workers: 1 });
   assert.equal(result.exitCode, 0);
   assert.equal(peak, 16);
   assert.ok([...reads.values()].every(count => count === 1));
   assert.equal(commands, 40);
-  assert.equal(lines.filter(line => line.startsWith('CACHE_SCAN:')).length, 2);
+  assert.equal(lines.filter(line => line.startsWith('CACHE_SCAN:')).length, 3);
 });
 
 test('global scan failure drains siblings and never starts builds or setup', async t => {
   const root = await project(t);
-  await put(root, 'test/a.test.mjs', '');
+  for (let index = 0; index < 40; index++) await put(root, `test/${index}.test.mjs`, '');
   const cacheDirectory = join(root, '.test-cache/project-checks');
   let active = 0, entered = 0, setup = 0;
   const failure = new Error('global scan read failed');
@@ -78,7 +93,7 @@ test('global scan failure drains siblings and never starts builds or setup', asy
       ...config(root, id), setup: () => { setup++; return { execute: () => 0 }; },
     } })),
   ], { logger: false, workers: 1 }), error => error === failure);
-  assert.equal(entered, 2);
+  assert.equal(entered, 16, 'the remaining queued files never start I/O after a fatal scan failure');
   assert.equal(active, 0);
   assert.equal(setup, 0);
   await assert.rejects(readFile(join(root, 'built')), { code: 'ENOENT' });
@@ -89,7 +104,14 @@ test('cancellation drains the global scan and releases suites waiting at its bar
   await put(root, 'test/a.test.mjs', '');
   const cacheDirectory = join(root, '.test-cache/project-checks');
   const entered = Promise.withResolvers(), release = Promise.withResolvers();
-  let active = 0, setup = 0;
+  let active = 0, setup = 0, scanEnded = 0;
+  const diagnostics = {
+    event() {}, files() {}, file() {},
+    span: async (_, stage, operation) => {
+      try { return await operation(); }
+      finally { if (stage === 'cache-scan') scanEnded++; }
+    },
+  };
   observeRecords(t, cacheDirectory, async (_file, read) => {
     active++;
     entered.resolve();
@@ -98,21 +120,24 @@ test('cancellation drains the global scan and releases suites waiting at its bar
   });
   const controller = new AbortController(), reason = new Error('cancel global scan');
   const running = runChecks(['one', 'two'].map(id => ({ id, config: {
-    ...config(root, id), setup: () => { setup++; return { execute: () => 0 }; },
+    ...config(root, id), diagnostics, setup: () => { setup++; return { execute: () => 0 }; },
   } })), { logger: false, signal: controller.signal });
   const rejected = assert.rejects(running, error => error === reason);
   await entered.promise;
   controller.abort(reason);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(scanEnded, 0, 'suite scan handles remain open until active queue jobs have drained');
   release.resolve();
   await rejected;
   assert.equal(active, 0);
   assert.equal(setup, 0);
+  assert.equal(scanEnded, 2);
   assert.equal((await runChecks([{ id: 'again', config: {
     ...config(root, 'again'), setup: () => ({ execute: () => 0 }),
   } }], { logger: false })).exitCode, 0);
 });
 
-test('nested dependent projects report plans after their prerequisites', async t => {
+test('nested dependent projects populate one complete queue with cached and uncached files', async t => {
   const root = await project(t);
   await put(root, 'test/a.test.mjs', '');
   await put(root, 'cached.json', JSON.stringify({ inputs: [], coverage: false, suite: 'cached' }));
@@ -129,9 +154,9 @@ test('nested dependent projects report plans after their prerequisites', async t
   assert.equal(result.exitCode, 0);
   const scans = lines.filter(line => line.startsWith('CACHE_SCAN:'));
   assert.equal(scans.length, 3);
-  assert.match(scans[1], /Will run: 0 \| Will skip: 1 \| Total: 1/);
-  assert.match(scans[2], /Will run: 1 \| Will skip: 0 \| Total: 1/);
-  assert.ok(lines.indexOf(scans[1]) < lines.findIndex(line => line.startsWith('==> Running')));
+  assert.match(scans[1], /Queued: 2 test files \| Concurrency: 16/);
+  assert.match(scans[2], /Will run: 1 \| Will skip: 1 \| Total: 2/);
+  assert.ok(lines.indexOf(scans[2]) < lines.findIndex(line => line.startsWith('==> Running')));
 });
 
 test('setup changes after a cached global plan fail final verification', async t => {
@@ -185,4 +210,15 @@ test('global totals include artifact validation and missing-artifact fallbacks b
   const result = await runChecks(definitions, { logger: { log: line => lines.push(line), error: line => lines.push(line) }, workers: 1 });
   assert.equal(result.exitCode, 0);
   assert.deepEqual(result.results.map(({ passed, cached }) => [passed, cached]), [[0, 1], [1, 0]]);
+});
+
+test('command prerequisites that need test results fail before global scan or execution', async t => {
+  const root = await project(t);
+  await put(root, 'test/a.test.mjs', '');
+  await assert.rejects(runChecks([
+    { id: 'first', config: config(root, 'first') },
+    { id: 'build', dependsOn: ['first'], cwd: root, command: [process.execPath, '-e', "require('node:fs').writeFileSync('built','unsafe')"] },
+    { id: 'second', dependsOn: ['build'], config: config(root, 'second') },
+  ], { logger: false }), /Global scan cannot run command prerequisite build before test suite first/);
+  await assert.rejects(readFile(join(root, 'built')), { code: 'ENOENT' });
 });

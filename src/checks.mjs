@@ -7,7 +7,7 @@ import { createSnapshotContext } from './inputs.mjs';
 import { runTests } from './runner.mjs';
 import { command, keys, text } from './util.mjs';
 import { createProgress } from './progress.mjs';
-import { scanConcurrency } from './cache.mjs';
+import { scanCacheJobs, scanConcurrency } from './cache.mjs';
 
 // Definitions describe ownership and ordering. Every command, fixture attempt,
 // retry and coverage gate uses the same invocation-owned admission pool.
@@ -36,6 +36,18 @@ export async function runChecks(definitions, options = {}) {
     visited.add(id);
   }
   for (const id of byId.keys()) visit(id);
+  const prerequisites = new Set(), inspected = new Set();
+  function collectPrerequisite(id, commandOwner) {
+    const definition = byId.get(id);
+    if (commandOwner && definition.config !== undefined) throw new Error(`Global scan cannot run command prerequisite ${commandOwner} before test suite ${id}`);
+    if (inspected.has(id)) return;
+    inspected.add(id);
+    for (const dependency of definition.dependsOn ?? []) collectPrerequisite(dependency, definition.command !== undefined ? id : undefined);
+    if (definition.command !== undefined) prerequisites.add(id);
+  }
+  for (const definition of definitions) if (definition.config !== undefined) {
+    for (const dependency of definition.dependsOn ?? []) collectPrerequisite(dependency);
+  }
   return withProcessSignal(options.signal, async processSignal => {
     const controller = new AbortController();
     const signal = AbortSignal.any([processSignal, controller.signal]);
@@ -47,7 +59,9 @@ export async function runChecks(definitions, options = {}) {
     const pending = new Map(), completed = new Map(), launched = new Set(), suites = new Map();
     const retained = [];
     const blocked = new Error('Check prerequisite failed');
-    let executing = false;
+    let executing = false, scanning = false;
+    const scanned = Promise.withResolvers();
+    scanned.promise.catch(() => {});
     const phases = new Map(definitions.map(({ id }) => {
       let releaseNormal;
       return [id, active => {
@@ -75,9 +89,23 @@ export async function runChecks(definitions, options = {}) {
       try { return { id: definition.id, exitCode: await runCommand(definition.command, { cwd: definition.cwd, env: definition.env, signal, logger }) }; }
       finally { admission.release(); }
     }
+    function runPrerequisite(id) {
+      if (pending.has(id)) return pending.get(id);
+      launched.add(id);
+      const definition = byId.get(id);
+      return track(id, (async () => {
+        await Promise.all((definition.dependsOn ?? []).map(runPrerequisite));
+        if ((definition.dependsOn ?? []).some(dependency => completed.get(dependency).exitCode)) return { id, exitCode: 1, skipped: true };
+        return runCommandCheck(definition);
+      })());
+    }
+    function failedPrerequisite(id) {
+      return (byId.get(id).dependsOn ?? []).some(dependency => completed.get(dependency)?.exitCode || failedPrerequisite(dependency));
+    }
     function stopPreparation() {
-      for (const { ready, permission, dependency } of suites.values()) {
-        dependency.reject(signal.reason);
+      if (!scanning) scanned.reject(signal.reason);
+      for (const { ready, permission, queued } of suites.values()) {
+        queued.reject(signal.reason);
         ready.reject(signal.reason);
         permission.reject(signal.reason);
       }
@@ -89,10 +117,9 @@ export async function runChecks(definitions, options = {}) {
         launched.add(id);
         const failed = (definition.dependsOn ?? []).some(dependency => completed.get(dependency).exitCode);
         if (definition.config !== undefined) {
-          if (failed) { progress && progress.files(id, 0); suites.get(id).dependency.reject(blocked); }
+          if (failed) { progress && progress.files(id, 0); suites.get(id).permission.reject(blocked); }
           else {
             phases.get(id)(true);
-            suites.get(id).dependency.resolve();
             suites.get(id).permission.resolve();
           }
         } else {
@@ -102,21 +129,28 @@ export async function runChecks(definitions, options = {}) {
       }
     }
     try {
+      const builds = await Promise.all([...prerequisites].map(runPrerequisite));
+      const buildError = builds.find(result => result.status === 'rejected');
+      if (buildError) throw buildError.reason;
       const testDefinitions = definitions.filter(definition => definition.config !== undefined);
-      const initialDefinitions = testDefinitions.filter(definition => !definition.dependsOn?.length);
       const started = performance.now();
-      if (initialDefinitions.length) logger?.log(`CACHE_SCAN: checks | Scanning initially ready test files | Concurrency: ${scanConcurrency}`);
+      if (testDefinitions.length) logger?.log(`CACHE_SCAN: checks | Collecting all selected test files | Concurrency: ${scanConcurrency}`);
       for (const definition of testDefinitions) {
         const { id } = definition;
-        const ready = Promise.withResolvers(), permission = Promise.withResolvers(), dependency = Promise.withResolvers();
-        if (!definition.dependsOn?.length) dependency.resolve();
+        if (failedPrerequisite(id)) {
+          launched.add(id);
+          progress && progress.files(id, 0);
+          track(id, Promise.resolve({ id, exitCode: 1, skipped: true }));
+          continue;
+        }
+        const ready = Promise.withResolvers(), permission = Promise.withResolvers(), queued = Promise.withResolvers();
         // Gates can be cancelled before a slow configuration reaches them.
         permission.promise.catch(() => {});
         const prepared = ready.promise.then(value => ({ status: 'fulfilled', value }), reason => ({ status: 'rejected', reason }));
-        suites.set(id, { ready, permission, prepared, dependency });
+        const inventory = queued.promise.then(value => ({ status: 'fulfilled', value }), reason => ({ status: 'rejected', reason }));
+        suites.set(id, { ready, permission, prepared, queued, inventory });
         track(id, (async () => {
           try {
-            await dependency.promise;
             signal.throwIfAborted();
             await definition.verify?.();
             const config = typeof definition.config === 'function' ? await definition.config({ signal })
@@ -127,11 +161,8 @@ export async function runChecks(definitions, options = {}) {
             } : false;
             return { id, ...await runTests({ ...config, signal, admission, snapshotContext, logger: logger ?? false, progress: suiteProgress }, {
               retained, normalPhase: phases.get(id),
-              cacheScan: plan => {
-                ready.resolve(plan);
-                if (definition.dependsOn?.length) logger?.log(`CACHE_SCAN: ${id} | Will run: ${plan.total - plan.cached} | Will skip: ${plan.cached} | Total: ${plan.total}`);
-                return permission.promise;
-              },
+              queueScan: jobs => { queued.resolve(jobs); return scanned.promise; },
+              cacheScan: plan => { ready.resolve(plan); return permission.promise; },
             }) };
           } catch (error) {
             if (error === blocked) return { id, exitCode: 1, skipped: true };
@@ -141,13 +172,30 @@ export async function runChecks(definitions, options = {}) {
           }
         })());
       }
-      const prepared = await Promise.all(initialDefinitions.map(({ id }) => suites.get(id).prepared));
+      const inventories = await Promise.all([...suites.values()].map(suite => suite.inventory));
+      const inventoryError = inventories.find(result => result.status === 'rejected');
+      if (inventoryError) throw inventoryError.reason;
+      signal.throwIfAborted();
+      const jobs = inventories.flatMap(({ value }) => value);
+      if (testDefinitions.length) logger?.log(`CACHE_SCAN: checks | Queued: ${jobs.length} test files | Concurrency: ${scanConcurrency}`);
+      scanning = true;
+      try {
+        await scanCacheJobs(jobs.map(run => async () => {
+          try { signal.throwIfAborted(); await run(); }
+          catch (error) { controller.abort(error); throw error; }
+        }));
+      } finally {
+        scanning = false;
+        if (signal.aborted) scanned.reject(signal.reason);
+      }
+      scanned.resolve();
+      const prepared = await Promise.all([...suites.values()].map(suite => suite.prepared));
       const preparationError = prepared.find(result => result.status === 'rejected');
       if (preparationError) throw preparationError.reason;
       signal.throwIfAborted();
       const total = prepared.reduce((sum, { value }) => sum + value.total, 0);
       const cached = prepared.reduce((sum, { value }) => sum + value.cached, 0);
-      if (initialDefinitions.length) logger?.log(`CACHE_SCAN: checks | Will run: ${total - cached} | Will skip: ${cached} | Total: ${total} | Duration: ${((performance.now() - started) / 1000).toFixed(2)}s`);
+      if (testDefinitions.length) logger?.log(`CACHE_SCAN: checks | Will run: ${total - cached} | Will skip: ${cached} | Total: ${total} | Duration: ${((performance.now() - started) / 1000).toFixed(2)}s`);
       executing = true;
       launchReady();
       let settled;
