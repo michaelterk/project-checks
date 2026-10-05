@@ -32,7 +32,8 @@ test('packed package installs into an independent project and exposes imports, r
   const install = spawnSync(process.execPath, [npm, 'install', '--ignore-scripts', '--no-audit', '--no-fund', ...npmArgs, join(directory, archive.filename)], { cwd: consumer, encoding: 'utf8' });
   assert.equal(install.status, 0, install.stderr);
   const imported = spawnSync(process.execPath, ['--input-type=module', '-e', `
-    import { runTests, defineConfig } from 'project-checks';
+    import { runTests, defineConfig, createProgress } from 'project-checks';
+    createProgress({ logger: false }).close(0);
     const first = await runTests(defineConfig({ coverage: false, logger: false, stdio: 'ignore' }));
     const second = await runTests({ coverage: false, logger: false, stdio: 'ignore' });
     if (first.passed !== 1 || second.cached !== 1) process.exit(1);
@@ -45,18 +46,18 @@ test('packed package installs into an independent project and exposes imports, r
   const executable = join(consumer, 'node_modules/.bin/project-checks');
   const command = spawnSync(executable, ['--workers', '1'], { cwd: consumer, encoding: 'utf8' });
   assert.equal(command.status, 0, command.stderr);
-  assert.match(command.stdout, /1 cached/);
+  assert.match(command.stdout, /TEST_SUMMARY: Tests run: 0 \| Success: 0 \| Skipped because cache: 1/);
 });
 
 test('CLI resolves configuration outside cwd, rejects invalid options, and preserves test failures', async t => {
   const directory = await temporary(t);
   const project = join(directory, 'project');
   await put(project, 'test/fail.test.mjs', "import test from 'node:test'; test('fails', () => { throw new Error('expected failure'); });");
-  const config = await put(project, 'project-checks.config.json', JSON.stringify({ coverage: false, logger: false, stdio: 'ignore', workers: 1 }));
+  const config = await put(project, 'project-checks.config.json', JSON.stringify({ coverage: false, stdio: 'ignore', workers: 1 }));
   const execute = args => spawnSync(process.execPath, [cli, ...args], { cwd: directory, encoding: 'utf8' });
   const failed = execute(['run', '--config', config]);
   assert.equal(failed.status, 1, failed.stderr);
-  assert.match(failed.stdout, /1 failed/);
+  assert.match(failed.stdout, /TEST_SUMMARY: Tests run: 1 \| Success: 0 \| Skipped because cache: 0 \| Failed: 1/);
   for (const args of [['--unknown'], ['--workers', '0'], ['--config'], ['invalid-command']]) {
     const result = execute(args);
     assert.equal(result.status, 2);
@@ -74,16 +75,18 @@ test('CLI file selection retains full inventory and shares passing evidence', as
   const source = "import test from 'node:test'; test('ok', () => {});";
   await put(project, 'test/a.test.mjs', source);
   await put(project, 'test/b.test.mjs', source);
-  await put(project, 'project-checks.config.json', JSON.stringify({ inputs: ['test'], excludeTestsFromInputs: true, coverage: false, logger: false, stdio: 'ignore', workers: 1 }));
+  await put(project, 'project-checks.config.json', JSON.stringify({ inputs: ['test'], excludeTestsFromInputs: true, coverage: false, stdio: 'ignore', workers: 1 }));
   const execute = args => spawnSync(process.execPath, [cli, ...args], { cwd: project, encoding: 'utf8' });
   assert.equal(execute([]).status, 0);
   await put(project, 'test/b.test.mjs', source + '\n// changed');
   const focused = execute(['--file', 'test/a.test.mjs']);
   assert.equal(focused.status, 0, focused.stderr);
-  assert.match(focused.stdout, /1 cached \(1 total\)/);
+  assert.match(focused.stdout, /TEST_PROGRESS: 1 out of 1 test files finished/);
+  assert.match(focused.stdout, /TEST_SUMMARY: Tests run: 0 \| Success: 0 \| Skipped because cache: 1/);
   const all = execute(['--file', 'test/a.test.mjs', '--file', 'test/b.test.mjs']);
   assert.equal(all.status, 0, all.stderr);
-  assert.match(all.stdout, /1 passed, 0 failed, 1 cached \(2 total\)/);
+  assert.match(all.stdout, /TEST_PROGRESS: 2 out of 2 test files finished/);
+  assert.match(all.stdout, /TEST_SUMMARY: Tests run: 1 \| Success: 1 \| Skipped because cache: 1/);
   assert.equal(execute(['--file', 'test/missing.test.mjs']).status, 2);
 });
 

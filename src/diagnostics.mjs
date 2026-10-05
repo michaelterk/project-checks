@@ -1,9 +1,11 @@
 import { cpus } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { resourceSampler } from './admission.mjs';
+import { createProgress } from './progress.mjs';
 
 export function createDiagnostics(options = {}) {
   const logger = options.logger === false ? null : (options.logger ?? console);
+  const progress = options.progress === false ? false : createProgress({ logger, suites: options.suites });
   const run = `${new Date().toISOString()}-${process.pid}-${randomUUID()}`;
   const suites = new Map();
   const stages = new Map();
@@ -137,11 +139,13 @@ export function createDiagnostics(options = {}) {
         });
       }
       diagnostic('run-end', { exitCode, seconds: (performance.now() - started) / 1000 });
+      progress && progress.close(exitCode);
     };
   }
 
   const close = startDiagnostics();
   return {
+    progress,
     event: diagnostic,
     suiteStart: diagnosticSuite,
     suiteEnd: diagnosticSuiteEnd,

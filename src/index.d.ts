@@ -80,6 +80,8 @@ export interface TestConfig {
   admission?: Admission;
   snapshotContext?: SnapshotContext;
   diagnostics?: Diagnostics;
+  /** Share invocation progress across suites; false suppresses plain-text progress. */
+  progress?: TestProgress | false;
   /** Learn source-bound longest-first hints separately from passing evidence. Default: false. */
   durationHints?: boolean;
   initialDurations?: Record<string, number>;
@@ -154,6 +156,7 @@ export class Admission {
 }
 
 export interface CachedUnitsOptions<T extends TestUnit = TestUnit> {
+  progress?: TestProgress | false;
   cacheDirectory?: string;
   suite?: string;
   units: T[];
@@ -218,6 +221,7 @@ export interface SnapshotContext {
   close(): Promise<void>;
 }
 export interface Diagnostics {
+  readonly progress?: TestProgress | false;
   event(event: string, fields?: Record<string, unknown>): void;
   suiteStart(suite: string, total?: number): void;
   suiteEnd(suite: string): void;
@@ -228,7 +232,15 @@ export interface Diagnostics {
   close(exitCode: number): void;
 }
 export function createSnapshotContext(options?: { signal?: AbortSignal }): SnapshotContext;
-export function createDiagnostics(options?: { logger?: Logger | false }): Diagnostics;
+export function createDiagnostics(options?: { logger?: Logger | false; suites?: string[]; progress?: false }): Diagnostics;
+
+export interface TestProgress {
+  files(suite: string, total: number): void;
+  file(suite: string, file: string, event: string, fields?: { status?: number | string; timedOut?: boolean }): void;
+  close?(exitCode: number): void;
+}
+/** Caller-owned reporter; supply all suite IDs to wait for a stable combined total. */
+export function createProgress(options?: { logger?: Logger | false | null; suites?: string[] }): TestProgress & { close(exitCode: number): void };
 
 export interface CoverageConfig {
   provider?: 'v8' | 'python';
@@ -258,6 +270,7 @@ export function loadChecks(filename: string, options?: {
 }): Promise<CheckDefinition[]>;
 export function runChecks(definitions: CheckDefinition[], options?: {
   resources?: ResourcePolicy; workers?: number; signal?: AbortSignal; logger?: Logger | false;
+  progress?: TestProgress | false;
 }): Promise<{ exitCode: number; results: Array<{ id: string; exitCode: number; skipped?: boolean }> }>;
 export function reportCoverage(config: TestConfig): Promise<null | {
   suite: string; minimum: { lines: number; branches: number; functions: number };

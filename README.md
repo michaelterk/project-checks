@@ -445,6 +445,58 @@ suite transitions, `span` for application stages, and `observeAdmission` for the
 shared pool. Call `close(exitCode)` after cleanup. Observation does not drive
 scheduler ticks or patch its methods.
 
+### Progress and final summary
+
+`runTests`, `runCachedUnits`, and `runChecks` print plain, newline-separated
+progress and summary lines through their logger by default. Output remains
+visible when redirected or piped to a log; it does not use terminal repainting.
+
+```text
+TEST_PROGRESS: 42 out of 100 test files finished | Skipped because cache: 12 | Failed: 1 | Timed out: 0 | Running: 4
+TEST_SUMMARY: Tests run: 88 | Success: 85 | Skipped because cache: 12 | Failed: 2 | Timed out: 1 | Duration: 123.45s | FAIL
+```
+
+The total counts selected test files, including cached files, rather than
+individual framework test cases or classes. Custom adapters count their units;
+framework actions such as Playwright snapshot updates count one command unit.
+Retries replace the original file outcome and do not count as additional tests.
+The final `Timed out` count includes only verified timeouts still failing after
+the configured retry; a successful retry counts as success. `Failed` excludes
+these timeouts. Existing result objects retain their original semantics: their
+`failed` count includes all nonzero file outcomes.
+
+Updates are throttled to once per second as files change, with a heartbeat every
+five seconds during long work. Failures and completion print immediately.
+`Tests run` excludes cached files and includes interrupted files that started.
+`Duration` covers discovery, setup, execution, retries, validation, and cleanup
+for the invocation. A final validation error can produce `FAIL` even when every
+test command succeeded. `logger: false` silences output; `progress: false`
+suppresses only these progress and summary lines.
+
+`runChecks` shares one overall counter across its test suites. For custom
+multi-suite orchestration, pass one caller-owned reporter to every suite and
+close it after validation and cleanup. Supply all selected suite IDs so progress
+waits for their inventories before displaying a stable denominator:
+
+```js
+const progress = createProgress({ suites: ['unit', 'integration'] });
+let exitCode = 2;
+try {
+  const results = await Promise.all([
+    runTests({ ...unitConfig, suite: 'unit', progress }),
+    runTests({ ...integrationConfig, suite: 'integration', progress }),
+  ]);
+  exitCode = results.find(result => result.exitCode)?.exitCode ?? 0;
+} finally {
+  progress.close(exitCode);
+}
+```
+
+When sharing diagnostics instead, use
+`createDiagnostics({ suites: ['unit', 'integration'] })`; its `close(exitCode)`
+also closes the shared progress reporter. Use `progress: false` on diagnostics
+to keep its logger's output limited to structured records.
+
 With `durationHints: true`, fresh passes record source-bound durations separately
 from passing evidence in `durations-<encoded-suite>.json`. Stable longest-first
 ordering retains discovery order for unknown/equal durations. Cache hits retain

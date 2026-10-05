@@ -6,6 +6,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { command, digest, integer, keys, object, text } from './util.mjs';
 import { Admission } from './admission.mjs';
 import { createSnapshotContext } from './inputs.mjs';
+import { withProgress } from './progress.mjs';
 
 const ignoredEnvironment = /^(?:INVOCATION_ID|PWD|OLDPWD|SHLVL|_|NODE_TEST_CONTEXT|TMPDIR|TMP|TEMP|TERM|COLORTERM|FORCE_COLOR|NO_COLOR|NODE_DISABLE_COLORS|npm_lifecycle_event|npm_lifecycle_script|npm_command|npm_package_(?:name|version|json)|npm_config_(?:cache|logs_dir|loglevel|progress|timing|color|fund|audit|update_notifier))$/;
 
@@ -15,10 +16,10 @@ export function environmentIdentity(env = process.env, ignoreEnv = []) {
 }
 
 export async function runCachedUnits(options) {
-  return withProcessSignal(options.signal, signal => runUnits({ ...options, signal }));
+  return withProgress(options, progress => withProcessSignal(options.signal, signal => runUnits({ ...options, progress, signal })));
 }
 
-async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, workers, resources, execute, environment = process.env, ignoreEnv = [], cache = true, signal, logger = console, admission: sharedAdmission, retryTimeouts = false, restoreEvidence, saveEvidence, diagnostics, normalPhase }) {
+async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, workers, resources, execute, environment = process.env, ignoreEnv = [], cache = true, signal, logger = console, admission: sharedAdmission, retryTimeouts = false, restoreEvidence, saveEvidence, diagnostics, normalPhase, progress }) {
   if (workers !== undefined) integer(workers, 'workers');
   if (typeof retryTimeouts !== 'boolean') throw new TypeError('retryTimeouts must be a boolean');
   text(suite, 'suite');
@@ -43,6 +44,7 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
     return value;
   };
   signal?.throwIfAborted();
+  progress && progress.files(suite, units.length);
   const before = await takeSnapshot();
   if (!isDeepStrictEqual(Object.keys(before.units).sort(), ids)) throw new Error('Current test-unit discovery changed before execution');
   const base = digest(JSON.stringify(['project-checks-evidence-v1', process.execPath, process.version, process.platform, process.arch, environmentIdentity(environment, ignoreEnv), before.common, ...(retryTimeouts ? [true] : [])]));
@@ -87,6 +89,7 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
     if (hit && !restoreEvidence) {
       logger?.log(`==> Reusing successful ${suite}/${unit.id}`);
       diagnostics?.file(suite, unit.id, "cache-hit");
+      progress && progress.file(suite, unit.id, 'cache-hit');
       results[index] = { id: unit.id, exitCode: 0, cached: true };
       return;
     }
@@ -96,6 +99,7 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
     let status;
     let timedOut = false;
     let ordinaryFailure = false;
+    let executing = false, finished = false;
     try {
       signal?.throwIfAborted();
       if (stopped) return;
@@ -121,12 +125,15 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
         if (restored) {
           logger?.log(`==> Reusing successful ${suite}/${unit.id}`);
           diagnostics?.file(suite, unit.id, "cache-hit");
+          progress && progress.file(suite, unit.id, 'cache-hit');
       results[index] = { id: unit.id, exitCode: 0, cached: true };
           return;
         }
         await rm(filename, { force: true });
       }
       logger?.log(`==> ${retry ? 'Retrying timeout file alone (once)' : 'Running'} ${suite}/${unit.id}`);
+      progress && progress.file(suite, unit.id, 'file-start');
+      executing = true;
       status = await execute(unit, { retry, reportTimeout: outcome => {
         if (typeof outcome?.ordinaryFailure !== 'boolean') throw new TypeError('reportTimeout requires ordinaryFailure boolean');
         timedOut = true;
@@ -136,6 +143,8 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
       signal?.throwIfAborted();
       // A timeout is never a pass, even if a custom adapter returns zero.
       status = originalFailure || status || (timedOut ? 1 : 0);
+      progress && progress.file(suite, unit.id, 'file-end', { status, timedOut });
+      finished = true;
       results[index] = { id: unit.id, exitCode: status, cached: false };
       if (!retry && retryTimeouts && timedOut) retries.push({ index, originalFailure: ordinaryFailure ? status : 0 });
       if (status !== 0) return;
@@ -164,7 +173,10 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
           await rename(temporary, filename);
         } finally { await rm(temporary, { force: true }); }
       }
-    } finally { admission?.release(); }
+    } finally {
+      if (executing && !finished) progress && progress.file(suite, unit.id, 'file-end', { status: 'interrupted' });
+      admission?.release();
+    }
   }
   async function worker() {
     try {

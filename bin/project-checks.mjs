@@ -68,7 +68,6 @@ try {
       process.once('SIGINT', abort);
       process.once('SIGTERM', abort);
       const result = action === 'checks' ? await runChecks(await loadChecks(filename ?? 'project-checks.project.json', { target, files: overrides.files, cache: overrides.cache, filters: overrides.filters, frameworkArgs: overrides.frameworkArgs }), { resources: config.resources, workers: overrides.workers, signal: controller.signal }) : await runTests({ ...config, signal: controller.signal });
-      if (action !== 'checks') console.log(`Tests: ${result.passed} passed, ${result.failed} failed, ${result.cached} cached (${result.total} total).`);
       process.exitCode = result.exitCode;
     }
   }

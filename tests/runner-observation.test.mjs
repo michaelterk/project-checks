@@ -83,6 +83,7 @@ test('diagnostics account for fresh/cached work, snapshots and time-weighted sum
   for (const cached of [false, true]) {
     const events = [];
     const diagnostics = createDiagnostics({
+      progress: false,
       logger: { log: (line) => events.push(JSON.parse(line.trim().slice('TEST_DIAGNOSTIC '.length))) },
     });
     diagnostics.suiteStart('checks');
@@ -308,8 +309,8 @@ test('diagnostic instances remain distinct within the same millisecond', (t) => 
   t.mock.method(Date.prototype, 'toISOString', () => '2026-10-04T00:00:00.000Z');
   const runs = [];
   const logger = { log: (line) => runs.push(JSON.parse(line.trim().slice('TEST_DIAGNOSTIC '.length)).run) };
-  const first = createDiagnostics({ logger });
-  const second = createDiagnostics({ logger });
+  const first = createDiagnostics({ logger, progress: false });
+  const second = createDiagnostics({ logger, progress: false });
   try {
     assert.notEqual(runs[0], runs[1]);
   } finally {

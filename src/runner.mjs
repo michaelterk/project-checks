@@ -10,6 +10,7 @@ import { commandEnvironment, runCommand } from './command.mjs';
 import { createSnapshot, createSnapshotContext, discoverTests, selectTests } from './inputs.mjs';
 import { digest, inside } from './util.mjs';
 import { createDurationHints } from './durations.mjs';
+import { withProgress } from './progress.mjs';
 
 async function implementationIdentity() {
   const files = (await readdir(import.meta.dirname)).filter((name) => name.endsWith('.mjs') || name.endsWith('.py')).sort();
@@ -77,7 +78,7 @@ export async function createFileSnapshot(options = {}) {
 }
 
 export async function runTests(options = {}, lifecycle = {}) {
-  return withProcessSignal(options.signal, (signal) => runTestsWithSignal({ ...options, signal }, lifecycle));
+  return withProgress(options, progress => withProcessSignal(options.signal, signal => runTestsWithSignal({ ...options, progress, signal }, lifecycle)));
 }
 
 async function runTestsWithSignal(options, { retained, normalPhase }) {
@@ -93,6 +94,7 @@ async function runTestsWithSignal(options, { retained, normalPhase }) {
   if (files.some(id => !selection.includes(id))) throw new Error('File is outside the selected suite');
   if (!files.length) throw new Error(`No test files found in ${config.testDirectory}`);
   diagnostics?.files(config.suite, files.length);
+  config.progress && config.progress.files(config.suite, options.engine === 'playwright' && options.frameworkArgs?.length ? 1 : files.length);
   const context = config.snapshotContext ?? createSnapshotContext({ signal: config.signal });
   config.snapshotContext = context;
   let inputs, artifacts, fixture;
@@ -140,6 +142,10 @@ async function runTestsWithSignal(options, { retained, normalPhase }) {
         ? (options.files?.length ? files.map(id => argument.replaceAll('{file}', fileArgument(id))) : []) : [argument]), ...options.frameworkArgs] };
       return await runCachedUnits({
         suite: `${config.suite}/action`, cache: false, resources: {}, admission, signal: config.signal, logger,
+        progress: config.progress ? {
+          files: () => config.progress.files(config.suite, 1),
+          file: (_, ...args) => config.progress.file(config.suite, ...args),
+        } : false,
         units: [action], snapshot: async () => ({ common: 'uncached-action', units: { 'framework-action': 'uncached-action' } }),
         retryTimeouts: config.retryTimeouts, normalPhase, environment: env,
         execute: (unit, { reportTimeout }) => (fixture?.execute ?? runCommand)(unit.command, {
@@ -169,6 +175,7 @@ async function runTestsWithSignal(options, { retained, normalPhase }) {
       admission,
       ...(artifacts ? { saveEvidence: artifacts.saveEvidence, restoreEvidence: artifacts.restoreEvidence } : {}),
       diagnostics,
+      progress: config.progress,
       snapshot: () => {
         const call = ++snapshotCalls;
         const started = performance.now();

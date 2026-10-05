@@ -6,7 +6,7 @@ import { command, integer, keys, text } from './util.mjs';
 import { selectConcurrency } from './resources.mjs';
 import defaultConfig from '../project-checks.config.json' with { type: 'json' };
 
-const options = ['extends', 'root', 'testDirectory', 'pattern', 'files', 'command', 'inputs', 'testInputs', 'excludeTestsFromInputs', 'ignore', 'workers', 'resources', 'cache', 'cacheDirectory', 'cacheIdentity', 'suite', 'env', 'ignoreEnv', 'fingerprint', 'testFixtureInputs', 'signal', 'logger', 'stdio', 'retryTimeouts', 'retryTimeoutMs', 'timeoutMs', 'admission', 'snapshotContext', 'diagnostics', 'durationHints', 'initialDurations', 'select', 'setup', 'filters', 'engine', 'coverage', 'frameworkArgs', 'normalizeNpmEnvironment'];
+const options = ['extends', 'root', 'testDirectory', 'pattern', 'files', 'command', 'inputs', 'testInputs', 'excludeTestsFromInputs', 'ignore', 'workers', 'resources', 'cache', 'cacheDirectory', 'cacheIdentity', 'suite', 'env', 'ignoreEnv', 'fingerprint', 'testFixtureInputs', 'signal', 'logger', 'stdio', 'retryTimeouts', 'retryTimeoutMs', 'timeoutMs', 'admission', 'snapshotContext', 'diagnostics', 'progress', 'durationHints', 'initialDurations', 'select', 'setup', 'filters', 'engine', 'coverage', 'frameworkArgs', 'normalizeNpmEnvironment'];
 export const defaultIgnore = ['**/.git', '**/.git/**', '**/.test-cache', '**/.test-cache/**', '**/__pycache__', '**/__pycache__/**'];
 
 function patterns(value, label, allowEmpty = false) {
@@ -75,6 +75,7 @@ export function defineConfig(config) {
   for (const [name, methods] of [['admission', ['acquire', 'release']], ['snapshotContext', ['run', 'identify']], ['diagnostics', ['event', 'files', 'file', 'span']]]) {
     if (config[name] !== undefined && !methods.every(method => typeof config[name]?.[method] === 'function')) throw new TypeError(`${name} has invalid methods`);
   }
+  if (config.progress !== undefined && config.progress !== false && !['files', 'file'].every(method => typeof config.progress?.[method] === 'function')) throw new TypeError('progress has invalid methods');
   if (config.select !== undefined && typeof config.select !== 'function') {
     keys(config.select, ['include', 'exclude'], 'select');
     for (const field of ['include', 'exclude']) if (config.select[field] !== undefined) patterns(config.select[field], `select.${field}`, true);
