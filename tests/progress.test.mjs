@@ -76,6 +76,8 @@ test('cache engine summarizes unique files after successful and exhausted retrie
   assert.equal(result.exitCode, 7);
   assert.equal(attempts.length, 6, 'four fresh files plus two retry attempts');
   assert.equal(attempts.some(([id]) => id === 'cached'), false);
+  const plan = lines.findIndex(line => /CACHE_SCAN: mixed \| Will run: 4 \| Will skip: 1/.test(line));
+  assert.ok(plan >= 0 && plan < lines.findIndex(line => line.startsWith('==> Running')));
   assert.equal(summary(lines).length, 1);
   assert.match(summary(lines)[0], /Tests run: 4 \| Success: 2 \| Skipped because cache: 1 \| Failed: 1 \| Timed out: 1 \| Duration: [\d.]+s \| FAIL/);
   assert.match(lines.at(-2), /5 out of 5 test files finished/);
@@ -100,17 +102,23 @@ test('runTests reports fresh, all-cached and focused runs by default', async t =
   const { lines, logger } = capture();
   const options = { root, coverage: false, inputs: [], logger, stdio: 'ignore' };
   await runTests(options);
+  assert.ok(lines.some(line => /CACHE_SCAN: tests \| Will run: 2 \| Will skip: 0/.test(line)));
   assert.match(summary(lines).at(-1), /Tests run: 2 \| Success: 2 \| Skipped because cache: 0/);
   lines.length = 0;
   await runTests(options);
+  assert.ok(lines.some(line => /CACHE_SCAN: tests \| Will run: 0 \| Will skip: 2/.test(line)));
   assert.match(summary(lines)[0], /Tests run: 0 \| Success: 0 \| Skipped because cache: 2/);
   lines.length = 0;
   await runTests({ ...options, files: ['test/a.test.mjs'] });
+  assert.ok(lines.some(line => /CACHE_SCAN: tests \| Will run: 0 \| Will skip: 1/.test(line)));
   assert.match(lines.at(-2), /1 out of 1 test files finished/);
   assert.match(summary(lines)[0], /Skipped because cache: 1/);
   lines.length = 0;
   await runTests({ ...options, progress: false });
   assert.equal(lines.some(line => /TEST_PROGRESS|TEST_SUMMARY/.test(line)), false);
+  lines.length = 0;
+  await runTests({ ...options, cache: false });
+  assert.ok(lines.some(line => /Will run: 2 \| Will skip: 0.*Cache disabled/.test(line)));
 });
 
 test('runChecks shares one total across suites with identical default suite IDs', async t => {

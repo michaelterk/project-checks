@@ -23,7 +23,7 @@ and install that archive in another project:
 npm pack
 
 # In your project (adjust the path)
-npm install --save-dev /path/to/project-checks/project-checks-0.1.8.tgz
+npm install --save-dev /path/to/project-checks/project-checks-0.3.2.tgz
 ```
 
 After a maintainer publishes it under this name, installation will be
@@ -213,6 +213,20 @@ project-checks coverage --config project-checks.project.json --target complete
 
 ## Cache behavior and inputs
 
+Before starting test commands, each suite scans its passing records with up to
+16 concurrent reads, shared across suites in the same process. Coverage and
+other retained artifacts are validated and restored under resource admission
+before a file is counted as skippable. The runner prints the number of files
+that will run or be skipped and the scan duration, then schedules only the files
+that need execution using its in-memory plan. Missing or corrupt records and
+incompatible artifacts rerun. Suites scan after their prerequisites and setup
+finish; retries and final input verification retain their existing checks.
+
+```text
+CACHE_SCAN: tests | Scanning 240 test files | Concurrency: 16
+CACHE_SCAN: tests | Will run: 32 | Will skip: 208 | Duration: 0.12s
+```
+
 Only zero-exit tests with unchanged inputs receive passing evidence. Evidence
 is written atomically per file, so completed passes survive a later test failure
 or interruption. A failed test reruns on the next invocation. Corrupt evidence
@@ -392,7 +406,8 @@ Programmatic callers can pass one `Admission` instance to several
 `runCachedUnits` calls. It bounds their combined active commands and retains
 one learned CPU weight; each suite keeps its own snapshot and passing evidence.
 The caller closes that pool after all calls settle. Explicit `workers` on
-`Admission` also bounds cache-lookup concurrency, within RAM, unit and worker caps.
+`Admission` bounds artifact restoration and execution, within RAM, unit and
+worker caps. Lightweight passing-record reads use the separate shared limit of 16.
 Input fingerprinting bounds filesystem work at eight operations within one
 invocation, with fresh metadata on every snapshot. Content digests and path-only
 exclusion decisions are reused; listings and snapshots are not.
@@ -683,12 +698,17 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for release checks.
 
 ## OS CPU quota
 
-The CLI runner requires Linux cgroup v2, `systemd-run`, and a running user systemd
-manager with the CPU controller enabled. Before starting tests it creates a
-unique user scope for the whole invocation and verifies the kernel's `cpu.max`.
+On Linux, the CLI runner requires cgroup v2, `systemd-run`, and a running user
+systemd manager with the CPU controller enabled. Before starting tests it creates
+a unique user scope for the whole invocation, including the cache scan, and
+verifies the kernel's `cpu.max`.
 All descendants share its aggregate CPU budget, including detached workers.
 Scope cleanup drains remaining descendants on exit or cancellation. Setup
 failures stop the run rather than silently removing the quota.
+
+On macOS, `run` and `checks` use adaptive scheduling without a kernel CPU quota.
+Direct in-process APIs also use scheduling only; their entrypoint must be wrapped
+with `runWithCpuQuota` or `project-checks exec` on Linux to acquire a kernel limit.
 
 The package ships `project-checks.config.json` with its default test and resource
 settings; absent project configuration uses these defaults. Copy that file into

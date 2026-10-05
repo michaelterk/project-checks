@@ -71,6 +71,34 @@ test('sorted identities ignore permissions and retain external symlink contents 
   assert.notEqual((await snapshot()).common, changed.common);
 });
 
+for (const mode of ['relative', 'absolute']) {
+  test(`dangling ${mode} symlinks retain missing inputs and detect target changes`, async t => {
+    const config = await fixture(t);
+    await put(config.root, 'src/stable', 'stable');
+    const target = join(config.root, 'optional/input');
+    const link = join(config.root, 'src/optional-link');
+    const linkTarget = mode === 'relative' ? '../optional/input' : target;
+    await symlink(linkTarget, link);
+    const context = createSnapshotContext();
+    const snapshot = createSnapshot(config, context);
+    t.after(() => context.close());
+
+    assert.deepEqual(await context.identify([link], { ...config, allowMissing: true }), [
+      ['symlink', linkTarget, ['missing']],
+    ]);
+    const missing = await snapshot();
+    assert.deepEqual(await snapshot(), missing);
+    await put(config.root, 'optional/input', 'first');
+    const present = await snapshot();
+    assert.notEqual(present.common, missing.common);
+    await writeFile(target, 'second');
+    assert.notEqual((await snapshot()).common, present.common);
+    await rm(target);
+    assert.deepEqual(await snapshot(), missing);
+    await assert.rejects(context.identify([link], config), { code: 'ENOENT' });
+  });
+}
+
 test('concurrent factories share digest reads, recheck metadata and retry failed hashes', async t => {
   const config = await fixture(t);
   for (let i = 0; i < 16; i++) await put(config.root, `src/${i}`, 'input');

@@ -104,6 +104,7 @@ test('diagnostics account for fresh/cached work, snapshots and time-weighted sum
     assert.ok(summary.seconds > 0);
     assert.ok(Math.abs(summary.secondsAtLeast80 + summary.secondsBelow80 - summary.observedSeconds) < 1e-9);
     assert.equal(events.filter((value) => value.event === 'file-start').length, cached ? 0 : 3);
+    assert.equal(events.filter(value => value.event === 'span-end' && value.stage === 'cache-scan').length, 1);
   }
 });
 

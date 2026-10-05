@@ -82,6 +82,61 @@ test('artifact permission changes preserve passing evidence before and during re
   assert.equal((await runCachedUnits(f.options)).cached, 1);
 });
 
+test('cache plan counts validated restorations and artifact fallbacks before executing', async t => {
+  const f = await fixture(t);
+  const ids = ['valid', 'missing', 'incompatible'];
+  const artifacts = Object.fromEntries(await Promise.all(ids.map(async id =>
+    [id, await put(f.root, `artifacts/${id}`, id)])));
+  f.inputs.units = Object.fromEntries(ids.map(id => [id, 'v1']));
+  f.options.units = ids.map(id => ({ id, identity: 'fixture' }));
+  f.options.saveEvidence = unit => ({ files: [artifacts[unit.id]] });
+  await runCachedUnits(f.options);
+  await rm(artifacts.missing);
+  const lines = [];
+  const restored = [];
+  const executed = [];
+  f.options.logger = { log: line => lines.push(line) };
+  f.options.restoreEvidence = unit => {
+    restored.push(unit.id);
+    return unit.id !== 'incompatible';
+  };
+  f.options.execute = async unit => {
+    assert.deepEqual([...restored].sort(), ['incompatible', 'valid']);
+    assert.ok(lines.some(line => /Will run: 2 \| Will skip: 1/.test(line)));
+    executed.push(unit.id);
+    await writeFile(artifacts[unit.id], unit.id);
+    return 0;
+  };
+  const result = await runCachedUnits(f.options);
+  assert.equal(result.exitCode, 0);
+  assert.deepEqual([result.passed, result.cached], [2, 1]);
+  assert.deepEqual([...executed].sort(), ['incompatible', 'missing']);
+});
+
+test('upfront artifact restoration preserves a low-level worker limit without a resource pool', async t => {
+  const f = await fixture(t);
+  const ids = ['a', 'b', 'c'];
+  f.inputs.units = Object.fromEntries(ids.map(id => [id, 'v1']));
+  f.options.units = ids.map(id => ({ id, identity: 'fixture' }));
+  f.options.workers = 1;
+  delete f.options.resources;
+  await runCachedUnits(f.options);
+  let active = 0;
+  let peak = 0;
+  f.options.restoreEvidence = async () => {
+    peak = Math.max(peak, ++active);
+    await new Promise(resolve => setImmediate(resolve));
+    active--;
+    return true;
+  };
+  f.options.execute = () => { throw new Error('valid artifacts must remain cached'); };
+  const result = await runCachedUnits(f.options);
+  assert.equal(result.cached, 3);
+  assert.equal(result.workers, 1);
+  assert.equal(peak, 1);
+  assert.equal(active, 0);
+});
+
 test('shared artifact replacement during restoration fails before aggregation and removes passing evidence', async t => {
   const f = await fixture(t);
   const artifact = f.declaration.files[0];
