@@ -78,11 +78,20 @@ export function createSnapshotContext({ signal } = {}) {
         remaining++;
         run(async () => {
           if (failures.length) return;
-          const info = await lstat(file, { bigint: true });
+          let info;
+          try { info = await lstat(file, { bigint: true }); }
+          catch (error) {
+            if (error.code === 'ENOENT' && config.allowMissing && !config.regularFilesOnly) { assign(['missing']); return; }
+            throw error;
+          }
           if (config.regularFilesOnly && !info.isFile()) throw new TypeError(`Artifact must be a regular file: ${file}`);
           if (info.isSymbolicLink()) {
-            const target = await realpath(file);
-            const value = ['symlink', await readlink(file), null];
+            const readlinkTarget = await readlink(file);
+            const target = await realpath(file).catch(error => {
+              if (error.code === 'ENOENT' && config.allowMissing) return resolve(dirname(file), readlinkTarget);
+              throw error;
+            });
+            const value = ['symlink', readlinkTarget, null];
             assign(value);
             if (ancestors.has(target)) value[2] = ['cycle', target];
             else enqueue(target, ancestors, identity => { value[2] = identity; });
@@ -145,8 +154,25 @@ export function selectTests(config, inventory) {
   return inventory.filter(id => selected.has(id));
 }
 
+// Flatten trees before hashing: names, paths, type labels and traversal order
+// never enter validity. Multiplicity preserves added/removed identical files.
+export function contentFingerprint(identities) {
+  const files = [];
+  const visit = identity => {
+    if (identity[0] === 'file') files.push([true, identity[1]]);
+    else if (identity[0] === 'missing') files.push([false, null]);
+    else if (identity[0] === 'directory') { files.push([true, null]); identity[1].forEach(([, child]) => visit(child)); }
+    else if (identity[0] === 'symlink') visit(identity[2]);
+    else if (identity[0] === 'cycle') files.push([true, null]);
+    else throw new TypeError('Unknown file identity');
+  };
+  identities.forEach(visit);
+  files.sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b), 'en'));
+  return digest(JSON.stringify(files));
+}
+
 // Every snapshot still discovers paths and rechecks metadata, including cache hits.
-export function createSnapshot(config, extraIdentity, context = createSnapshotContext()) {
+export function createSnapshot(config, context = createSnapshotContext()) {
   async function selectPaths(inputPatterns, excludedFiles) {
     const excluded = context.excluded(config);
     const selected = new Set();
@@ -164,6 +190,13 @@ export function createSnapshot(config, extraIdentity, context = createSnapshotCo
         if (!excluded(file) && (!excludedFiles.has(file) || inputPatterns.includes(slash(relative(config.root, file))))) selected.add(file);
       }
     });
+    // Literal absent inputs contribute existence=false; globs select existing files.
+    for (const pattern of patterns) {
+      if (/[*?{}()[\]\\!+@]/.test(pattern)) continue;
+      const file = resolve(config.root, pattern);
+      if (!inside(config.root, file)) throw new Error(`Input must stay inside the project root: ${pattern}`);
+      if (!excluded(file) && !excludedFiles.has(file)) selected.add(file);
+    }
     // A selected directory already covers its descendants; hash each tree once.
     const roots = [];
     for (const file of [...selected].sort()) {
@@ -208,28 +241,25 @@ export function createSnapshot(config, extraIdentity, context = createSnapshotCo
     if (failedDependency) throw failedDependency.reason;
     const dependencies = dependencyResults.map(result => result.value);
     const paths = [...new Set([...roots, ...files.map(id => resolve(config.root, id)), ...dependencies.flat()])];
-    const identities = await context.identify(paths, config, excludedFiles);
+    const identities = await context.identify(paths, { ...config, allowMissing: true }, excludedFiles);
     const values = new Map(paths.map((file, index) => [file, identities[index]]));
     const fixturePaths = [...new Set(fixtures.flat())];
     const fixtureCacheDirectory = fixturePaths.length ? await realpath(config.cacheDirectory).catch(error => {
       if (error.code === 'ENOENT') return config.cacheDirectory;
       throw error;
     }) : undefined;
-    const fixtureIdentities = await context.identify(fixturePaths, { ...config, ignore: [], fixtureCacheDirectory });
+    const fixtureIdentities = await context.identify(fixturePaths, { ...config, ignore: [], fixtureCacheDirectory, allowMissing: true });
     const fixtureValues = new Map(fixturePaths.map((file, index) => [file, fixtureIdentities[index]]));
-    const named = file => [slash(relative(config.root, file)), values.get(file)];
-    const common = roots.map(named);
+    const common = contentFingerprint(roots.map(file => values.get(file)));
     const units = {};
     files.forEach((id, index) => {
-      const own = values.get(resolve(config.root, id));
-      const inputs = dependencies[index].map(named);
-      units[id] = digest(JSON.stringify(inputs.length ? [own, inputs] : own));
-      if (fixtures[index]?.length) units[id] = digest(JSON.stringify([units[id], fixtures[index].map(file => [file, fixtureValues.get(file)])]));
+      units[id] = contentFingerprint([
+        values.get(resolve(config.root, id)),
+        ...dependencies[index].map(file => values.get(file)),
+        ...(fixtures[index] ?? []).map(file => fixtureValues.get(file)),
+      ]);
     });
-    const custom = config.fingerprint ? await config.fingerprint() : null;
-    if (config.fingerprint && typeof custom !== 'string') throw new TypeError('fingerprint must return a string');
-    const implementation = await extraIdentity();
-    return { common: digest(JSON.stringify([config.cacheIdentity ?? config.root, implementation, common, custom])), units };
+    return { common, units };
   };
   snapshot.close = () => context.close();
   return snapshot;

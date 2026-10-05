@@ -57,8 +57,6 @@ export interface TestConfig {
   resources?: ResourcePolicy;
   cache?: boolean;
   cacheDirectory?: string;
-  /** Stable project identity for deliberate cache reuse across equivalent checkouts. */
-  cacheIdentity?: string;
   /** Retry each verified timeout file once, after normal work drains. Default: false. */
   retryTimeouts?: boolean;
   /** Node default test timeout on retry; explicit test timeouts still apply. Default: 60000. */
@@ -68,9 +66,6 @@ export interface TestConfig {
   suite?: string;
   /** Overrides inherited environment; undefined removes a variable. */
   env?: Record<string, string | undefined>;
-  ignoreEnv?: string[];
-  /** Extra identity for external runtimes, dependencies, services or other inputs. */
-  fingerprint?: () => string | Promise<string>;
   /** Declare literal fixture files/directories, root-relative or absolute. The package hashes them. */
   testFixtureInputs?: (id: string) => string[] | Promise<string[]>;
   signal?: AbortSignal;
@@ -174,8 +169,6 @@ export interface CachedUnitsOptions<T extends TestUnit = TestUnit> {
   resources?: ResourcePolicy;
   /** Reuse one pool across suites; the caller owns its final close. */
   admission?: Admission;
-  environment?: Record<string, string | undefined>;
-  ignoreEnv?: string[];
   cache?: boolean;
   signal?: AbortSignal;
   logger?: Logger | null;
@@ -205,11 +198,12 @@ export function defineConfig(config: TestConfig): TestConfig;
 export function loadConfig(filename?: string, options?: { cwd?: string }): Promise<TestConfig>;
 export function runTests(config?: TestConfig): Promise<RunResult>;
 /** Reuse runTests JSON input normalization and hashing; caller must close in finally.
- * Does not execute tests or bind commands/environment; runCachedUnits owns those identities. */
+ * Does not execute tests. Validity depends only on file existence and content. */
 export function createFileSnapshot(config?: TestConfig): Promise<FileSnapshot>;
 export function runCachedUnits<T extends TestUnit>(options: CachedUnitsOptions<T>): Promise<RunResult>;
 export function runCommand(command: string[], options?: CommandOptions): Promise<number>;
-export function environmentIdentity(environment?: Record<string, string | undefined>, ignoreEnv?: string[]): string;
+export function cacheKey(snapshot: InputSnapshot, unitId: string): string;
+export function cacheRecordName(suite: string, unitId: string): string;
 export function detectResources(): HostResources;
 export function selectConcurrency(policy?: ResourcePolicy, resources?: HostResources): Concurrency;
 

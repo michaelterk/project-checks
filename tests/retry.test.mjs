@@ -314,12 +314,11 @@ test('second real Node timeout fails without evidence', async t => {
   assert.deepEqual(await readdir(join(f.root, '.test-cache/project-checks')), []);
 });
 
-test('retry overrides Node CLI default test timeout but preserves explicit test timeouts', async t => {
+test('retry overrides Node CLI default test timeout', async t => {
   const f = await nodeFixture(t, "test('body', delay);");
   const options = { ...f.options, command: [process.execPath, '--test', '--test-timeout=20', '{file}'], retryTimeoutMs: 1000 };
   assert.equal((await runTests(options)).exitCode, 0);
   assert.equal(await f.count(), 2);
-  assert.equal((await runTests({ ...options, retryTimeoutMs: 2000 })).cached, 0);
 });
 
 test('structured timeout detection preserves a configured console reporter', async t => {
@@ -446,5 +445,5 @@ test('reporter accepts nested verified hook timeout causes and keeps unrelated c
 });
 
 test('invalid timeout and cache identity configuration fails explicitly', () => {
-  for (const config of [{ retryTimeouts: 1 }, { timeoutMs: 0 }, { timeoutMs: 2147483648 }, { retryTimeoutMs: -1 }, { cacheIdentity: '' }]) assert.throws(() => defineConfig(config));
+  for (const config of [{ retryTimeouts: 1 }, { timeoutMs: 0 }, { timeoutMs: 2147483648 }, { retryTimeoutMs: -1 }]) assert.throws(() => defineConfig(config));
 });

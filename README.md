@@ -96,16 +96,12 @@ with a path relative to the project root and starts the executable directly.
 Spaces and shell metacharacters in filenames remain literal arguments.
 
 ```js
-import { execFileSync } from 'node:child_process';
 import { defineConfig } from 'project-checks';
 
 export default defineConfig({
   testDirectory: 'tests',
   pattern: '**/test_*.py',
   command: ['python3', '-m', 'pytest', '{file}'],
-  fingerprint: () => execFileSync('python3', ['--version'], {
-    encoding: 'utf8',
-  }).trim(),
 });
 ```
 
@@ -202,6 +198,10 @@ minimums. Fractional minimums are enforced. Partial file selections can retain
 contributions but do not pass the full-suite coverage gate; filtered runs do not
 contribute coverage. Changing only minimums or V8 domain rules rebuilds the gate
 from compatible contributions.
+Cached coverage stores project-relative source paths and resolves them against
+the current root when reporting. Source content bindings belong to artifact
+metadata, separate from validity keys; renamed reporting paths require a new
+contribution. Moving an unchanged checkout preserves reusable coverage.
 
 `reportCoverage(config)` returns saved measurements, current minimums and
 staleness without running tests. Optional `coverage.report` selects the saved
@@ -223,12 +223,12 @@ The default `inputs: ['.']` fingerprints the full project tree: hidden files,
 tests, configuration, installed dependencies and symlink targets. `.git`,
 `.test-cache` and Python `__pycache__` directories are excluded. Symlink cycles
 retain their targets without being traversed repeatedly. The configured cache
-directory is always excluded. File identity uses content hashes, ignoring filesystem
-permissions and ownership. Input paths and content, command,
-effective environment, Node runtime/platform and package implementation all
-contribute to evidence identity. Cache files contain hashes, never environment
-values. Defaults favor complete input tracking, which can be expensive for large
-dependency trees.
+directory is always excluded. Validity uses only existence and SHA-256 content
+hashes. File/directory names, root paths, attributes, commands, environment,
+runtime identities and retry settings do not enter the validity key. Directory
+presence has no byte content and is represented by existence with a null hash.
+Suite and test IDs select the cache record; they are not part of its validity.
+Defaults favor complete input tracking, which can be expensive for large trees.
 
 For per-file reuse after editing a test, explicitly select shared source,
 dependencies, configuration and fixtures:
@@ -287,16 +287,10 @@ do not invalidate selected units; the config file itself is a dependency only
 when selected by `inputs`/`testInputs`. Include every imported helper and installed
 dependency used by each scope; mappings do not infer imports or package closures.
 
-`cacheIdentity` optionally replaces the absolute project root in snapshot identity
-for deliberate reuse between equivalent checkouts of the same project. Commands,
-environment values, dependency contents, and symlink targets still contribute;
-meaningful absolute paths in those values can prevent cross-checkout reuse.
-Use a stable project-specific identity and the same suite/cache directory.
-
 Paths and globs are relative to `root`. Literal directories recursively include
 hidden files; glob patterns follow Node's
 [glob behavior](https://nodejs.org/api/fs.html#fspromisesglobpattern-options).
-Missing input paths contribute no files and are detected when created. `ignore`
+Missing literal input paths contribute existence=false and a null content hash. `ignore`
 replaces the default exclusions and applies to discovery and shared inputs.
 Exclude generated outputs to keep tests from changing their own inputs:
 
@@ -311,9 +305,8 @@ export default {
 };
 ```
 
-Inputs outside the project (global interpreters, external dependency environments,
-browser binaries, services) need a `fingerprint` callback that returns their
-current identity, or `cache: false`. The callback is evaluated with each snapshot.
+External file inputs (interpreters, dependencies and browser binaries) can be
+declared through `testFixtureInputs`; their existence and content are hashed.
 When files use different external fixtures, supply programmatic
 `testFixtureInputs(id)` instead: return a sync/async array of literal file or
 directory paths, root-relative or absolute. The package hashes those paths only
@@ -322,7 +315,7 @@ example, a browser lane can bind Chromium to lifecycle tests and WebKit to page
 tests without a Chromium update invalidating WebKit-only files. The callback
 receives canonical root-relative IDs on every snapshot, including focused runs.
 Fixture code declares paths and any required safety checks; it need not compute
-hashes or manage passing evidence. Missing declared paths fail; an empty array
+hashes or manage passing evidence. Missing declared paths contribute existence=false; an empty array
 declares no extra inputs. This trusted programmatic callback can name external
 paths, while JSON inputs remain root-relative. Existing symlink traversal applies;
 fixtures that require containment must check their bundle before returning paths.
@@ -330,7 +323,6 @@ Explicit fixture declarations ignore ordinary `ignore` rules, so an engine bundl
 excluded from a broad SDK input can still be tracked for its actual consumers.
 Fixture directories inside or resolving into `cacheDirectory` are rejected.
 Load the JSON config and add this fixture callback before calling `runTests`.
-The existing common `fingerprint` API remains available for compatibility.
 For import discovery, `testInputs` also accepts a sync/async `(id) => string[]`
 callback. It runs on every snapshot, including focused runs, and returns
 root-relative dependency paths/globs. Ordinary exclusions apply to these inputs;
@@ -340,11 +332,8 @@ Passing-test caching assumes deterministic tests against the selected inputs.
 `cache: false` and `--no-cache` execute all tests without reading or writing evidence.
 They still check that inputs stay unchanged during execution.
 
-Display variables, shell bookkeeping, Codex's `CODEX_THREAD_ID` and npm's execution metadata are excluded
-from environment identity. Other variables invalidate evidence by default.
-`ignoreEnv` can name additional scheduling/output variables; use it only for
-values that do not affect test meaning. Environment overrides supplied through
-`env` are included in the fingerprint; setting a value to `undefined` removes it.
+Environment values configure execution but do not affect content validity.
+`env` overrides inherited values; setting a value to `undefined` removes it.
 `NODE_TEST_CONTEXT` is removed from child environments so imported use also works
 inside Node's own test runner.
 
@@ -372,15 +361,12 @@ inside Node's own test runner.
 | `resources` | See below | Resource policy |
 | `cache` | `true` | Read/write passing evidence |
 | `cacheDirectory` | `.test-cache/project-checks` | Evidence storage, relative to root or absolute |
-| `cacheIdentity` | Absolute project root | Stable project identity for equivalent-checkout reuse |
 | `retryTimeouts` | `false` | Retry verified timeouts once after normal work drains |
 | `retryTimeoutMs` | `60000` | Node default test timeout on retry; explicit test timeouts still apply |
 | `timeoutMs` | None | Wall deadline per command attempt, including retries |
 | `suite` | `tests` | Cache namespace |
 | `env` | Inherit environment | String overrides; undefined removes a variable |
 | `normalizeNpmEnvironment` | `false` | Remove npm launch metadata and use the owning project's executable search path |
-| `ignoreEnv` | `[]` | Additional environment names excluded from evidence |
-| `fingerprint` | None | Sync/async callback returning an extra identity string |
 | `testFixtureInputs` | None | Programmatic sync/async callback `(id) => string[]` declaring literal fixture input paths |
 | `admission` | None | Caller-owned worker pool shared across `runTests` calls |
 | `snapshotContext` | None | Caller-owned hashing queue shared across snapshots/suites |
@@ -585,9 +571,8 @@ const result = await runCachedUnits({
 ```
 
 Snapshots must include exactly the current unit IDs. Each unit needs a command
-array or an explicit identity for its execution behavior. Include the project
-identity and every shared dependency in `common`. Supply `environment` when an
-adapter uses a child environment different from `process.env`. Adapters own their
+array or an execution label. `common` and each unit value contain only digests
+of selected input existence and content. Adapters own their
 discovery/fingerprint completeness and cancellation of their own commands.
 Pass `resources: {}` without `workers` to select the package's adaptive admission
 algorithm without local limits, just as `runTests` does. Fixture collectors need
@@ -618,9 +603,8 @@ try {
 ```
 
 `createFileSnapshot(config)` resolves defaults/root, preserves the full inventory
-for `files` selection, and hashes each own file, mapped dependencies and package
-implementation exactly as `runTests`. It neither runs commands nor binds their
-environment; `runCachedUnits` owns those identities. Declare external fixture paths
+for `files` selection, and hashes existence and content of each own file and
+mapped dependencies exactly as `runTests`. It does not run commands. Declare external fixture paths
 with `testFixtureInputs` so the package hashes them. `close()` drains hashing
 and rejects subsequent snapshots; always call it in `finally`.
 
@@ -673,12 +657,13 @@ reporters explicitly through that CLI option; the package appends its structured
 reporter to the same list. Native reporter events preserve mixed teardown failures.
 Cancellation and wall deadlines signal the Playwright launcher for native teardown of its detached servers and browsers;
 a second signal requests forced teardown after two seconds. If it still cannot
-exit after another two seconds, the package fails closed without retry. Include
-adapter execution policy in the unit identity or snapshot. `Admission.acquire({ exclusive: true, signal })` waits
+exit after another two seconds, the package fails closed without retry. `Admission.acquire({ exclusive: true, signal })` waits
 for an exclusive slot; pair each successful acquire with `release()`.
 
 The other exports are `defineConfig`, `loadConfig`, `runCommand`,
-`environmentIdentity`, `detectResources` and `selectConcurrency`.
+`cacheKey`, `cacheRecordName`, `detectResources` and `selectConcurrency`.
+`cacheKey(snapshot, unitId)` is the single validity function used by the runner
+and migration tools; `cacheRecordName(suite, unitId)` only locates records.
 
 ## Development
 

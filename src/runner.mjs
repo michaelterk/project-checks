@@ -2,24 +2,15 @@ import { isDeepStrictEqual } from 'node:util';
 import { createCoverage } from './coverage.mjs';
 import { Admission } from './admission.mjs';
 import { withProcessSignal } from './cancellation.mjs';
-import { readFile, readdir, realpath } from 'node:fs/promises';
+import { readFile, realpath } from 'node:fs/promises';
 import { basename, join, resolve, delimiter } from 'node:path';
 import { defineConfig, defaultIgnore } from './config.mjs';
 import { runCachedUnits } from './cache.mjs';
 import { commandEnvironment, runCommand } from './command.mjs';
 import { createSnapshot, createSnapshotContext, discoverTests, selectTests } from './inputs.mjs';
-import { digest, inside } from './util.mjs';
+import { inside } from './util.mjs';
 import { createDurationHints } from './durations.mjs';
 import { withProgress } from './progress.mjs';
-
-async function implementationIdentity() {
-  const files = (await readdir(import.meta.dirname)).filter((name) => name.endsWith('.mjs') || name.endsWith('.py')).sort();
-  return digest(
-    JSON.stringify(
-      await Promise.all(files.map(async (name) => [name, digest(await readFile(join(import.meta.dirname, name)))])),
-    ),
-  );
-}
 
 async function normalizeConfig(options) {
   defineConfig(options);
@@ -40,18 +31,8 @@ async function normalizeConfig(options) {
 }
 
 function fileSnapshot(config) {
-  const identity = async () =>
-    digest(
-      JSON.stringify([
-        await implementationIdentity(),
-        config.retryTimeouts ?? false,
-        config.retryTimeoutMs ?? 60000,
-        config.timeoutMs,
-        config.excludeTestsFromInputs ?? false,
-      ]),
-    );
   const context = config.snapshotContext ?? createSnapshotContext({ signal: config.signal });
-  const snapshot = createSnapshot(config, identity, context);
+  const snapshot = createSnapshot(config, context);
   let closed = false;
   const pending = new Set();
   return {
@@ -128,7 +109,6 @@ async function runTestsWithSignal(options, { retained, normalPhase }) {
     // Partial files can contribute coverage; filters never contribute complete evidence.
     if (definition !== false && !filters.length) {
       config.coverage = definition;
-      config.cacheIdentity = root;
       artifacts = await createCoverage(config, env);
       for (const unit of units) {
         unit.command = artifacts.command(unit.command);
@@ -147,7 +127,7 @@ async function runTestsWithSignal(options, { retained, normalPhase }) {
           file: (_, ...args) => config.progress.file(config.suite, ...args),
         } : false,
         units: [action], snapshot: async () => ({ common: 'uncached-action', units: { 'framework-action': 'uncached-action' } }),
-        retryTimeouts: config.retryTimeouts, normalPhase, environment: env,
+        retryTimeouts: config.retryTimeouts, normalPhase,
         execute: (unit, { reportTimeout }) => (fixture?.execute ?? runCommand)(unit.command, {
           cwd: root, env, signal: config.signal, playwrightTest: true, onTimeout: reportTimeout, timeoutMs: config.timeoutMs,
         }),
@@ -170,8 +150,6 @@ async function runTestsWithSignal(options, { retained, normalPhase }) {
       logger,
       retryTimeouts,
       normalPhase,
-      environment: env,
-      ignoreEnv: options.ignoreEnv,
       admission,
       ...(artifacts ? { saveEvidence: artifacts.saveEvidence, restoreEvidence: artifacts.restoreEvidence } : {}),
       diagnostics,
@@ -249,7 +227,6 @@ export async function reportCoverage(options) {
   const config = await normalizeConfig(options);
   if (config.coverage === false) return null;
   config.coverage ??= {};
-  config.cacheIdentity = config.root;
   if (config.coverage.report) config.ignore = [...config.ignore, config.coverage.report, `${config.coverage.report}.*.tmp`];
   const inputs = fileSnapshot({ ...config, files: undefined });
   try {
@@ -258,6 +235,6 @@ export async function reportCoverage(options) {
     try { summary = JSON.parse(await readFile(file, 'utf8')); }
     catch (error) { if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error; }
     return { suite: config.suite, minimum: { lines: 80, branches: 80, functions: 80, ...config.coverage.minimum },
-      actual: summary?.actual, stale: !summary || summary.runtime !== process.version || !isDeepStrictEqual(summary.definition, config.coverage) || !isDeepStrictEqual(summary.snapshot, await inputs.snapshot()), measuredAt: summary?.measuredAt };
+      actual: summary?.actual, stale: !summary || !isDeepStrictEqual(summary.definition, config.coverage) || !isDeepStrictEqual(summary.snapshot, await inputs.snapshot()), measuredAt: summary?.measuredAt };
   } finally { await inputs.close(); }
 }

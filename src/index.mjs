@@ -1,6 +1,6 @@
 export { defineConfig, loadConfig } from './config.mjs';
 export { runTests, createFileSnapshot, reportCoverage } from './runner.mjs';
-export { runCachedUnits, environmentIdentity } from './cache.mjs';
+export { runCachedUnits, cacheKey, cacheRecordName } from './cache.mjs';
 export { runCommand } from './command.mjs';
 export { detectResources, selectConcurrency } from './resources.mjs';
 export { Admission } from './admission.mjs';

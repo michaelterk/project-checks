@@ -70,17 +70,13 @@ test('default inputs include hidden files, sibling tests, installed dependencies
   assert.equal((await runTests(f.options)).passed, 2);
 });
 
-test('environment overrides and custom external fingerprints bind cache evidence', async t => {
+test('environment overrides do not alter file-content evidence', async t => {
   const f = await fixture(t);
   f.options.env = { PROJECT_CHECKS_TEST_MODE: 'first' };
-  let external = 'runtime-v1';
-  f.options.fingerprint = () => external;
   await runTests(f.options);
   assert.equal((await runTests(f.options)).cached, 2);
   f.options.env.PROJECT_CHECKS_TEST_MODE = 'second';
-  assert.equal((await runTests(f.options)).cached, 0);
-  external = 'runtime-v2';
-  assert.equal((await runTests(f.options)).cached, 0);
+  assert.equal((await runTests(f.options)).cached, 2);
 });
 
 test('declared external fixture paths invalidate only consumers and share full/focused evidence', async t => {
@@ -110,7 +106,11 @@ test('declared external fixture paths invalidate only consumers and share full/f
   await assert.rejects(runTests({ ...focused, testFixtureInputs: () => undefined }), /testFixtureInputs must return an array/);
   await assert.rejects(runTests({ ...focused, testFixtureInputs: () => [null] }), /fixture input path/);
   await rm(chromium);
-  await assert.rejects(runTests({ ...focused, testFixtureInputs: () => [chromium] }), { code: 'ENOENT' });
+  const missing = { ...focused, testFixtureInputs: () => [chromium] };
+  assert.equal((await runTests(missing)).passed, 1);
+  assert.equal((await runTests(missing)).cached, 1);
+  await put(f.root, 'node_modules/playwright-core/.local-browsers/chromium/binary', 'restored');
+  assert.equal((await runTests(missing)).passed, 1);
 });
 
 test('fixture directories inside the cache or resolving there are rejected instead of caching empty trees', async t => {
@@ -213,17 +213,17 @@ test('command errors return failure and cancellation waits for child exit', asyn
   await assert.rejects(runCommand([process.execPath], { signal: controller.signal }), { name: 'AbortError' });
 });
 
-test('explicit cacheIdentity shares equivalent checkouts while retaining input and environment invalidation', async t => {
+test('equivalent checkouts share content validity independently of root', async t => {
   const first = await fixture(t);
   const second = await fixture(t);
   const cacheDirectory = await temporary(t);
-  const config = { cacheDirectory, cacheIdentity: 'same-project', inputs: ['src', 'test'], workers: 1, coverage: false, logger: false, stdio: 'ignore' };
+  const config = { cacheDirectory, inputs: ['src', 'test'], workers: 1, coverage: false, logger: false, stdio: 'ignore' };
   assert.equal((await runTests({ ...config, root: first.root })).passed, 2);
   assert.equal((await runTests({ ...config, root: second.root })).cached, 2);
   await put(second.root, 'src/value.mjs', 'export const value = 2;');
   assert.equal((await runTests({ ...config, root: second.root })).passed, 2);
-  assert.equal((await runTests({ ...config, root: second.root, env: { PROJECT_CHECKS_TEST_MODE: 'changed' } })).cached, 0);
-  assert.equal((await runTests({ ...config, root: first.root, cacheIdentity: 'other-project' })).cached, 0);
+  assert.equal((await runTests({ ...config, root: second.root, env: { PROJECT_CHECKS_TEST_MODE: 'changed' } })).cached, 2);
+  assert.equal((await runTests({ ...config, root: second.root })).cached, 2);
 });
 
 test('JSON per-test dependencies invalidate only their consumers, including focused selections', async t => {

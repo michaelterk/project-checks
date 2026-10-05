@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { chmod, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, rename, rm, symlink, utimes, writeFile } from 'node:fs/promises';
 import { syncBuiltinESMExports } from 'node:module';
 import { join, matchesGlob, relative, resolve } from 'node:path';
 import { Readable } from 'node:stream';
 import test from 'node:test';
-import { createSnapshot, createSnapshotContext } from '../src/inputs.mjs';
+import { contentFingerprint, createSnapshot, createSnapshotContext } from '../src/inputs.mjs';
 import { digest } from '../src/util.mjs';
 import { put, temporary } from './helpers.mjs';
 
@@ -55,10 +55,10 @@ test('sorted identities ignore permissions and retain external symlink contents 
     ['cycle', ['symlink', directory, ['cycle', directory]]],
     ['external', ['symlink', target, ['file', digest('outside')]]],
   ];
-  const snapshot = createSnapshot(config, () => 'implementation', createSnapshotContext());
+  const snapshot = createSnapshot(config, createSnapshotContext());
   t.after(() => snapshot.close());
   const before = await snapshot();
-  assert.equal(before.common, digest(JSON.stringify([config.root, 'implementation', [['src', ['directory', entries]]], null])));
+  assert.equal(before.common, contentFingerprint([['directory', entries]]));
   assert.deepEqual(await snapshot(), before);
   await chmod(a, 0o600);
   await chmod(target, 0o600);
@@ -75,8 +75,8 @@ test('concurrent factories share digest reads, recheck metadata and retry failed
   const config = await fixture(t);
   for (let i = 0; i < 16; i++) await put(config.root, `src/${i}`, 'input');
   const context = createSnapshotContext();
-  const first = createSnapshot(config, () => 'implementation', context);
-  const second = createSnapshot(config, () => 'implementation', context);
+  const first = createSnapshot(config, context);
+  const second = createSnapshot(config, context);
   const original = fs.createReadStream;
   const reads = new Map();
   let active = 0;
@@ -112,7 +112,7 @@ test('a failed older hash cannot overwrite or delete a newer metadata generation
   const config = await fixture(t);
   const file = await put(config.root, 'src/input', 'old contents');
   const context = createSnapshotContext();
-  const snapshot = createSnapshot(config, () => 'implementation', context);
+  const snapshot = createSnapshot(config, context);
   const original = fs.createReadStream;
   let release;
   let reached;
@@ -143,7 +143,7 @@ test('cached exclusion rules still detect new paths and changed ignore lists', a
   const config = await fixture(t);
   await put(config.root, 'src/first', 'first');
   const context = createSnapshotContext();
-  const snapshot = createSnapshot(config, () => 'implementation', context);
+  const snapshot = createSnapshot(config, context);
   const first = await snapshot();
   const rules = context.exclusions.values().next().value;
   assert.deepEqual(await snapshot(), first);
@@ -198,4 +198,47 @@ test('missing roots drain active work without poisoning the context', async t =>
     await assert.rejects(context.identify([join(config.root, 'src'), join(config.root, 'missing')], config), /ENOENT/);
     assert.equal((await context.identify([join(config.root, 'src')], config))[0][0], 'directory');
   } finally { await context.close(); }
+});
+
+
+test('validity contains only existence and content hashes across paths and runtime metadata', async t => {
+  const config = await fixture(t);
+  const file = await put(config.root, 'src/first', 'same bytes');
+  await put(config.root, 'src/second', 'other bytes');
+  config.testFixtureInputs = () => [join(config.root, 'optional')];
+  const snapshot = createSnapshot(config);
+  t.after(() => snapshot.close());
+  const before = await snapshot();
+  await chmod(file, 0o700);
+  await utimes(file, new Date(0), new Date(0));
+  await rename(file, join(config.root, 'src/z-renamed'));
+  await rename(join(config.root, 'src'), join(config.root, 'renamed-directory'));
+  config.inputs = ['renamed-directory'];
+  assert.deepEqual(await snapshot(), before);
+  await put(config.root, 'optional', '');
+  const present = await snapshot();
+  assert.notEqual(present.units['test/a.test.mjs'], before.units['test/a.test.mjs']);
+  await rm(join(config.root, 'optional'));
+  assert.deepEqual(await snapshot(), before);
+  await put(config.root, 'renamed-directory/duplicate', 'same bytes');
+  assert.notEqual((await snapshot()).common, before.common);
+  await rm(join(config.root, 'renamed-directory/duplicate'));
+  assert.deepEqual(await snapshot(), before);
+  await put(config.root, 'renamed-directory/z-renamed', 'changed bytes');
+  assert.notEqual((await snapshot()).common, before.common);
+});
+
+test('ancestor symlink cycles contribute existence without their names or targets', async t => {
+  const config = await fixture(t);
+  await put(config.root, 'src/input', 'content');
+  const snapshot = createSnapshot(config);
+  t.after(() => snapshot.close());
+  const before = await snapshot();
+  await symlink(join(config.root, 'src'), join(config.root, 'src/cycle'));
+  const present = await snapshot();
+  assert.notEqual(present.common, before.common);
+  await rename(join(config.root, 'src/cycle'), join(config.root, 'src/renamed'));
+  assert.deepEqual(await snapshot(), present);
+  await rm(join(config.root, 'src/renamed'));
+  assert.deepEqual(await snapshot(), before);
 });

@@ -6,6 +6,7 @@ import { gzip, gunzipSync } from 'node:zlib';
 import { promisify } from 'node:util';
 import { runCommand } from './command.mjs';
 import { keys } from './util.mjs';
+import { normalizeCoverageArtifact, restoreCoverageArtifact } from './coverage-paths.mjs';
 
 const compress = promisify(gzip);
 export const defaultMinimum = { lines: 80, branches: 80, functions: 80 };
@@ -45,14 +46,11 @@ export async function createCoverage(config, environment) {
     const status = await runCommand([python, helper, operation, source, destination, ...configArgs], commandOptions);
     if (status) throw new Error(`Invalid Python coverage contribution (${operation})`);
   }
-  async function materialize(source) {
+  async function materialize(source, sources) {
     const destination = join(staging, randomUUID());
-    if (provider === 'python') await pythonArtifact('materialize', source, destination);
-    else {
-      const bytes = await readFile(source);
-      reports(bytes);
-      await writeFile(destination, bytes, { flag: 'wx', mode: 0o600 });
-    }
+    const bytes = await restoreCoverageArtifact(await readFile(source), { provider, root: config.root, sources });
+    if (provider === 'v8') reports(bytes);
+    await writeFile(destination, bytes, { flag: 'wx', mode: 0o600 });
     return destination;
   }
   return {
@@ -80,19 +78,23 @@ export async function createCoverage(config, environment) {
         for (const name of names) {
           const report = JSON.parse(await readFile(join(output, name), 'utf8'));
           if (!Array.isArray(report.result)) throw new Error(`Invalid V8 coverage for ${unit.id}`);
+          if (report['source-map-cache']) report['source-map-cache'] = Object.fromEntries(Object.entries(report['source-map-cache']).filter(([url]) => url.startsWith(prefix) && !url.slice(prefix.length).startsWith('node_modules/')));
           values.push({ ...report, result: report.result.filter(item => item.url.startsWith(prefix) && !item.url.slice(prefix.length).startsWith('node_modules/')) });
         }
         await writeFile(`${artifact}.tmp`, await compress(JSON.stringify(values)), { flag: 'wx', mode: 0o600 });
         await rename(`${artifact}.tmp`, artifact);
       }
-      contributions.set(unit.id, await materialize(artifact));
+      const normalized = await normalizeCoverageArtifact(await readFile(artifact), { provider, sourceRoot: config.root });
+      await writeFile(`${artifact}.tmp`, normalized.bytes, { flag: 'wx', mode: 0o600 });
+      await rename(`${artifact}.tmp`, artifact);
+      contributions.set(unit.id, await materialize(artifact, normalized.sources));
       await rm(output, { recursive: true, force: true });
       outputs.delete(unit.id);
-      return { files: [artifact], metadata: { format: `project-checks-${provider}-v1`, unit: unit.id } };
+      return { files: [artifact], metadata: { format: `project-checks-${provider}-v2`, unit: unit.id, sources: normalized.sources } };
     },
     async restoreEvidence(unit, { files, metadata }) {
-      if (files.length !== 1 || metadata?.format !== `project-checks-${provider}-v1` || metadata.unit !== unit.id) return false;
-      try { contributions.set(unit.id, await materialize(files[0])); return true; }
+      if (files.length !== 1 || metadata?.format !== `project-checks-${provider}-v2` || metadata.unit !== unit.id) return false;
+      try { contributions.set(unit.id, await materialize(files[0], metadata.sources)); return true; }
       catch (error) { config.signal?.throwIfAborted(); return false; }
     },
     async aggregate(units) {
@@ -134,7 +136,7 @@ export async function createCoverage(config, environment) {
       const report = definition.report ? resolve(config.root, definition.report) : join(directory, 'latest.json');
       await mkdir(resolve(report, '..'), { recursive: true });
       const temporary = `${report}.${randomUUID()}.tmp`;
-      await writeFile(temporary, JSON.stringify({ ...measurement, definition, snapshot, runtime: process.version, measuredAt: new Date().toISOString() }));
+      await writeFile(temporary, JSON.stringify({ ...measurement, definition, snapshot, measuredAt: new Date().toISOString() }));
       await rename(temporary, report);
     },
     close: () => rm(staging, { recursive: true, force: true }),

@@ -8,18 +8,23 @@ import { Admission } from './admission.mjs';
 import { createSnapshotContext } from './inputs.mjs';
 import { withProgress } from './progress.mjs';
 
-const ignoredEnvironment = /^(?:INVOCATION_ID|CODEX_THREAD_ID|PWD|OLDPWD|SHLVL|_|NODE_TEST_CONTEXT|TMPDIR|TMP|TEMP|TERM|COLORTERM|FORCE_COLOR|NO_COLOR|NODE_DISABLE_COLORS|npm_lifecycle_event|npm_lifecycle_script|npm_command|npm_package_(?:name|version|json)|npm_config_(?:cache|logs_dir|loglevel|progress|timing|color|fund|audit|update_notifier))$/;
+// Record routing is independent of validity; neither identifier enters the key.
+export function cacheRecordName(suite, unitId) {
+  return `${digest(`${suite}\0${unitId}`)}.json`;
+}
 
-export function environmentIdentity(env = process.env, ignoreEnv = []) {
-  const ignored = new Set(ignoreEnv);
-  return digest(JSON.stringify(Object.entries(env).filter(([name, value]) => value !== undefined && !ignored.has(name) && !ignoredEnvironment.test(name)).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)));
+// Snapshots contain only digests of file existence and content.
+export function cacheKey(snapshot, unitId) {
+  text(snapshot.common, 'snapshot.common');
+  text(snapshot.units[unitId], 'unit fingerprint');
+  return digest(JSON.stringify([snapshot.common, snapshot.units[unitId]]));
 }
 
 export async function runCachedUnits(options) {
   return withProgress(options, progress => withProcessSignal(options.signal, signal => runUnits({ ...options, progress, signal })));
 }
 
-async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, workers, resources, execute, environment = process.env, ignoreEnv = [], cache = true, signal, logger = console, admission: sharedAdmission, retryTimeouts = false, restoreEvidence, saveEvidence, diagnostics, normalPhase, progress }) {
+async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, workers, resources, execute, cache = true, signal, logger = console, admission: sharedAdmission, retryTimeouts = false, restoreEvidence, saveEvidence, diagnostics, normalPhase, progress }) {
   if (workers !== undefined) integer(workers, 'workers');
   if (typeof retryTimeouts !== 'boolean') throw new TypeError('retryTimeouts must be a boolean');
   text(suite, 'suite');
@@ -47,8 +52,6 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
   progress && progress.files(suite, units.length);
   const before = await takeSnapshot();
   if (!isDeepStrictEqual(Object.keys(before.units).sort(), ids)) throw new Error('Current test-unit discovery changed before execution');
-  const base = digest(JSON.stringify(['project-checks-evidence-v1', process.execPath, process.version, process.platform, process.arch, environmentIdentity(environment, ignoreEnv), before.common, ...(retryTimeouts ? [true] : [])]));
-  const key = unit => digest(JSON.stringify([base, suite, unit.id, before.units[unit.id], unit.identity ?? unit.command]));
   if (cache) await mkdir(cacheDirectory, { recursive: true });
   const results = new Array(units.length);
   const admission = sharedAdmission ?? (resources !== undefined ? new Admission(resources, units.length, { signal, workers }) : null);
@@ -78,8 +81,8 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
   const check = () => checking ??= takeSnapshot().finally(() => { checking = undefined; });
   async function runUnit(index, retry = false, originalFailure = 0) {
     const unit = units[index];
-    const filename = cache ? join(cacheDirectory, `${digest(`${suite}\0${unit.id}`)}.json`) : undefined;
-    const expected = key(unit);
+    const filename = cache ? join(cacheDirectory, cacheRecordName(suite, unit.id)) : undefined;
+    const expected = cacheKey(before, unit.id);
     let cached;
     if (cache && !retry) {
       try { cached = JSON.parse(await readFile(filename, 'utf8')); }

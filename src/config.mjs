@@ -6,7 +6,7 @@ import { command, integer, keys, text } from './util.mjs';
 import { selectConcurrency } from './resources.mjs';
 import defaultConfig from '../project-checks.config.json' with { type: 'json' };
 
-const options = ['extends', 'root', 'testDirectory', 'pattern', 'files', 'command', 'inputs', 'testInputs', 'excludeTestsFromInputs', 'ignore', 'workers', 'resources', 'cache', 'cacheDirectory', 'cacheIdentity', 'suite', 'env', 'ignoreEnv', 'fingerprint', 'testFixtureInputs', 'signal', 'logger', 'stdio', 'retryTimeouts', 'retryTimeoutMs', 'timeoutMs', 'admission', 'snapshotContext', 'diagnostics', 'progress', 'durationHints', 'initialDurations', 'select', 'setup', 'filters', 'engine', 'coverage', 'frameworkArgs', 'normalizeNpmEnvironment'];
+const options = ['extends', 'root', 'testDirectory', 'pattern', 'files', 'command', 'inputs', 'testInputs', 'excludeTestsFromInputs', 'ignore', 'workers', 'resources', 'cache', 'cacheDirectory', 'suite', 'env', 'testFixtureInputs', 'signal', 'logger', 'stdio', 'retryTimeouts', 'retryTimeoutMs', 'timeoutMs', 'admission', 'snapshotContext', 'diagnostics', 'progress', 'durationHints', 'initialDurations', 'select', 'setup', 'filters', 'engine', 'coverage', 'frameworkArgs', 'normalizeNpmEnvironment'];
 export const defaultIgnore = ['**/.git', '**/.git/**', '**/.test-cache', '**/.test-cache/**', '**/__pycache__', '**/__pycache__/**'];
 
 function patterns(value, label, allowEmpty = false) {
@@ -24,7 +24,7 @@ function testId(id) {
 
 export function defineConfig(config) {
   keys(config, options, 'config');
-  for (const key of ['root', 'testDirectory', 'cacheDirectory', 'cacheIdentity', 'suite']) if (config[key] !== undefined) text(config[key], key);
+  for (const key of ['root', 'testDirectory', 'cacheDirectory', 'suite']) if (config[key] !== undefined) text(config[key], key);
   if (config.testDirectory !== undefined) patterns([config.testDirectory], 'testDirectory');
   if (config.pattern !== undefined) patterns(typeof config.pattern === 'string' ? [config.pattern] : config.pattern, 'pattern');
   if (config.files !== undefined) {
@@ -58,8 +58,6 @@ export function defineConfig(config) {
       if (name.includes('=') || (value !== undefined && (typeof value !== 'string' || value.includes('\0')))) throw new TypeError('env values must be strings without NUL characters, or undefined');
     }
   }
-  if (config.ignoreEnv !== undefined && (!Array.isArray(config.ignoreEnv) || config.ignoreEnv.some(name => typeof name !== 'string' || !name))) throw new TypeError('ignoreEnv must be an array of environment variable names');
-  if (config.fingerprint !== undefined && typeof config.fingerprint !== 'function') throw new TypeError('fingerprint must be a function');
   if (config.testFixtureInputs !== undefined && typeof config.testFixtureInputs !== 'function') throw new TypeError('testFixtureInputs must be a function');
   if (config.signal !== undefined && !(config.signal instanceof AbortSignal)) throw new TypeError('signal must be an AbortSignal');
   if (config.logger !== undefined && config.logger !== false && (typeof config.logger?.log !== 'function' || typeof config.logger?.error !== 'function')) throw new TypeError('logger must provide log and error methods, or be false');

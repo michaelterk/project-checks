@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtemp, readFile, rm, writeFile, mkdir } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile, mkdir, rename, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { gunzipSync } from 'node:zlib';
 import test from 'node:test';
 import { runChecks, runTests, loadChecks, defineConfig, reportCoverage } from '../src/index.mjs';
+import { normalizeCoverageArtifact, restoreCoverageArtifact } from '../src/coverage-paths.mjs';
 
 async function project(t, files) {
   const root = await mkdtemp(join(tmpdir(), 'project-checks-graph-'));
@@ -209,7 +211,7 @@ test('full lane notices a newly eligible file while focused evidence stays file 
   }
 });
 
-test('coverage reports reject measurements from another Node runtime', async t => {
+test('coverage reports remain fresh across Node runtimes', async t => {
   const root = await project(t, { 'source.mjs': 'export const answer = 42;', 'test/a.test.mjs': "import '../source.mjs';" });
   const suite = { ...config(root), coverage: { include: ['source.mjs'], report: 'coverage.json' } };
   assert.equal((await runTests(suite)).exitCode, 0);
@@ -217,7 +219,47 @@ test('coverage reports reject measurements from another Node runtime', async t =
   const file = join(root, 'coverage.json');
   const summary = JSON.parse(await readFile(file, 'utf8'));
   await writeFile(file, JSON.stringify({ ...summary, runtime: 'v0.0.0' }));
-  assert.equal((await reportCoverage(suite)).stale, true);
+  assert.equal((await reportCoverage(suite)).stale, false);
+});
+
+for (const provider of ['v8', 'python']) test(`${provider} coverage survives a checkout move and recollects renamed reporting paths`, { skip: provider === 'python' && !process.env.PROJECT_CHECKS_PYTHON }, async t => {
+  const python = process.env.PROJECT_CHECKS_PYTHON;
+  const root = await project(t, provider === 'v8' ? {
+    'src/source.mjs': 'export const answer = 42;',
+    'test/a.test.mjs': "import { readdirSync } from 'node:fs'; await import('../src/' + readdirSync('src')[0]);",
+  } : {
+    '.coveragerc': '[run]\nbranch = True\nsource = src\n',
+    'src/source.py': 'answer = 42\n',
+    'test/test_a.py': "import glob, runpy\nrunpy.run_path(glob.glob('src/*.py')[0])\n",
+  });
+  const cacheDirectory = await project(t, {});
+  const suite = { ...config(root), cacheDirectory, inputs: ['src'],
+    ...(provider === 'python' ? { pattern: 'test_*.py', command: [python, '{file}'], env: { PYTHONDONTWRITEBYTECODE: '1' } } : {}),
+    coverage: { provider, ...(provider === 'python' ? { python, configFile: '.coveragerc' } : { include: ['src/**'] }) },
+  };
+  assert.equal((await runTests(suite)).exitCode, 0);
+  const recordFile = join(cacheDirectory, (await readdir(cacheDirectory)).find(name => name.endsWith('.json')));
+  const record = JSON.parse(await readFile(recordFile, 'utf8'));
+  const artifact = await readFile(record.evidence.files[0]);
+  assert.ok(Object.keys(record.evidence.metadata.sources).every(name => !name.startsWith('/')));
+  if (provider === 'v8') assert.ok(JSON.parse(gunzipSync(artifact)).every(report => report.result.every(item => !item.url.startsWith('file:'))));
+  // The same normalizer migrates retained native artifacts without executing tests.
+  const native = await restoreCoverageArtifact(artifact, { provider, root, sources: record.evidence.metadata.sources });
+  const migrated = await normalizeCoverageArtifact(native, { provider, sourceRoot: root });
+  assert.deepEqual(migrated.sources, record.evidence.metadata.sources);
+  const moved = `${root}-moved`;
+  t.after(() => rm(moved, { recursive: true, force: true }));
+  await rename(root, moved);
+  suite.root = moved;
+  const reused = await runTests(suite);
+  assert.equal(reused.exitCode, 0);
+  assert.equal(reused.cached, 1);
+  const extension = provider === 'python' ? 'py' : 'mjs';
+  await rename(join(moved, `src/source.${extension}`), join(moved, `src/renamed.${extension}`));
+  const renamed = await runTests(suite);
+  assert.equal(renamed.exitCode, 0);
+  assert.equal(renamed.cached, 0, 'coverage with obsolete reporting paths must be recollected');
+  assert.equal(JSON.parse(await readFile(recordFile, 'utf8')).key, record.key, 'reporting paths do not enter validity');
 });
 
 test('checks CLI supports Darwin and honors its explicit worker limit', async t => {

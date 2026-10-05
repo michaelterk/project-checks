@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile, readdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import test from 'node:test';
-import { Admission, environmentIdentity, runCachedUnits } from '../src/index.mjs';
+import { Admission, cacheKey, cacheRecordName, runCachedUnits } from '../src/index.mjs';
 import { temporary } from './helpers.mjs';
 
 async function fixture(t) {
@@ -81,27 +81,23 @@ test('corrupt evidence reruns and cache stores only hashes, without environment 
   assert.equal(result.passed, 2);
 });
 
-test('effective environment and command identity invalidate evidence', async t => {
+test('environment, command, unit identity and retry policy do not alter content validity', async t => {
   const f = await fixture(t);
   f.options.execute = async () => 0;
   f.options.environment = { RUN_AXE: '0' };
   await runCachedUnits(f.options);
   assert.equal((await runCachedUnits(f.options)).cached, 2);
-  f.options.environment = { RUN_AXE: '1' };
-  assert.equal((await runCachedUnits(f.options)).cached, 0);
-  f.options.units[0].command = ['test', '--new-option', 'first'];
-  assert.equal((await runCachedUnits(f.options)).cached, 1);
-});
-
-test('unknown environment values matter; display and explicit scheduling values do not', () => {
-  assert.equal(environmentIdentity({ INVOCATION_ID: 'first-scope' }), environmentIdentity({ INVOCATION_ID: 'second-scope' }));
-  assert.equal(environmentIdentity({ CODEX_THREAD_ID: 'worker' }), environmentIdentity({ CODEX_THREAD_ID: 'main' }));
-  assert.equal(environmentIdentity({ CODEX_THREAD_ID: 'worker' }), environmentIdentity({}));
-  assert.notEqual(environmentIdentity({ CODEX_OTHER: 'first' }), environmentIdentity({ CODEX_OTHER: 'second' }));
-  assert.equal(environmentIdentity({ FORCE_COLOR: '0' }), environmentIdentity({ FORCE_COLOR: '1' }));
-  assert.equal(environmentIdentity({ MY_WORKERS: '1' }, ['MY_WORKERS']), environmentIdentity({ MY_WORKERS: '8' }, ['MY_WORKERS']));
-  assert.notEqual(environmentIdentity({ RUN_AXE: '0' }), environmentIdentity({ RUN_AXE: '1' }));
-  assert.notEqual(environmentIdentity({ NODE_V8_COVERAGE: '/first' }), environmentIdentity({ NODE_V8_COVERAGE: '/second' }));
+  f.options.environment = { RUN_AXE: '1', SECRET: 'changed-secret' };
+  assert.equal((await runCachedUnits(f.options)).cached, 2);
+  f.options.units[0].command = ['different-runtime', '--new-option', 'first'];
+  f.options.units[0].identity = 'different-adapter';
+  f.options.retryTimeouts = true;
+  assert.equal((await runCachedUnits(f.options)).cached, 2);
+  assert.equal(cacheKey(f.inputs, 'first'), cacheKey(f.inputs, 'second'));
+  assert.notEqual(cacheRecordName('suite-a', 'first'), cacheRecordName('suite-b', 'first'));
+  assert.notEqual(cacheRecordName('suite-a', 'first'), cacheRecordName('suite-a', 'second'));
+  const records = await Promise.all((await readdir(f.directory)).map(async file => JSON.parse(await readFile(join(f.directory, file), 'utf8'))));
+  assert.ok(records.every(record => record.key === cacheKey(f.inputs, 'first')));
 });
 
 test('discovery mismatches and malformed worker limits fail before execution', async t => {
