@@ -70,7 +70,7 @@ export function createSnapshotContext({ signal } = {}) {
   }
   function identify(files, config, excludedFiles = new Set()) {
     const exclude = excluded(config);
-    return new Promise((resolve, reject) => {
+    return new Promise((resolveIdentities, reject) => {
       const values = new Array(files.length);
       let remaining = 0;
       const failures = [];
@@ -109,11 +109,11 @@ export function createSnapshotContext({ signal } = {}) {
             for (const entry of entries) enqueue(join(file, entry[0]), nested, identity => { entry[1] = identity; });
           } else throw new Error(`Unsupported input type: ${file}`);
         }).catch(error => { if (!failures.length) failures.push(error); }).finally(() => {
-          if (!--remaining) failures.length ? reject(failures[0]) : resolve(values);
+          if (!--remaining) failures.length ? reject(failures[0]) : resolveIdentities(values);
         });
       }
       files.forEach((file, index) => enqueue(file, new Set(), identity => { values[index] = identity; }));
-      if (!remaining) resolve(values);
+      if (!remaining) resolveIdentities(values);
     });
   }
   const close = (reason = new Error('Input context closed')) => {
