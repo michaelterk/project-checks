@@ -87,7 +87,7 @@ export function createSnapshotContext({ signal } = {}) {
             if (ancestors.has(target)) value[2] = ['cycle', target];
             else enqueue(target, ancestors, identity => { value[2] = identity; });
           } else if (info.isFile()) {
-            assign(['file', Number(info.mode & 0o777n), await fileIdentity(file, info)]);
+            assign(['file', await fileIdentity(file, info)]);
           } else if (info.isDirectory()) {
             const canonical = await realpath(file);
             if (config.fixtureCacheDirectory && (inside(config.cacheDirectory, file) || inside(config.fixtureCacheDirectory, canonical))) {

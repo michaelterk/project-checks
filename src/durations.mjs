@@ -22,7 +22,7 @@ export async function createDurationHints(config, files, context) {
       files.map((file) => resolve(config.root, file)),
       config,
     );
-    files.forEach((file, index) => hashes.set(file, identities[index][2]));
+    files.forEach((file, index) => hashes.set(file, identities[index][1]));
     const priority = (file) => {
       const seconds = hints[file]?.hash === hashes.get(file) ? hints[file].seconds : config.initialDurations?.[file];
       return Number.isFinite(seconds) && seconds > 0 ? seconds : 0;

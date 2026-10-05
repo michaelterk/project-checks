@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { chmod, lstat, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, rm, symlink, writeFile } from 'node:fs/promises';
 import { syncBuiltinESMExports } from 'node:module';
 import { join, matchesGlob, relative, resolve } from 'node:path';
 import { Readable } from 'node:stream';
@@ -40,21 +40,20 @@ test('bounded context releases failed work and admits at most eight operations',
   assert.equal(await context.run(() => 17), 17);
 });
 
-test('sorted identities retain modes, external symlink contents and ancestor cycles', async t => {
+test('sorted identities ignore permissions and retain external symlink contents and ancestor cycles', async t => {
   const config = await fixture(t);
-  const b = await put(config.root, 'src/b', 'b');
+  await put(config.root, 'src/b', 'b');
   const a = await put(config.root, 'src/a', 'a');
   const external = await temporary(t);
   const target = await put(external, 'input', 'outside');
   const directory = join(config.root, 'src');
   await symlink(directory, join(directory, 'cycle'));
   await symlink(target, join(directory, 'external'));
-  const mode = async file => Number((await lstat(file)).mode & 0o777);
   const entries = [
-    ['a', ['file', await mode(a), digest('a')]],
-    ['b', ['file', await mode(b), digest('b')]],
+    ['a', ['file', digest('a')]],
+    ['b', ['file', digest('b')]],
     ['cycle', ['symlink', directory, ['cycle', directory]]],
-    ['external', ['symlink', target, ['file', await mode(target), digest('outside')]]],
+    ['external', ['symlink', target, ['file', digest('outside')]]],
   ];
   const snapshot = createSnapshot(config, () => 'implementation', createSnapshotContext());
   t.after(() => snapshot.close());
@@ -62,7 +61,9 @@ test('sorted identities retain modes, external symlink contents and ancestor cyc
   assert.equal(before.common, digest(JSON.stringify([config.root, 'implementation', [['src', ['directory', entries]]], null])));
   assert.deepEqual(await snapshot(), before);
   await chmod(a, 0o600);
-  assert.notEqual((await snapshot()).common, before.common);
+  await chmod(target, 0o600);
+  await chmod(join(config.root, 'test/a.test.mjs'), 0o600);
+  assert.deepEqual(await snapshot(), before);
   await writeFile(target, 'changed');
   const changed = await snapshot();
   await rm(join(directory, 'external'));

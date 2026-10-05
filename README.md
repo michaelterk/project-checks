@@ -223,7 +223,8 @@ The default `inputs: ['.']` fingerprints the full project tree: hidden files,
 tests, configuration, installed dependencies and symlink targets. `.git`,
 `.test-cache` and Python `__pycache__` directories are excluded. Symlink cycles
 retain their targets without being traversed repeatedly. The configured cache
-directory is always excluded. The input content, permission bits, command,
+directory is always excluded. File identity uses content hashes, ignoring filesystem
+permissions and ownership. Input paths and content, command,
 effective environment, Node runtime/platform and package implementation all
 contribute to evidence identity. Cache files contain hashes, never environment
 values. Defaults favor complete input tracking, which can be expensive for large
@@ -638,8 +639,9 @@ and rejects subsequent snapshots; always call it in `finally`.
 - `saveEvidence(unit)` validates and persists the eligible passing artifact,
   returning `{ files: ['/absolute/artifact.json'], metadata: optionalDomainJSON }`.
   Declare a nonempty array of persisted regular files. The package rejects
-  directories and symlinks before reading them, computes file identities with its
+  directories and symlinks before reading them, computes content hashes with its
   existing input walker, and stores the bindings in the same passing record.
+  Artifact permission and ownership changes do not invalidate unchanged content.
   This runs only after a complete successful attempt against unchanged inputs.
   Throw on invalid artifacts. The package checks cancellation and source stability
   again after this callback before atomically publishing the existing pass record.

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFile, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, readFile, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import test from 'node:test';
 import { Admission, createFileSnapshot, loadConfig, runCachedUnits } from '../src/index.mjs';
@@ -46,7 +46,7 @@ test('artifact metadata shares the atomic pass record; missing, corrupt and lega
   const cached = JSON.parse(await readFile(join(f.options.cacheDirectory, record)));
   assert.deepEqual(cached.evidence.files, [artifact]);
   assert.equal(cached.evidence.identities[0][0], 'file');
-  assert.match(cached.evidence.identities[0][2], /^[a-f0-9]{64}$/);
+  assert.match(cached.evidence.identities[0][1], /^[a-f0-9]{64}$/);
   assert.equal((await runCachedUnits(f.options)).cached, 1);
   assert.deepEqual(JSON.parse(await readFile(aggregate)), { coverage: [1] });
   await rm(aggregate); // Each invocation owns an initially empty aggregate area.
@@ -65,6 +65,21 @@ test('artifact metadata shares the atomic pass record; missing, corrupt and lega
   await writeFile(join(f.options.cacheDirectory, record), JSON.stringify(current));
   assert.equal((await runCachedUnits(f.options)).passed, 1);
   assert.equal(restores, 1);
+});
+
+test('artifact permission changes preserve passing evidence before and during restoration', async t => {
+  const f = await fixture(t);
+  const artifact = f.declaration.files[0];
+  await chmod(artifact, 0o600);
+  assert.equal((await runCachedUnits(f.options)).passed, 1);
+  await chmod(artifact, 0o640);
+  f.options.execute = () => { throw new Error('unchanged artifact must remain cached'); };
+  f.options.restoreEvidence = async () => {
+    assert.equal(await readFile(artifact, 'utf8'), 'coverage');
+    await chmod(artifact, 0o600);
+    return true;
+  };
+  assert.equal((await runCachedUnits(f.options)).cached, 1);
 });
 
 test('shared artifact replacement during restoration fails before aggregation and removes passing evidence', async t => {
