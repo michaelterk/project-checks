@@ -23,6 +23,7 @@ const options = { workers: 1, logger: false };
 test('JSON dependencies build before tests; failed prerequisites block only their consumers', async t => {
   const root = await project(t, {
     'test/a.test.mjs': "import {readFileSync} from 'node:fs'; if (readFileSync('built','utf8') !== 'ready') throw Error('build missing');",
+    'built': 'ready',
     'checks.json': JSON.stringify({ checks: {
       build: { command: [process.execPath, '-e', "require('node:fs').writeFileSync('built','ready')"] },
       broken: { command: [process.execPath, '-e', 'process.exit(7)'] },
@@ -181,17 +182,15 @@ test('Playwright user actions preserve arguments, bypass evidence and allow snap
 test('graph drains fresh work and newly ready async dependents before an exclusive retry', async t => {
   const root = await project(t, { 'test/a.test.mjs': '' });
   const events = [];
-  let started;
-  const firstAttempt = new Promise(resolve => { started = resolve; });
   const suite = execute => ({ ...config(root), cache: false, setup: () => ({ execute }) });
   const result = await runChecks([
     { id: 'retry', config: { ...suite(async (_, { retry, reportTimeout }) => {
       events.push(retry ? 'retry' : 'first');
-      if (!retry) { reportTimeout({ ordinaryFailure: false }); started(); return 1; }
+      if (!retry) { reportTimeout({ ordinaryFailure: false }); return 1; }
       assert.deepEqual(events, ['first', 'independent', 'dependent', 'retry']);
       return 0;
     }), retryTimeouts: true } },
-    { id: 'independent', config: async () => { await firstAttempt; return suite(async () => { events.push('independent'); return 0; }); } },
+    { id: 'independent', config: async () => { await new Promise(resolve => setImmediate(resolve)); return suite(async () => { events.push('independent'); return 0; }); } },
     { id: 'dependent', dependsOn: ['independent'], config: async () => {
       await readFile(join(root, 'test/a.test.mjs'));
       return suite(async () => { events.push('dependent'); return 0; });

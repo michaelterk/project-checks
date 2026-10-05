@@ -62,7 +62,7 @@ export async function runTests(options = {}, lifecycle = {}) {
   return withProgress(options, progress => withProcessSignal(options.signal, signal => runTestsWithSignal({ ...options, progress, signal }, lifecycle)));
 }
 
-async function runTestsWithSignal(options, { retained, normalPhase }) {
+async function runTestsWithSignal(options, { retained, normalPhase, cacheScan }) {
   const config = await normalizeConfig(options);
   const { root } = config;
   if (config.coverage?.report) config.ignore = [...config.ignore, config.coverage.report, `${config.coverage.report}.*.tmp`];
@@ -115,7 +115,10 @@ async function runTestsWithSignal(options, { retained, normalPhase }) {
         unit.identity = JSON.stringify([unit.command, artifacts.identity]);
       }
     }
-    fixture = await options.setup?.({ signal: config.signal });
+    if (!cacheScan) fixture = await options.setup?.({ signal: config.signal });
+    const prepareExecution = cacheScan ? async () => {
+      fixture = await options.setup?.({ signal: config.signal });
+    } : undefined;
     if (options.engine === 'playwright' && options.frameworkArgs?.length) {
       if (typeof template === 'function') throw new Error('Playwright actions require a command template');
       const action = { id: 'framework-action', command: [...template.flatMap(argument => argument.includes('{file}')
@@ -131,7 +134,7 @@ async function runTestsWithSignal(options, { retained, normalPhase }) {
         execute: (unit, { reportTimeout }) => (fixture?.execute ?? runCommand)(unit.command, {
           cwd: root, env, signal: config.signal, playwrightTest: true, onTimeout: reportTimeout, timeoutMs: config.timeoutMs,
         }),
-      });
+      }, { cacheScan, prepareExecution });
     }
     const retryTimeouts = options.retryTimeouts ?? false;
     const retryTimeoutMs = options.retryTimeoutMs ?? 60000;
@@ -193,7 +196,7 @@ async function runTestsWithSignal(options, { retained, normalPhase }) {
         if (status === 0) hints.record(unit.id, (performance.now() - started) / 1000);
         return status;
       },
-    });
+    }, { cacheScan, prepareExecution });
     diagnostics?.event('snapshot-final', { suite: config.suite, call: snapshotCalls, seconds: lastSnapshotSeconds });
     if (!result.inputsChanged) await hints.save();
     if (!result.exitCode && artifacts && files.length === selection.length) {

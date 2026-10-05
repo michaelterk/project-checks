@@ -9,7 +9,7 @@ import { createSnapshotContext } from './inputs.mjs';
 import { withProgress } from './progress.mjs';
 
 // Share the read limit across concurrent suites without occupying test workers.
-const scanConcurrency = 16;
+export const scanConcurrency = 16;
 const cacheReads = [];
 let activeCacheReads = 0;
 function readCacheRecord(filename, signal) {
@@ -44,11 +44,11 @@ export function cacheKey(snapshot, unitId) {
   return digest(JSON.stringify([snapshot.common, snapshot.units[unitId]]));
 }
 
-export async function runCachedUnits(options) {
-  return withProgress(options, progress => withProcessSignal(options.signal, signal => runUnits({ ...options, progress, signal })));
+export async function runCachedUnits(options, { cacheScan, prepareExecution } = {}) {
+  return withProgress(options, progress => withProcessSignal(options.signal, signal => runUnits({ ...options, progress, signal }, { cacheScan, prepareExecution })));
 }
 
-async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, workers, resources, execute, cache = true, signal, logger = console, admission: sharedAdmission, retryTimeouts = false, restoreEvidence, saveEvidence, diagnostics, normalPhase, progress }) {
+async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, workers, resources, execute, cache = true, signal, logger = console, admission: sharedAdmission, retryTimeouts = false, restoreEvidence, saveEvidence, diagnostics, normalPhase, progress }, { cacheScan, prepareExecution }) {
   if (workers !== undefined) integer(workers, 'workers');
   if (typeof retryTimeouts !== 'boolean') throw new TypeError('retryTimeouts must be a boolean');
   text(suite, 'suite');
@@ -235,7 +235,7 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
   try {
     const started = performance.now();
     if (cache) {
-      logger?.log(`CACHE_SCAN: ${suite} | Scanning ${units.length} test files | Concurrency: ${scanConcurrency}`);
+      if (!cacheScan) logger?.log(`CACHE_SCAN: ${suite} | Scanning ${units.length} test files | Concurrency: ${scanConcurrency}`);
       const prepare = async () => {
         await scan(scanUnit);
         if (restoreEvidence) await scan(restoreUnit, Math.min(scanConcurrency, workers));
@@ -243,6 +243,14 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
       await (diagnostics ? diagnostics.span(suite, 'cache-scan', prepare) : prepare());
     }
     signal?.throwIfAborted();
+    if (cacheScan) {
+      await cacheScan({
+        total: units.length, cached: plan.filter(entry => entry.cached).length,
+      });
+      signal?.throwIfAborted();
+      await prepareExecution?.();
+      signal?.throwIfAborted();
+    }
     for (let index = 0; index < units.length; index++) {
       if (!plan[index].cached) { runnable.push(index); continue; }
       const { id } = units[index];
@@ -250,7 +258,7 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
       diagnostics?.file(suite, id, 'cache-hit');
       progress && progress.file(suite, id, 'cache-hit');
     }
-    logger?.log(`CACHE_SCAN: ${suite} | Will run: ${runnable.length} | Will skip: ${units.length - runnable.length} | Duration: ${((performance.now() - started) / 1000).toFixed(2)}s${cache ? '' : ' | Cache disabled'}`);
+    if (!cacheScan) logger?.log(`CACHE_SCAN: ${suite} | Will run: ${runnable.length} | Will skip: ${units.length - runnable.length} | Duration: ${((performance.now() - started) / 1000).toFixed(2)}s${cache ? '' : ' | Cache disabled'}`);
     concurrency = Math.min(workers, runnable.length);
     await Promise.all(Array.from({ length: concurrency }, worker));
     if (stopped) throw fatal;
