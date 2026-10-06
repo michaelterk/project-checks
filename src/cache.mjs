@@ -7,6 +7,7 @@ import { command, digest, integer, keys, object, text } from './util.mjs';
 import { Admission } from './admission.mjs';
 import { createSnapshotContext } from './inputs.mjs';
 import { withProgress } from './progress.mjs';
+import { createFileQueue } from './file-queue.mjs';
 
 import { createScanQueue, scanConcurrency } from './scan-queue.mjs';
 export { scanConcurrency } from './scan-queue.mjs';
@@ -82,7 +83,6 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
     return { ...plain, files, identities };
   }
   workers = admission?.capacity ?? workers ?? 1;
-  let cursor = 0;
   let fatal;
   let stopped = false;
   let inputsChanged = false;
@@ -150,7 +150,7 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
     }));
     if (stopped) throw fatal;
   }
-  async function runUnit(index, retry = false, originalFailure = 0, admitted = false) {
+  async function runUnit(index, retry = false, originalFailure = 0, admitted = false, scheduling) {
     const unit = units[index];
     const { filename, expected } = plan[index];
     if (!admitted) await admission?.acquire({ exclusive: retry, signal });
@@ -179,50 +179,49 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
       results[index] = { id: unit.id, exitCode: status, cached: false };
       if (!retry && retryTimeouts && timedOut) retries.push({ index, originalFailure: ordinaryFailure ? status : 0 });
       if (status !== 0) { finished = true; return; }
-      if (!isDeepStrictEqual(before, await check()) || inputsChanged) {
-        logger?.error(`Inputs changed during ${suite}/${unit.id}; no passing evidence saved.`);
-        inputsChanged = true;
-        finished = true;
-        return;
-      }
-      let evidence;
-      if (saveEvidence) {
-        const declaration = await saveEvidence(unit);
+      const finalize = async () => {
         signal?.throwIfAborted();
-        evidence = await bindEvidence(declaration);
-        if (!isDeepStrictEqual(before, await takeSnapshot()) || inputsChanged) {
-          logger?.error(`Inputs changed while saving ${suite}/${unit.id}; no passing evidence saved.`);
+        if (!isDeepStrictEqual(before, await check()) || inputsChanged) {
+          logger?.error(`Inputs changed during ${suite}/${unit.id}; no passing evidence saved.`);
           inputsChanged = true;
           finished = true;
           return;
         }
-        signal?.throwIfAborted();
-      }
-      if (cache) {
-        const temporary = `${filename}.${process.pid}.${randomUUID()}.tmp`;
-        try {
-          await writeFile(temporary, JSON.stringify({ key: expected, passed: true, ...(saveEvidence ? { evidence } : {}) }), { mode: 0o600, flag: 'wx' });
-          if (saveEvidence) signal?.throwIfAborted();
-          await rename(temporary, filename);
-        } finally { await rm(temporary, { force: true }); }
-      }
-      finished = true;
+        let evidence;
+        if (saveEvidence) {
+          const declaration = await saveEvidence(unit);
+          signal?.throwIfAborted();
+          evidence = await bindEvidence(declaration);
+          if (!isDeepStrictEqual(before, await takeSnapshot()) || inputsChanged) {
+            logger?.error(`Inputs changed while saving ${suite}/${unit.id}; no passing evidence saved.`);
+            inputsChanged = true;
+            finished = true;
+            return;
+          }
+          signal?.throwIfAborted();
+        }
+        if (cache) {
+          const temporary = `${filename}.${process.pid}.${randomUUID()}.tmp`;
+          try {
+            await writeFile(temporary, JSON.stringify({ key: expected, passed: true, ...(saveEvidence ? { evidence } : {}) }), { mode: 0o600, flag: 'wx' });
+            signal?.throwIfAborted();
+            if (inputsChanged) { finished = true; return; }
+            await rename(temporary, filename);
+          } finally { await rm(temporary, { force: true }); }
+        }
+        finished = true;
+      };
+      // Evidence collection can launch processes and retains command admission.
+      if (scheduling && !saveEvidence) {
+        scheduling.releaseExecution();
+        await scheduling.verify(finalize);
+      } else await finalize();
     } finally {
       if (executing) progress && progress.file(suite, unit.id, 'file-end', finished ? { status, timedOut } : { status: 'interrupted' });
       if (!admitted) admission?.release();
     }
   }
-  async function worker() {
-    try {
-      while (!stopped && cursor < runnable.length) {
-        signal?.throwIfAborted();
-        const index = runnable[cursor++];
-        await runUnit(index);
-      }
-    } catch (error) { if (!stopped) fatal = error; stopped = true; if (!sharedAdmission) admission?.close(); }
-  }
   const runnable = [];
-  let concurrency;
   try {
     const started = performance.now();
     if (queueScan) {
@@ -261,16 +260,21 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
     if (cacheScan) {
       await cacheScan({
         total: units.length, cached: units.length - runnable.length,
-        jobs: runnable.map(index => () => runUnit(index, false, 0, true)),
+        jobs: runnable.map(index => scheduling => runUnit(index, false, 0, true, scheduling)),
       });
       signal?.throwIfAborted();
       await prepareExecution?.();
       signal?.throwIfAborted();
     }
     if (!cacheScan) logger?.log(`CACHE_SCAN: ${suite} | Will run: ${runnable.length} | Will skip: ${units.length - runnable.length} | Duration: ${((performance.now() - started) / 1000).toFixed(2)}s${cache ? '' : ' | Cache disabled'}`);
-    concurrency = Math.min(workers, runnable.length);
     if (executeFiles) await executeFiles();
-    else await Promise.all(Array.from({ length: concurrency }, worker));
+    else {
+      const releaseNormal = admission?.beginNormal();
+      const queue = createFileQueue([{ id: suite, jobs: runnable.map(index =>
+        scheduling => runUnit(index, false, 0, true, scheduling)) }], admission, signal, { workers });
+      try { queue.enable(suite); await queue.run(suite); }
+      finally { try { await queue.close(); } finally { releaseNormal?.(); } }
+    }
     if (stopped) throw fatal;
     for (const { index, originalFailure } of retries) {
       normalPhase?.(false);

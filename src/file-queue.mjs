@@ -1,6 +1,12 @@
-// One invocation owns this queue. Jobs retain their suite's execution/evidence
-// closures; only the dispatcher claims files and acquires normal worker slots.
-export function createFileQueue(plans, admission, signal) {
+import { createPermits } from './permits.mjs';
+import { createVerificationPool } from './verification-pool.mjs';
+
+// Command admission and terminal file completion have separate lifetimes.
+export function createFileQueue(plans, admission, signal, { workers = 1 } = {}) {
+  const dispatch = new AbortController();
+  const dispatchSignal = AbortSignal.any([signal, dispatch.signal]);
+  const commands = admission ? null : createPermits(workers, dispatchSignal);
+  const verification = createVerificationPool(admission?.capacity ?? workers, signal);
   const groups = new Map(plans.map(({ id, jobs }) => [id, {
     enabled: false, done: Promise.withResolvers(),
     remaining: jobs.length, active: 0, stopped: false,
@@ -23,11 +29,12 @@ export function createFileQueue(plans, admission, signal) {
   }
   const abort = () => { for (const group of groups.values()) stop(group, signal.reason); };
   signal.addEventListener('abort', abort, { once: true });
+  if (signal.aborted) abort();
   function kick() {
-    if (pumping || signal.aborted) return;
+    if (pumping || dispatchSignal.aborted) return;
     pumping = pump().finally(() => {
       pumping = undefined;
-      if (next()?.group.ready && !signal.aborted) kick();
+      if (next()?.group.ready && !dispatchSignal.aborted) kick();
     });
   }
   async function pump() {
@@ -37,19 +44,36 @@ export function createFileQueue(plans, admission, signal) {
         // Stop dispatching while setup is pending. Readiness changes restart the
         // pump so a newly ready earlier dependency can take its original place.
         if (!next().group.ready) return;
-        signal.throwIfAborted();
-        await admission.acquire({ signal });
+        dispatchSignal.throwIfAborted();
+        const releaseCredit = await verification.reserve();
+        let releaseCommand;
+        try {
+          if (admission) {
+            await admission.acquire({ signal: dispatchSignal });
+            let released = false;
+            releaseCommand = () => {
+              if (released) return;
+              released = true;
+              admission.release();
+            };
+          } else releaseCommand = await commands.acquire();
+        } catch (error) { releaseCredit(); throw error; }
         const job = next();
-        if (!job || !job.group.ready || signal.aborted) {
-          admission.release();
-          signal.throwIfAborted();
+        if (!job || !job.group.ready || dispatchSignal.aborted) {
+          releaseCommand();
+          releaseCredit();
+          dispatchSignal.throwIfAborted();
           continue;
         }
         job.claimed = true;
         job.group.remaining--;
         job.group.active++;
-        const running = Promise.resolve().then(job.run).catch(error => stop(job.group, error)).finally(() => {
-          admission.release();
+        const running = Promise.resolve().then(() => job.run({
+          releaseExecution: releaseCommand,
+          verify: operation => verification.run(operation),
+        })).catch(error => stop(job.group, error)).finally(() => {
+          releaseCommand();
+          releaseCredit();
           job.group.active--;
           active.delete(running);
           settle(job.group);
@@ -71,8 +95,12 @@ export function createFileQueue(plans, admission, signal) {
     skip(id, error) { stop(groups.get(id), error); kick(); },
     async close() {
       signal.removeEventListener('abort', abort);
+      // A failed group may leave the pump waiting to admit an unclaimed file.
+      dispatch.abort(new DOMException('File queue closed', 'AbortError'));
       await pumping;
       await Promise.all(active);
+      verification.close();
+      commands?.close();
     },
   };
 }

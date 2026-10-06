@@ -23,7 +23,7 @@ and install that archive in another project:
 npm pack
 
 # In your project (adjust the path)
-npm install --save-dev /path/to/project-checks/project-checks-0.4.0.tgz
+npm install --save-dev /path/to/project-checks/project-checks-0.4.1.tgz
 ```
 
 After a maintainer publishes it under this name, installation will be
@@ -253,11 +253,16 @@ a worker; suites have no independent file-worker loops. Files blocked by test
 dependencies do not occupy workers, and regain their original position when
 ready. An earlier ready suite retains its position while its fixture prepares,
 without holding a worker slot. Each file keeps its suite's configuration, fixture,
-snapshot, coverage artifacts, and evidence checks. Its worker remains occupied
-through post-command validation and evidence persistence. Missing or corrupt
-records and incompatible artifacts rerun. Retries and final input verification retain
-their existing checks. Standalone `runTests` and `runCachedUnits` scan their own
-selected files.
+snapshot, coverage artifacts, and evidence checks. Files without coverage artifacts
+release their execution slot after command cleanup, then verify inputs and publish
+their cache record in a separate pool capped at 16 active jobs. Each invocation
+bounds executing and finalizing files to its execution capacity plus 16, reserving
+space before command admission. Concurrent input checks within a suite still share
+an in-progress snapshot. Coverage collection retains execution admission because
+it can start processes and use substantial memory. Suite completion, dependencies,
+exclusive retries, and cleanup wait for finalization. Missing or corrupt records
+and incompatible artifacts rerun. Standalone `runTests` and `runCachedUnits` use
+the same execution/finalization lifecycle and scan their own selected files.
 
 ```text
 CACHE_SCAN: checks | Collecting all selected test files | Concurrency: 32
