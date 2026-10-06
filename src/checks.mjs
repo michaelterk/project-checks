@@ -6,14 +6,16 @@ import { loadConfig } from './config.mjs';
 import { runCommand } from './command.mjs';
 import { createSnapshotContext } from './inputs.mjs';
 import { runTests } from './runner.mjs';
-import { command, keys, text } from './util.mjs';
+import { command, integer, keys, text } from './util.mjs';
 import { createProgress } from './progress.mjs';
-import { scanCacheJobs, scanConcurrency } from './cache.mjs';
+import { scanCacheJobs, scanConcurrency as defaultScanConcurrency } from './cache.mjs';
 
 // Definitions describe ownership and ordering. Every command, fixture attempt,
 // retry and coverage gate uses the same invocation-owned admission pool.
 export async function runChecks(definitions, options = {}) {
-  keys(options, ['resources', 'workers', 'signal', 'logger', 'progress'], 'check options');
+  keys(options, ['resources', 'workers', 'scanConcurrency', 'verificationConcurrency', 'signal', 'logger', 'progress'], 'check options');
+  if (options.scanConcurrency !== undefined) integer(options.scanConcurrency, 'scanConcurrency');
+  if (options.verificationConcurrency !== undefined) integer(options.verificationConcurrency, 'verificationConcurrency');
   const byId = new Map();
   for (const definition of definitions) {
     keys(definition, ['id', 'dependsOn', 'config', 'command', 'cwd', 'env', 'verify'], 'check');
@@ -136,7 +138,7 @@ export async function runChecks(definitions, options = {}) {
       if (buildError) throw buildError.reason;
       const testDefinitions = definitions.filter(definition => definition.config !== undefined);
       const started = performance.now();
-      if (testDefinitions.length) logger?.log(`CACHE_SCAN: checks | Collecting all selected test files | Concurrency: ${scanConcurrency}`);
+      if (testDefinitions.length) logger?.log('CACHE_SCAN: checks | Collecting all selected test files');
       for (const definition of testDefinitions) {
         const { id } = definition;
         if (failedPrerequisite(id)) {
@@ -164,7 +166,7 @@ export async function runChecks(definitions, options = {}) {
             return { id, ...await runTests({ ...config, signal, admission, snapshotContext, logger: logger ?? false, progress: suiteProgress }, {
               retained, normalPhase: phases.get(id),
               executeFiles: () => fileQueue.run(id),
-              queueScan: jobs => { queued.resolve(jobs); return scanned.promise; },
+              queueScan: (jobs, scanConcurrency) => { queued.resolve({ jobs, scanConcurrency }); return scanned.promise; },
               cacheScan: plan => { ready.resolve(plan); return permission.promise; },
             }) };
           } catch (error) {
@@ -180,14 +182,16 @@ export async function runChecks(definitions, options = {}) {
       const inventoryError = inventories.find(result => result.status === 'rejected');
       if (inventoryError) throw inventoryError.reason;
       signal.throwIfAborted();
-      const jobs = inventories.flatMap(({ value }) => value);
+      const jobs = inventories.flatMap(({ value }) => value.jobs);
+      const scanConcurrency = options.scanConcurrency ?? (inventories.length
+        ? Math.min(...inventories.map(({ value }) => value.scanConcurrency)) : defaultScanConcurrency);
       if (testDefinitions.length) logger?.log(`CACHE_SCAN: checks | Queued: ${jobs.length} test files | Concurrency: ${scanConcurrency}`);
       scanning = true;
       try {
         await scanCacheJobs(jobs.map(run => async () => {
           try { signal.throwIfAborted(); await run(); }
           catch (error) { controller.abort(error); throw error; }
-        }), options.resources);
+        }), options.resources, scanConcurrency, { logger: options.progress === false ? null : logger });
       } finally {
         scanning = false;
         if (signal.aborted) scanned.reject(signal.reason);
@@ -200,7 +204,9 @@ export async function runChecks(definitions, options = {}) {
       const total = prepared.reduce((sum, { value }) => sum + value.total, 0);
       const cached = prepared.reduce((sum, { value }) => sum + value.cached, 0);
       if (testDefinitions.length) logger?.log(`CACHE_SCAN: checks | Will run: ${total - cached} | Will skip: ${cached} | Total: ${total} | Duration: ${((performance.now() - started) / 1000).toFixed(2)}s`);
-      fileQueue = createFileQueue([...suites.keys()].map((id, index) => ({ id, jobs: prepared[index].value.jobs })), admission, signal);
+      const verificationConcurrency = options.verificationConcurrency ?? (prepared.length
+        ? Math.min(...prepared.map(({ value }) => value.verificationConcurrency)) : undefined);
+      fileQueue = createFileQueue([...suites.keys()].map((id, index) => ({ id, jobs: prepared[index].value.jobs })), admission, signal, { verificationConcurrency });
       executing = true;
       launchReady();
       let settled;

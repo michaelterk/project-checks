@@ -67,7 +67,7 @@ try {
       controller = new AbortController();
       process.once('SIGINT', abort);
       process.once('SIGTERM', abort);
-      const result = action === 'checks' ? await runChecks(await loadChecks(filename ?? 'project-checks.project.json', { target, files: overrides.files, cache: overrides.cache, filters: overrides.filters, frameworkArgs: overrides.frameworkArgs }), { resources: config.resources, workers: overrides.workers, signal: controller.signal }) : await runTests({ ...config, signal: controller.signal });
+      const result = action === 'checks' ? await runChecks(await loadChecks(filename ?? 'project-checks.project.json', { target, files: overrides.files, cache: overrides.cache, filters: overrides.filters, frameworkArgs: overrides.frameworkArgs }), { resources: config.resources, workers: overrides.workers, scanConcurrency: config.scanConcurrency, verificationConcurrency: config.verificationConcurrency, signal: controller.signal }) : await runTests({ ...config, signal: controller.signal });
       process.exitCode = result.exitCode;
     }
   }

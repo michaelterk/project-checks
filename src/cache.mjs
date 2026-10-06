@@ -8,15 +8,26 @@ import { Admission } from './admission.mjs';
 import { createSnapshotContext } from './inputs.mjs';
 import { withProgress } from './progress.mjs';
 import { createFileQueue } from './file-queue.mjs';
+import { verificationConcurrency as defaultVerificationConcurrency } from './verification-pool.mjs';
 
-import { createScanQueue, scanConcurrency } from './scan-queue.mjs';
+import { createScanQueue, scanConcurrency as defaultScanConcurrency } from './scan-queue.mjs';
 export { scanConcurrency } from './scan-queue.mjs';
 
 const scanQueue = createScanQueue();
-export async function scanCacheJobs(operations, resources) {
-  const settled = await Promise.allSettled(scanQueue.enqueue(operations, resources));
-  const failure = settled.find(result => result.status === 'rejected');
-  if (failure) throw failure.reason;
+export async function scanCacheJobs(operations, resources, scanConcurrency = defaultScanConcurrency, { logger = null, suite = 'checks' } = {}) {
+  let latest;
+  const complete = Promise.allSettled(scanQueue.enqueue(operations, resources, scanConcurrency, logger ? state => { latest = state; } : undefined));
+  const report = () => {
+    if (latest) logger.log(`CACHE_SCAN_PROGRESS: ${suite} | ${latest.scanned} out of ${latest.total} scanned | Workers: ${latest.active}`);
+  };
+  const timer = logger && operations.length ? setInterval(report, 1000) : undefined;
+  try {
+    report();
+    const settled = await complete;
+    report();
+    const failure = settled.find(result => result.status === 'rejected');
+    if (failure) throw failure.reason;
+  } finally { clearInterval(timer); await complete; }
 }
 
 // Record routing is independent of validity; neither identifier enters the key.
@@ -35,8 +46,10 @@ export async function runCachedUnits(options, { queueScan, cacheScan, prepareExe
   return withProgress(options, progress => withProcessSignal(options.signal, signal => runUnits({ ...options, progress, signal }, { queueScan, cacheScan, prepareExecution, executeFiles })));
 }
 
-async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, workers, resources, execute, cache = true, signal, logger = console, admission: sharedAdmission, retryTimeouts = false, restoreEvidence, saveEvidence, diagnostics, normalPhase, progress }, { queueScan, cacheScan, prepareExecution, executeFiles }) {
+async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, workers, scanConcurrency = defaultScanConcurrency, verificationConcurrency = defaultVerificationConcurrency, resources, execute, cache = true, signal, logger = console, admission: sharedAdmission, retryTimeouts = false, restoreEvidence, saveEvidence, diagnostics, normalPhase, progress }, { queueScan, cacheScan, prepareExecution, executeFiles }) {
   if (workers !== undefined) integer(workers, 'workers');
+  integer(scanConcurrency, 'scanConcurrency');
+  integer(verificationConcurrency, 'verificationConcurrency');
   if (typeof retryTimeouts !== 'boolean') throw new TypeError('retryTimeouts must be a boolean');
   text(suite, 'suite');
   if (cache) text(cacheDirectory, 'cacheDirectory');
@@ -230,16 +243,16 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
         if (!cache) return;
         await scanUnit(index, filename => readFile(filename, 'utf8'));
         if (restoreEvidence) await restoreUnit(index);
-      }));
+      }), scanConcurrency);
       await (diagnostics ? diagnostics.span(suite, 'cache-scan', prepare) : prepare());
     } else if (cache) {
       if (!cacheScan) logger?.log(`CACHE_SCAN: ${suite} | Scanning ${units.length} test files | Concurrency: ${scanConcurrency}`);
       const prepare = async () => {
         await scanCacheJobs(units.map((_, index) => async () => {
-          if (stopped) return;
+          if (stopped) throw fatal;
           try { await scanUnit(index); }
           catch (error) { if (!stopped) fatal = error; stopped = true; throw error; }
-        }), resources);
+        }), resources, scanConcurrency, { logger: progress === false ? null : logger, suite });
         if (stopped) throw fatal;
         if (restoreEvidence) await scan(restoreUnit, Math.min(scanConcurrency, workers));
       };
@@ -260,6 +273,7 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
     if (cacheScan) {
       await cacheScan({
         total: units.length, cached: units.length - runnable.length,
+        verificationConcurrency,
         jobs: runnable.map(index => scheduling => runUnit(index, false, 0, true, scheduling)),
       });
       signal?.throwIfAborted();
@@ -271,7 +285,7 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
     else {
       const releaseNormal = admission?.beginNormal();
       const queue = createFileQueue([{ id: suite, jobs: runnable.map(index =>
-        scheduling => runUnit(index, false, 0, true, scheduling)) }], admission, signal, { workers });
+        scheduling => runUnit(index, false, 0, true, scheduling)) }], admission, signal, { workers, verificationConcurrency });
       try { queue.enable(suite); await queue.run(suite); }
       finally { try { await queue.close(); } finally { releaseNormal?.(); } }
     }

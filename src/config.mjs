@@ -6,7 +6,7 @@ import { command, integer, keys, text } from './util.mjs';
 import { selectConcurrency } from './resources.mjs';
 import defaultConfig from '../project-checks.config.json' with { type: 'json' };
 
-const options = ['extends', 'root', 'testDirectory', 'pattern', 'files', 'command', 'inputs', 'testInputs', 'excludeTestsFromInputs', 'ignore', 'directoryIgnore', 'workers', 'resources', 'cache', 'cacheDirectory', 'suite', 'env', 'testFixtureInputs', 'signal', 'logger', 'stdio', 'retryTimeouts', 'retryTimeoutMs', 'timeoutMs', 'admission', 'snapshotContext', 'diagnostics', 'progress', 'durationHints', 'initialDurations', 'select', 'setup', 'filters', 'engine', 'coverage', 'frameworkArgs', 'normalizeNpmEnvironment'];
+const options = ['extends', 'root', 'testDirectory', 'pattern', 'files', 'command', 'inputs', 'testInputs', 'excludeTestsFromInputs', 'ignore', 'directoryIgnore', 'workers', 'scanConcurrency', 'verificationConcurrency', 'resources', 'cache', 'cacheDirectory', 'suite', 'env', 'testFixtureInputs', 'signal', 'logger', 'stdio', 'retryTimeouts', 'retryTimeoutMs', 'timeoutMs', 'admission', 'snapshotContext', 'diagnostics', 'progress', 'durationHints', 'initialDurations', 'select', 'setup', 'filters', 'engine', 'coverage', 'frameworkArgs', 'normalizeNpmEnvironment'];
 export const defaultDirectoryIgnore = defaultConfig.directoryIgnore;
 export const defaultIgnore = defaultConfig.ignore;
 
@@ -50,6 +50,8 @@ export function defineConfig(config) {
     if (!config.command.slice(1).some(value => value.includes('{file}'))) throw new TypeError('command must include {file} in an argument');
   }
   if (config.workers !== undefined) integer(config.workers, 'workers');
+  if (config.scanConcurrency !== undefined) integer(config.scanConcurrency, 'scanConcurrency');
+  if (config.verificationConcurrency !== undefined) integer(config.verificationConcurrency, 'verificationConcurrency');
   if (config.resources !== undefined) selectConcurrency(config.resources, { cpus: 1, memoryMiB: 1 });
   if (config.cache !== undefined && typeof config.cache !== 'boolean') throw new TypeError('cache must be a boolean');
   if (config.retryTimeouts !== undefined && typeof config.retryTimeouts !== 'boolean') throw new TypeError('retryTimeouts must be a boolean');

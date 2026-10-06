@@ -23,7 +23,7 @@ and install that archive in another project:
 npm pack
 
 # In your project (adjust the path)
-npm install --save-dev /path/to/project-checks/project-checks-0.4.1.tgz
+npm install --save-dev /path/to/project-checks/project-checks-0.4.2.tgz
 ```
 
 After a maintainer publishes it under this name, installation will be
@@ -237,7 +237,7 @@ project-checks coverage --config project-checks.project.json --target complete
 `runChecks` runs required builds, then collects every selected suite, including
 nested projects and suites with test dependencies. It populates one shared queue
 with a scan job for every selected test file before any scan worker starts.
-The scan pool starts with 32 workers and drains this complete queue; suites do not feed additional jobs as
+The scan pool starts with `scanConcurrency` workers (default 32) and drains this complete queue; suites do not feed additional jobs as
 earlier jobs finish. Each job checks its cache record and validates and restores
 retained artifacts under resource admission. Cache-disabled files enter the plan
 as runnable without reading evidence.
@@ -255,8 +255,9 @@ ready. An earlier ready suite retains its position while its fixture prepares,
 without holding a worker slot. Each file keeps its suite's configuration, fixture,
 snapshot, coverage artifacts, and evidence checks. Files without coverage artifacts
 release their execution slot after command cleanup, then verify inputs and publish
-their cache record in a separate pool capped at 16 active jobs. Each invocation
-bounds executing and finalizing files to its execution capacity plus 16, reserving
+their cache record in a separate pool capped by `verificationConcurrency` (default
+32 active jobs). Each invocation bounds executing and finalizing files to its
+execution capacity plus that verification limit, reserving
 space before command admission. Concurrent input checks within a suite still share
 an in-progress snapshot. Coverage collection retains execution admission because
 it can start processes and use substantial memory. Suite completion, dependencies,
@@ -265,10 +266,19 @@ and incompatible artifacts rerun. Standalone `runTests` and `runCachedUnits` use
 the same execution/finalization lifecycle and scan their own selected files.
 
 ```text
-CACHE_SCAN: checks | Collecting all selected test files | Concurrency: 32
+CACHE_SCAN: checks | Collecting all selected test files
 CACHE_SCAN: checks | Queued: 240 test files | Concurrency: 32
-CACHE_SCAN: checks | Will run: 32 | Will skip: 208 | Total: 240 | Duration: 0.12s
+CACHE_SCAN_PROGRESS: checks | 0 out of 240 scanned | Workers: 32
+CACHE_SCAN_PROGRESS: checks | 112 out of 240 scanned | Workers: 40
+CACHE_SCAN_PROGRESS: checks | 240 out of 240 scanned | Workers: 0
+CACHE_SCAN: checks | Will run: 32 | Will skip: 208 | Total: 240 | Duration: 2.12s
 ```
+
+Scan progress prints at startup, once per second while scanning, and after all
+scan jobs drain. `Workers` counts currently active scan jobs for this invocation,
+including artifact validation, and reflects adaptive growth. Failed or cancelled
+jobs do not count as scanned. `progress: false` suppresses these live updates;
+`logger: false` silences all output.
 
 Only zero-exit tests with unchanged inputs receive passing evidence. Evidence
 is written atomically per file, so completed passes survive a later test failure
@@ -418,6 +428,8 @@ inside Node's own test runner.
 | `directoryIgnore` | Packaged JSON folder/file policy | Replaces the complete traversal policy; explicit dependency/output subtrees retain their directories |
 | `ignore` | `.git`, `.test-cache`, `__pycache__` trees | Replaces default root-relative exclusions |
 | `workers` | Automatically tuned CPU/RAM-derived count | Positive integer worker cap |
+| `scanConcurrency` | `32` from packaged JSON | Positive integer initial cache scan concurrency; adaptive growth can exceed it |
+| `verificationConcurrency` | `32` from packaged JSON | Positive integer cap on concurrent passing-file validation jobs |
 | `resources` | See below | Resource policy |
 | `cache` | `true` | Read/write passing evidence |
 | `cacheDirectory` | `.test-cache/project-checks` | Evidence storage, relative to root or absolute |
@@ -454,19 +466,39 @@ one learned CPU weight; each suite keeps its own snapshot and passing evidence.
 The caller closes that pool after all calls settle. Explicit `workers` on
 `Admission` bounds artifact restoration and execution, within RAM, unit and
 worker caps. Lightweight passing-record reads use a separate shared adaptive
-pool, starting at 32 workers. Once per second, a queued backlog can add eight
+pool, starting at the configured `scanConcurrency` (default 32). Once per second, a queued backlog can add eight
 workers when measured CPU use predicts room for those workers within the active
 CPU budgets, free RAM covers the reserve plus a worker estimate, and CPU, memory,
 and I/O pressure each remain at or below 5%. Scan batches share the strictest
 active resource policy. CPU saturation or pressure reduces future admissions by
-eight, down to the initial 32; active scans drain normally. Each idle pool resets
-to 32. Linux I/O pressure comes from `/proc/pressure/io` (`some` stall time over
+eight, down to the configured startup value; active scans drain normally. An idle
+pool uses the next invocation's startup value. Concurrent batches use the smaller
+active startup value and the strictest resource policy. Linux I/O pressure comes from `/proc/pressure/io` (`some` stall time over
 the sampling interval); unavailable I/O data falls back to CPU and memory checks.
 Missing CPU or available-memory telemetry prevents growth. Artifact validation
 and restoration also retain command admission, independently of scan concurrency.
 Input fingerprinting bounds filesystem work at eight operations within one
 invocation, with fresh metadata on every snapshot. Content digests and path-only
 exclusion decisions are reused; listings and snapshots are not.
+
+The startup scan and passing-file verification settings live in the package's
+`project-checks.config.json`. A consuming project can override them in its own
+`project-checks.config.json` or an inherited suite configuration:
+
+```json
+{
+  "scanConcurrency": 32,
+  "verificationConcurrency": 32
+}
+```
+
+`runTests` and `runCachedUnits` accept both settings. For `runChecks`, explicit
+options control the global scan and shared verification pool; otherwise the
+smallest selected suite value applies to each setting. The CLI `checks` command
+uses the consuming project's automatically loaded root configuration for both.
+`verificationConcurrency` is a fixed maximum; `scanConcurrency` is the starting
+value for adaptive scanning. `workers` and `--workers` continue to control test
+execution admission independently of both settings.
 
 Admission targets at most `resources.cpuQuotaPercent` of detected host CPU capacity (default 90%), reserving roughly
 10% by default for other work even when `cpuPercent` is higher. Automatic runs start at half

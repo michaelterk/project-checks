@@ -183,12 +183,12 @@ test('a failed job drains a dispatcher blocked on admission', { timeout: 5000 },
   assert.equal(otherStarted, false);
 });
 
-test('a full verification backlog blocks the eighteenth command', { timeout: 5000 }, async t => {
-  const release = deferred(), seventeenthStarted = deferred();
+test('a full verification backlog blocks the thirty-fourth command', { timeout: 5000 }, async t => {
+  const release = deferred(), thirtyThirdStarted = deferred();
   t.after(() => release.resolve());
   let started = 0, active = 0, peak = 0;
-  const jobs = Array.from({ length: 18 }, () => async ({ releaseExecution, verify }) => {
-    if (++started === 17) seventeenthStarted.resolve();
+  const jobs = Array.from({ length: 34 }, () => async ({ releaseExecution, verify }) => {
+    if (++started === 33) thirtyThirdStarted.resolve();
     releaseExecution();
     await verify(async () => {
       peak = Math.max(peak, ++active);
@@ -199,29 +199,29 @@ test('a full verification backlog blocks the eighteenth command', { timeout: 500
   const queue = createFileQueue([{ id: 'suite', jobs }], null, new AbortController().signal);
   queue.enable('suite');
   const finished = queue.run('suite');
-  await seventeenthStarted.promise;
+  await thirtyThirdStarted.promise;
   await new Promise(resolve => setImmediate(resolve));
-  assert.equal(started, 17);
-  assert.equal(active, 16);
+  assert.equal(started, 33);
+  assert.equal(active, 32);
   release.resolve();
   await finished;
   await queue.close();
-  assert.equal(started, 18);
+  assert.equal(started, 34);
   assert.equal(active, 0);
-  assert.equal(peak, 16);
+  assert.equal(peak, 32);
 });
 
 test('a queued verifier checks fresh inputs before publishing its pass', { timeout: 5000 }, async t => {
   const root = await temporary(t);
   const cacheDirectory = join(root, 'cache');
-  const ids = Array.from({ length: 17 }, (_, index) => `file-${index}`);
+  const ids = Array.from({ length: 33 }, (_, index) => `file-${index}`);
   const state = { common: 'unchanged', units: Object.fromEntries(ids.map(id => [id, 'original'])) };
-  const sixteenWriting = deferred(), releaseWrites = deferred(), seventeenthStarted = deferred();
+  const thirtyTwoWriting = deferred(), releaseWrites = deferred(), thirtyThirdStarted = deferred();
   let blocked = 0;
   const writeFile = fsPromises.writeFile;
   t.mock.method(fsPromises, 'writeFile', async (path, ...args) => {
-    if (String(path).startsWith(`${cacheDirectory}/`) && String(path).endsWith('.tmp') && blocked < 16) {
-      if (++blocked === 16) sixteenWriting.resolve();
+    if (String(path).startsWith(`${cacheDirectory}/`) && String(path).endsWith('.tmp') && blocked < 32) {
+      if (++blocked === 32) thirtyTwoWriting.resolve();
       await releaseWrites.promise;
     }
     return writeFile(path, ...args);
@@ -236,23 +236,23 @@ test('a queued verifier checks fresh inputs before publishing its pass', { timeo
     suite: 'fresh', cacheDirectory, workers: 1, logger: null,
     units: ids.map(id => ({ id, identity: id })), snapshot: () => state,
     execute: unit => {
-      if (unit.id === ids[16]) seventeenthStarted.resolve();
+      if (unit.id === ids[32]) thirtyThirdStarted.resolve();
       return 0;
     },
   });
-  await Promise.all([sixteenWriting.promise, seventeenthStarted.promise]);
-  state.units[ids[16]] = 'changed while queued';
+  await Promise.all([thirtyTwoWriting.promise, thirtyThirdStarted.promise]);
+  state.units[ids[32]] = 'changed while queued';
   releaseWrites.resolve();
   const result = await running;
   assert.equal(result.inputsChanged, true);
   assert.equal(result.exitCode, 1);
-  assert.equal((await readdir(cacheDirectory)).includes(cacheRecordName('fresh', ids[16])), false);
+  assert.equal((await readdir(cacheDirectory)).includes(cacheRecordName('fresh', ids[32])), false);
 });
 
 test('verification credits bound finished commands awaiting validation', { timeout: 5000 }, async t => {
   const pool = createVerificationPool(1, new AbortController().signal);
   t.after(() => pool.close());
-  const release = await Promise.all(Array.from({ length: 17 }, () => pool.reserve()));
+  const release = await Promise.all(Array.from({ length: 33 }, () => pool.reserve()));
   let nextReserved = false;
   const next = pool.reserve().then(releaseCredit => {
     nextReserved = true;
@@ -267,37 +267,37 @@ test('verification credits bound finished commands awaiting validation', { timeo
   releaseNext();
 });
 
-test('at most sixteen verification operations run at once', { timeout: 5000 }, async t => {
+test('at most thirty-two verification operations run at once', { timeout: 5000 }, async t => {
   const pool = createVerificationPool(1, new AbortController().signal);
   t.after(() => pool.close());
   const full = deferred(), release = deferred();
   let active = 0, peak = 0, started = 0;
-  const operations = Array.from({ length: 17 }, () => pool.run(async () => {
+  const operations = Array.from({ length: 33 }, () => pool.run(async () => {
     peak = Math.max(peak, ++active);
-    if (++started === 16) full.resolve();
+    if (++started === 32) full.resolve();
     await release.promise;
     active--;
   }));
   await full.promise;
-  assert.equal(started, 16);
+  assert.equal(started, 32);
   release.resolve();
   await Promise.all(operations);
-  assert.equal(started, 17);
+  assert.equal(started, 33);
   assert.equal(active, 0);
-  assert.equal(peak, 16);
+  assert.equal(peak, 32);
 });
 
 test('abort releases queued credits and validation slots after active work drains', { timeout: 5000 }, async t => {
   const controller = new AbortController();
   const pool = createVerificationPool(1, controller.signal);
   t.after(() => pool.close());
-  const releaseCredits = await Promise.all(Array.from({ length: 17 }, () => pool.reserve()));
+  const releaseCredits = await Promise.all(Array.from({ length: 33 }, () => pool.reserve()));
   const pendingCredit = assert.rejects(pool.reserve(), { name: 'AbortError' });
   const full = deferred(), release = deferred();
   t.after(() => release.resolve());
   let started = 0;
-  const active = Array.from({ length: 16 }, () => pool.run(async () => {
-    if (++started === 16) full.resolve();
+  const active = Array.from({ length: 32 }, () => pool.run(async () => {
+    if (++started === 32) full.resolve();
     await release.promise;
   }));
   await full.promise;
@@ -306,7 +306,7 @@ test('abort releases queued credits and validation slots after active work drain
   release.resolve();
   await Promise.all([pendingCredit, pendingValidation, ...active]);
   releaseCredits.forEach(releaseCredit => releaseCredit());
-  assert.equal(started, 16);
+  assert.equal(started, 32);
 });
 
 test('a failed validation releases its slot for the next file', { timeout: 5000 }, async t => {
@@ -315,4 +315,32 @@ test('a failed validation releases its slot for the next file', { timeout: 5000 
   const failure = new Error('validation failed');
   await assert.rejects(pool.run(() => { throw failure; }), error => error === failure);
   assert.equal(await pool.run(() => 42), 42);
+});
+
+test('configured verification limits bound both active jobs and outstanding credits', { timeout: 5000 }, async t => {
+  for (const concurrency of [1, 4]) {
+    const pool = createVerificationPool(1, new AbortController().signal, concurrency);
+    t.after(() => pool.close());
+    const credits = await Promise.all(Array.from({ length: concurrency + 1 }, () => pool.reserve()));
+    let reserved = false;
+    const next = pool.reserve().then(release => { reserved = true; return release; });
+    const release = deferred(), full = deferred();
+    t.after(() => release.resolve());
+    let active = 0, peak = 0;
+    const jobs = Array.from({ length: concurrency + 1 }, () => pool.run(async () => {
+      peak = Math.max(peak, ++active);
+      if (active === concurrency) full.resolve();
+      try { await release.promise; } finally { active--; }
+    }));
+    await full.promise;
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(active, concurrency);
+    assert.equal(reserved, false, 'backlog admission uses the configured validation cap');
+    credits[0]();
+    (await next)();
+    credits.slice(1).forEach(releaseCredit => releaseCredit());
+    release.resolve();
+    await Promise.all(jobs);
+    assert.equal(peak, concurrency);
+  }
 });

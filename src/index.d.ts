@@ -55,6 +55,10 @@ export interface TestConfig {
   directoryIgnore?: { directories?: string[]; files?: string[] };
   /** Worker cap; omitted starts at half the CPU budget and tunes within resource caps. */
   workers?: number;
+  /** Initial adaptive cache scan concurrency; positive integer. Default: 32. */
+  scanConcurrency?: number;
+  /** Maximum concurrent passing-file verification jobs; positive integer. Default: 32. */
+  verificationConcurrency?: number;
   resources?: ResourcePolicy;
   cache?: boolean;
   cacheDirectory?: string;
@@ -152,6 +156,10 @@ export class Admission {
 }
 
 export interface CachedUnitsOptions<T extends TestUnit = TestUnit> {
+  /** Initial adaptive scan concurrency; positive integer. Default: packaged JSON value (32). */
+  scanConcurrency?: number;
+  /** Maximum concurrent passing-file verification jobs; positive integer. Default: 32. */
+  verificationConcurrency?: number;
   progress?: TestProgress | false;
   cacheDirectory?: string;
   suite?: string;
@@ -265,6 +273,10 @@ export function loadChecks(filename: string, options?: {
 }): Promise<CheckDefinition[]>;
 export function runChecks(definitions: CheckDefinition[], options?: {
   resources?: ResourcePolicy; workers?: number; signal?: AbortSignal; logger?: Logger | false;
+  /** Overrides suite scan settings for the shared global scan. */
+  scanConcurrency?: number;
+  /** Overrides suite verification settings for the shared validation pool. */
+  verificationConcurrency?: number;
   progress?: TestProgress | false;
 }): Promise<{ exitCode: number; results: Array<{ id: string; exitCode: number; skipped?: boolean }> }>;
 export function reportCoverage(config: TestConfig): Promise<null | {

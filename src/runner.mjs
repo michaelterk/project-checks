@@ -125,7 +125,7 @@ async function runTestsWithSignal(options, { retained, normalPhase, cacheScan, q
       const action = { id: 'framework-action', command: [...template.flatMap(argument => argument.includes('{file}')
         ? (options.files?.length ? files.map(id => argument.replaceAll('{file}', fileArgument(id))) : []) : [argument]), ...options.frameworkArgs] };
       return await runCachedUnits({
-        suite: `${config.suite}/action`, cache: false, resources: {}, admission, signal: config.signal, logger,
+        suite: `${config.suite}/action`, cache: false, scanConcurrency: config.scanConcurrency, verificationConcurrency: config.verificationConcurrency, resources: {}, admission, signal: config.signal, logger,
         progress: config.progress ? {
           files: () => config.progress.files(config.suite, 1),
           file: (_, ...args) => config.progress.file(config.suite, ...args),
@@ -148,6 +148,8 @@ async function runTestsWithSignal(options, { retained, normalPhase, cacheScan, q
       suite: options.suite ?? 'tests',
       units,
       workers: options.workers,
+      scanConcurrency: config.scanConcurrency,
+      verificationConcurrency: config.verificationConcurrency,
       resources: options.resources ?? {},
       cache: config.cache ?? true,
       signal: options.signal,

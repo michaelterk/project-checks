@@ -120,3 +120,79 @@ test('I/O telemetry measures stall fractions and tolerates unsupported pressure 
   now += 1000;
   assert.ok(Number.isNaN(sample().ioPressure));
 });
+
+test('configured scan startup also defines the adaptive floor and resets between runs', async t => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const telemetry = reading();
+  const queue = createScanQueue({ host, sample: () => telemetry });
+  const holds = Array.from({ length: 40 }, () => Promise.withResolvers());
+  const states = [];
+  let active = 0;
+  const done = Promise.all(queue.enqueue(holds.map(hold => async () => {
+    active++;
+    try { await hold.promise; } finally { active--; }
+  }), {}, 4, state => states.push(state)));
+  t.after(async () => { holds.forEach(hold => hold.resolve()); await done; });
+  await flush();
+  assert.equal(active, 4);
+  assert.deepEqual(states.at(-1), { total: 40, scanned: 0, active: 4 });
+  t.mock.timers.tick(1000);
+  await flush();
+  assert.equal(active, 12, 'growth keeps the existing eight-worker increment');
+  assert.equal(states.at(-1).active, 12);
+  telemetry.ioPressure = 0.2;
+  t.mock.timers.tick(1000);
+  holds.slice(0, 8).forEach(hold => hold.resolve());
+  await flush();
+  assert.equal(active, 4, 'pressure drains back to the configured floor');
+  assert.deepEqual(states.at(-1), { total: 40, scanned: 8, active: 4 });
+  holds.forEach(hold => hold.resolve());
+  await done;
+  assert.deepEqual(states.at(-1), { total: 40, scanned: 40, active: 0 });
+  const release = Promise.withResolvers();
+  const next = Promise.all(queue.enqueue(Array.from({ length: 8 }, () => async () => {
+    active++;
+    try { await release.promise; } finally { active--; }
+  }), {}, 2));
+  t.after(async () => { release.resolve(); await next; });
+  await flush();
+  assert.equal(active, 2, 'the next project uses its own startup value');
+  release.resolve();
+  await next;
+});
+
+test('concurrent scan batches share the smaller configured startup without interrupting work', async t => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const queue = createScanQueue({ host, sample: reading });
+  const releaseFirst = Promise.withResolvers(), releaseSecond = Promise.withResolvers();
+  let active = 0;
+  const jobs = release => Array.from({ length: 12 }, () => async () => {
+    active++;
+    try { await release.promise; } finally { active--; }
+  });
+  const first = Promise.all(queue.enqueue(jobs(releaseFirst), {}, 2));
+  const second = Promise.all(queue.enqueue(jobs(releaseSecond), {}, 6));
+  t.after(async () => { releaseFirst.resolve(); releaseSecond.resolve(); await Promise.all([first, second]); });
+  await flush();
+  assert.equal(active, 2);
+  releaseFirst.resolve();
+  await first;
+  await flush();
+  assert.equal(active, 6, 'the remaining batch gets its configured startup once the smaller batch drains');
+  releaseSecond.resolve();
+  await second;
+});
+
+test('a new batch with the same startup value preserves adaptive growth', async t => {
+  const p = await pool(t);
+  t.mock.timers.tick(1000);
+  await flush();
+  assert.equal(p.active(), 40);
+  const sibling = Promise.all(p.queue.enqueue([() => p.release.promise]));
+  await flush();
+  t.mock.timers.tick(1000);
+  await flush();
+  assert.equal(p.active(), 48, 'joining a default batch does not reset the learned scan limit');
+  p.release.resolve();
+  await Promise.all([p.settled, sibling]);
+});

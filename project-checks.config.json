@@ -5,6 +5,8 @@
     "."
   ],
   "cache": true,
+  "scanConcurrency": 32,
+  "verificationConcurrency": 32,
   "cacheDirectory": ".test-cache/project-checks",
   "resources": {
     "cpuPercent": 100,

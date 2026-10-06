@@ -2,11 +2,11 @@ import { createPermits } from './permits.mjs';
 import { createVerificationPool } from './verification-pool.mjs';
 
 // Command admission and terminal file completion have separate lifetimes.
-export function createFileQueue(plans, admission, signal, { workers = 1 } = {}) {
+export function createFileQueue(plans, admission, signal, { workers = 1, verificationConcurrency } = {}) {
   const dispatch = new AbortController();
   const dispatchSignal = AbortSignal.any([signal, dispatch.signal]);
   const commands = admission ? null : createPermits(workers, dispatchSignal);
-  const verification = createVerificationPool(admission?.capacity ?? workers, signal);
+  const verification = createVerificationPool(admission?.capacity ?? workers, signal, verificationConcurrency);
   const groups = new Map(plans.map(({ id, jobs }) => [id, {
     enabled: false, done: Promise.withResolvers(),
     remaining: jobs.length, active: 0, stopped: false,
