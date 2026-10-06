@@ -23,7 +23,7 @@ and install that archive in another project:
 npm pack
 
 # In your project (adjust the path)
-npm install --save-dev /path/to/project-checks/project-checks-0.5.0.tgz
+npm install --save-dev /path/to/project-checks/project-checks-0.5.2.tgz
 ```
 
 After a maintainer publishes it under this name, installation will be
@@ -93,6 +93,7 @@ Then add a script to your project's `package.json`:
 npm test
 npx project-checks --workers 2
 npx project-checks --no-cache
+npx project-checks --diagnostics
 npx project-checks --config config/checks.json
 npx project-checks --file test/example.test.mjs
 npx project-checks resources
@@ -492,6 +493,9 @@ scans use up to four hash workers within the input cap and existing CPU/memory
 budget, reserving a CPU for coordination. Workers close at the scan boundary;
 cancellation drains open file handles before thread termination.
 
+Setting `PROJECT_CHECKS_SCAN_PROFILE=1` emits a final `SCAN_PROFILE` JSON record
+from CLI `run` and `checks` invocations with detailed scan and verification metrics.
+
 The input, startup scan and passing-file verification settings live in the package's
 `project-checks.config.json`. A consuming project can override them in its own
 `project-checks.config.json` or an inherited suite configuration:
@@ -550,6 +554,21 @@ emits `TEST_DIAGNOSTIC` JSON records. Use `suiteStart`/`suiteEnd` for setup and
 suite transitions, `span` for application stages, and `observeAdmission` for the
 shared pool. Call `close(exitCode)` after cleanup. Observation does not drive
 scheduler ticks or patch its methods.
+
+For CLI `run` and `checks`, pass `--diagnostics` to emit these records once per
+second alongside normal progress. Each sample includes the admission limit,
+active workers, capacity, CPU budget, spare/pressure counters, CPU and memory
+pressure, and available RAM. Output uses stdout, so an existing log captures it.
+`runChecks` callers supply the observer in its second argument as
+`{ diagnostics }`; the caller owns closing it after the invocation settles.
+
+On Linux, `processCounts` records total OS processes in the runner's quota
+cgroup and its child cgroups; `runnable` counts process leaders in state `R`.
+Counts are best-effort snapshots while processes exit or move. Unsupported or
+inaccessible scopes report `null`, and unreadable process states make `runnable`
+unavailable. Final diagnostic summaries report sampled peaks and sample coverage;
+these are maxima of observations, not continuous peaks. With progress enabled,
+`PROCESS_SUMMARY` also prints these values as a plain line.
 
 ### Progress and final summary
 

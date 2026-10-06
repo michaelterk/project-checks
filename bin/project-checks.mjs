@@ -1,7 +1,8 @@
 #!/usr/bin/env node
-import { loadConfig, loadChecks, runChecks, reportCoverage, runTests, runWithCpuQuota, selectConcurrency } from '../src/index.mjs';
+import { createDiagnostics, loadConfig, loadChecks, runChecks, reportCoverage, runTests, runWithCpuQuota, selectConcurrency } from '../src/index.mjs';
 
 import { hasCpuQuota, quotaCpus } from '../src/cpu-quota.mjs';
+import { profileSummary } from '../src/scan-profile.mjs';
 
 const help = `Usage: project-checks [run|checks|coverage|resources|exec] [options]
 
@@ -9,6 +10,7 @@ const help = `Usage: project-checks [run|checks|coverage|resources|exec] [option
   --workers <n>    Cap resource-based concurrency
   --file <id>      Select a root-relative test file (repeatable); retain full inventory
   --no-cache       Run every test without reading or writing cached evidence
+  --diagnostics    Emit per-second resource and admission diagnostics (run/checks)
   --help          Show this help
 
   exec [--config <file>] -- <command> [args...]  Run a whole command under the CPU quota
@@ -17,6 +19,7 @@ Defaults: project-checks.config.{mjs,js,json}, test/**/*.test.{js,mjs,cjs}
 `;
 
 let controller;
+let diagnostics;
 const abort = () => controller.abort();
 try {
   const args = process.argv.slice(2);
@@ -28,12 +31,14 @@ try {
   let target;
   const overrides = {};
   let showHelp = false;
+  let showDiagnostics = false;
   while (args.length) {
     const option = args.shift();
     if (action === 'checks' && option === '--') { overrides.frameworkArgs = args.splice(0); break; }
     if (action === 'exec' && option === '--') { quotaCommand = args.splice(0); break; }
     if (option === '--help' || option === '-h') showHelp = true;
     else if (option === '--no-cache') overrides.cache = false;
+    else if (option === '--diagnostics') showDiagnostics = true;
     else if (option === '--test-only' || /^--test-(?:name|skip)-pattern=/.test(option)) (overrides.filters ??= []).push(option);
     else if (/^--test-(?:name|skip)-pattern$/.test(option)) { const value = args.shift(); if (!value) throw new Error(`Missing value for ${option}`); (overrides.filters ??= []).push(`${option}=${value}`); }
     else if (option === '--config' || option === '--workers' || option === '--file' || option === '--target') {
@@ -50,6 +55,7 @@ try {
   }
   if (showHelp) console.log(help);
   else {
+    if (showDiagnostics && !['run', 'checks'].includes(action)) throw new Error('--diagnostics requires run or checks');
     const explicit = new Set();
     const config = { ...await loadConfig(['checks', 'coverage'].includes(action) ? undefined : filename, { explicit }), ...overrides };
     if (action === 'coverage') {
@@ -68,7 +74,9 @@ try {
       controller = new AbortController();
       process.once('SIGINT', abort);
       process.once('SIGTERM', abort);
-      const result = action === 'checks' ? await runChecks(await loadChecks(filename ?? 'project-checks.project.json', { target, files: overrides.files, cache: overrides.cache, filters: overrides.filters, frameworkArgs: overrides.frameworkArgs }), { resources: config.resources, workers: overrides.workers, scanConcurrency: config.scanConcurrency, inputConcurrency: explicit.has('inputConcurrency') ? config.inputConcurrency : undefined, verificationConcurrency: config.verificationConcurrency, signal: controller.signal }) : await runTests({ ...config, signal: controller.signal });
+      const definitions = action === 'checks' ? await loadChecks(filename ?? 'project-checks.project.json', { target, files: overrides.files, cache: overrides.cache, filters: overrides.filters, frameworkArgs: overrides.frameworkArgs }) : undefined;
+      if (showDiagnostics) diagnostics = createDiagnostics({ suites: definitions?.filter(definition => definition.config !== undefined).map(definition => definition.id) });
+      const result = action === 'checks' ? await runChecks(definitions, { resources: config.resources, workers: overrides.workers, scanConcurrency: config.scanConcurrency, inputConcurrency: explicit.has('inputConcurrency') ? config.inputConcurrency : undefined, verificationConcurrency: config.verificationConcurrency, signal: controller.signal, diagnostics }) : await runTests({ ...config, signal: controller.signal, ...(diagnostics ? { diagnostics } : {}) });
       process.exitCode = result.exitCode;
     }
   }
@@ -76,6 +84,8 @@ try {
   console.error(`project-checks: ${error.message}`);
   process.exitCode = controller?.signal.aborted || error.name === 'AbortError' ? 130 : 2;
 } finally {
+  diagnostics?.close(process.exitCode ?? 2);
+  if (controller && process.env.PROJECT_CHECKS_SCAN_PROFILE) console.log('SCAN_PROFILE ' + JSON.stringify(profileSummary()));
   process.removeListener('SIGINT', abort);
   process.removeListener('SIGTERM', abort);
 }

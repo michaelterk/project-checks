@@ -85,6 +85,7 @@ async function runTestsWithSignal(options, { retained, normalPhase, cacheScan, q
   let inputs, artifacts, fixture;
   let before;
   const admission = options.admission ?? new Admission(options.resources ?? {}, files.length + 1, { signal: config.signal, workers: options.workers });
+  if (!options.admission) diagnostics?.observeAdmission?.(admission);
   let deferred = false;
   const close = async () => {
     try { await fixture?.close?.(); }

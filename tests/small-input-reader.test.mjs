@@ -61,6 +61,8 @@ test('short successful reads hash every byte and confirm EOF with bounded buffer
 
 for (const change of ['growth', 'shrink', 'same-size']) test(`bounded reads reject ${change} during hashing`, async t => {
   const root = await temporary(t), file = await put(root, 'source', 'first');
+  // Make the rewrite observable even within one filesystem clock tick.
+  if (change === 'same-size') await promises.utimes(file, new Date(0), new Date(0));
   const context = createSnapshotContext();
   t.after(() => context.close());
   let mutate = true, closed = 0;

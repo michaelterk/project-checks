@@ -98,6 +98,8 @@ test('worker failures retain filesystem code and path and a subsequent explicit 
 
 test('worker post-read proof rejects file races and parent evicts the failed digest', async t => {
   const root = await temporary(t), file = await put(root, 'source', 'first');
+  // Make the rewrite observable even within one filesystem clock tick.
+  await promises.utimes(file, new Date(0), new Date(0));
   const context = createSnapshotContext();
   t.after(() => context.close());
   context.beginScanGeneration({ hashWorkers: 1 });

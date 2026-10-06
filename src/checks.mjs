@@ -16,7 +16,8 @@ import defaultConfig from '../project-checks.config.json' with { type: 'json' };
 // Definitions describe ownership and ordering. Every command, fixture attempt,
 // retry and coverage gate uses the same invocation-owned admission pool.
 export async function runChecks(definitions, options = {}) {
-  keys(options, ['resources', 'workers', 'scanConcurrency', 'inputConcurrency', 'verificationConcurrency', 'signal', 'logger', 'progress'], 'check options');
+  keys(options, ['resources', 'workers', 'scanConcurrency', 'inputConcurrency', 'verificationConcurrency', 'signal', 'logger', 'progress', 'diagnostics'], 'check options');
+  if (options.diagnostics !== undefined) defineConfig({ diagnostics: options.diagnostics });
   if (options.scanConcurrency !== undefined) integer(options.scanConcurrency, 'scanConcurrency');
   if (options.inputConcurrency !== undefined) inputLimit(options.inputConcurrency);
   if (options.verificationConcurrency !== undefined) integer(options.verificationConcurrency, 'verificationConcurrency');
@@ -59,9 +60,11 @@ export async function runChecks(definitions, options = {}) {
     const controller = new AbortController();
     const signal = AbortSignal.any([processSignal, controller.signal]);
     const logger = options.logger === false ? null : options.logger ?? console;
-    const progress = options.progress ?? createProgress({ logger, suites: definitions.filter(definition => definition.config !== undefined).map(definition => definition.id) });
+    const diagnostics = options.diagnostics;
+    const progress = options.progress ?? diagnostics?.progress ?? createProgress({ logger, suites: definitions.filter(definition => definition.config !== undefined).map(definition => definition.id) });
     let exitCode = 2;
     const admission = new Admission(options.resources ?? {}, Number.MAX_SAFE_INTEGER, { signal, workers: options.workers });
+    diagnostics?.observeAdmission?.(admission);
     let snapshotContext;
     const pending = new Map(), completed = new Map(), launched = new Set(), suites = new Map();
     const retained = [];
@@ -93,7 +96,10 @@ export async function runChecks(definitions, options = {}) {
       signal.throwIfAborted();
       await definition.verify?.();
       await admission.acquire({ signal });
-      try { return { id: definition.id, exitCode: await runCommand(definition.command, { cwd: definition.cwd, env: definition.env, signal, logger }) }; }
+      try {
+        const execute = () => runCommand(definition.command, { cwd: definition.cwd, env: definition.env, signal, logger });
+        return { id: definition.id, exitCode: await (diagnostics ? diagnostics.span(definition.id, 'command', execute) : execute()) };
+      }
       finally { admission.release(); }
     }
     function runPrerequisite(id) {
@@ -187,7 +193,15 @@ export async function runChecks(definitions, options = {}) {
               files: (_, total) => progress.files(id, total),
               file: (_, ...args) => progress.file(id, ...args),
             } : false;
-            return { id, ...await runTests({ ...config, inputConcurrency: options.inputConcurrency ?? config.inputConcurrency, signal, admission, snapshotContext, logger: logger ?? false, progress: suiteProgress }, {
+            const suiteDiagnostics = diagnostics ? {
+              ...diagnostics,
+              files: (_, total) => diagnostics.files(id, total),
+              file: (_, ...args) => diagnostics.file(id, ...args),
+              span: (_, ...args) => diagnostics.span(id, ...args),
+              event: (event, fields) => diagnostics.event(event, { ...fields, suite: id }),
+            } : config.diagnostics;
+            diagnostics?.suiteStart?.(id);
+            return { id, ...await runTests({ ...config, diagnostics: suiteDiagnostics, inputConcurrency: options.inputConcurrency ?? config.inputConcurrency, signal, admission, snapshotContext, logger: logger ?? false, progress: suiteProgress }, {
               retained, normalPhase: phases.get(id),
               executeFiles: () => fileQueue.run(id),
               queueScan: (jobs, scanConcurrency) => { queued.resolve({ jobs, scanConcurrency }); return scanned.promise; },
@@ -199,7 +213,7 @@ export async function runChecks(definitions, options = {}) {
             ready.reject(error);
             if (!executing) controller.abort(error);
             throw error;
-          }
+          } finally { diagnostics?.suiteEnd?.(id); }
         })());
       }
       const inventories = await profileStage('collect-inputs', () => Promise.all([...suites.values()].map(suite => suite.inventory)));
@@ -268,7 +282,7 @@ export async function runChecks(definitions, options = {}) {
         const failure = closed.find(result => result.status === 'rejected');
         if (failure) throw failure.reason;
       } catch (error) { exitCode = 2; throw error; }
-      finally { if (options.progress === undefined) progress.close(exitCode); }
+      finally { if (options.progress === undefined && diagnostics?.progress === undefined) progress && progress.close(exitCode); }
     }
   });
 }

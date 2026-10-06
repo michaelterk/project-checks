@@ -2,6 +2,7 @@ import { cpus } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { resourceSampler } from './admission.mjs';
 import { createProgress } from './progress.mjs';
+import { createProcessSampler } from './process-sampler.mjs';
 
 export function createDiagnostics(options = {}) {
   const logger = options.logger === false ? null : (options.logger ?? console);
@@ -77,6 +78,7 @@ export function createDiagnostics(options = {}) {
 
   function startDiagnostics() {
     const sample = options.sample ?? resourceSampler();
+    const sampleProcesses = options.processSample ?? createProcessSampler();
     const cpuCount = options.cpuCount ?? cpus().length;
     const started = performance.now();
     let previous = started;
@@ -86,6 +88,7 @@ export function createDiagnostics(options = {}) {
       const seconds = (now - previous) / 1000;
       previous = now;
       const reading = sample();
+      const processCounts = sampleProcesses();
       const cpuPercent = (100 * reading.busyCpus) / cpuCount;
       const phase =
         [...suites.keys()].sort().join('+') ||
@@ -97,8 +100,16 @@ export function createDiagnostics(options = {}) {
           observedSeconds: 0,
           secondsAtLeast80: 0,
           secondsBelow80: 0,
+          processSamples: 0,
+          peakProcesses: null,
+          peakRunnableProcesses: null,
         };
         sum.seconds += seconds;
+        if (processCounts !== null) {
+          sum.processSamples++;
+          sum.peakProcesses = Math.max(sum.peakProcesses ?? 0, processCounts.total);
+          if (processCounts.runnable !== null) sum.peakRunnableProcesses = Math.max(sum.peakRunnableProcesses ?? 0, processCounts.runnable);
+        }
         if (Number.isFinite(cpuPercent)) {
           sum.observedSeconds += seconds;
           sum.cpuSeconds += cpuPercent * seconds;
@@ -112,6 +123,7 @@ export function createDiagnostics(options = {}) {
         cpuPressure: reading.pressure,
         memoryPressure: reading.memoryPressure,
         availableMemoryMiB: reading.availableMemoryMiB,
+        processCounts,
         stages: [...stages.values()],
         suites: Object.fromEntries([...suites].map(([name, value]) => [name, value.counts])),
         runningFiles: [...suites].flatMap(([suite, value]) => [...value.running].map((file) => ({ suite, file }))),
@@ -136,8 +148,13 @@ export function createDiagnostics(options = {}) {
           meanCpuPercent: sum.observedSeconds ? sum.cpuSeconds / sum.observedSeconds : null,
           secondsAtLeast80: sum.secondsAtLeast80,
           secondsBelow80: sum.secondsBelow80,
+          processSamples: sum.processSamples,
+          peakProcesses: sum.peakProcesses,
+          peakRunnableProcesses: sum.peakRunnableProcesses,
         });
       }
+      const whole = summaries.get('whole-run');
+      if (progress) logger?.log(`\nPROCESS_SUMMARY: Peak OS processes: ${whole.peakProcesses ?? 'unavailable'} | Peak runnable processes: ${whole.peakRunnableProcesses ?? 'unavailable'} | Samples: ${whole.processSamples}`);
       diagnostic('run-end', { exitCode, seconds: (performance.now() - started) / 1000 });
       progress && progress.close(exitCode);
     };

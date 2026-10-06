@@ -278,6 +278,8 @@ export function loadChecks(filename: string, options?: {
   target?: string | string[]; files?: string[]; filters?: string[]; cache?: boolean; prefix?: string; frameworkArgs?: string[];
 }): Promise<CheckDefinition[]>;
 export function runChecks(definitions: CheckDefinition[], options?: {
+  /** Caller-owned invocation observer; close it after runChecks settles. */
+  diagnostics?: Diagnostics;
   resources?: ResourcePolicy; workers?: number; signal?: AbortSignal; logger?: Logger | false;
   /** Overrides suite scan settings for the shared global scan. */
   scanConcurrency?: number;

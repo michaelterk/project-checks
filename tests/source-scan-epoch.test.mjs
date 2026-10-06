@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { rm, symlink, writeFile } from 'node:fs/promises';
+import { rm, symlink, utimes, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import test from 'node:test';
 import { createSnapshotContext, runTests, runChecks } from '../src/index.mjs';
@@ -9,6 +9,7 @@ import { put, temporary } from './helpers.mjs';
 
 test('scan generation shares source promises including missing paths and ends with fresh checks', async t => {
   const root = await temporary(t), source = await put(root, 'source', 'first'), missing = join(root, 'missing');
+  await utimes(source, new Date(0), new Date(0));
   const context = createSnapshotContext();
   t.after(() => context.close());
   context.beginScanGeneration();
@@ -28,6 +29,8 @@ test('scan generation shares source promises including missing paths and ends wi
 
 for (const kind of ['write', 'missing', 'symlink']) test(`scan freshness gate rejects accepted source ${kind} changes`, async t => {
   const root = await temporary(t), source = await put(root, 'source', 'first');
+  // Make the rewrite observable even within one filesystem clock tick.
+  if (kind === 'write') await utimes(source, new Date(0), new Date(0));
   const path = kind === 'missing' ? join(root, 'missing') : kind === 'symlink' ? join(root, 'alias') : source;
   if (kind === 'symlink') await symlink(source, path);
   const context = createSnapshotContext();
@@ -46,6 +49,7 @@ for (const kind of ['write', 'missing', 'symlink']) test(`scan freshness gate re
 
 test('unaccepted source attempts do not poison the acceptance gate and rejected reads can retry', async t => {
   const root = await temporary(t), source = await put(root, 'source', 'first');
+  await utimes(source, new Date(0), new Date(0));
   const context = createSnapshotContext();
   t.after(() => context.close());
   let fail = true;
