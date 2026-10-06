@@ -1,12 +1,11 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { chmod, rename, rm, symlink, utimes, writeFile } from 'node:fs/promises';
-import { syncBuiltinESMExports } from 'node:module';
 import { join, matchesGlob, relative, resolve } from 'node:path';
-import { Readable } from 'node:stream';
 import test from 'node:test';
 import { contentFingerprint, createSnapshot, createSnapshotContext } from '../src/inputs.mjs';
 import { digest } from '../src/util.mjs';
+import { interceptReads } from './input-read-helpers.mjs';
 import { put, temporary } from './helpers.mjs';
 
 async function fixture(t) {
@@ -105,21 +104,19 @@ test('concurrent factories share digest reads, recheck metadata and retry failed
   const context = createSnapshotContext();
   const first = createSnapshot(config, context);
   const second = createSnapshot(config, context);
-  const original = fs.createReadStream;
   const reads = new Map();
   let active = 0;
   let peak = 0;
   let mutate;
-  fs.createReadStream = function (file, ...args) {
+  interceptReads(t, async (file, read) => {
     reads.set(file, (reads.get(file) ?? 0) + 1);
     peak = Math.max(peak, ++active);
-    const stream = original(file, ...args);
-    stream.once('close', () => active--);
-    if (file === mutate) stream.once('data', () => { fs.appendFileSync(file, 'mutation'); mutate = undefined; });
-    return stream;
-  };
-  syncBuiltinESMExports();
-  t.after(() => { fs.createReadStream = original; syncBuiltinESMExports(); });
+    try {
+      const result = await read();
+      if (file === mutate) { fs.appendFileSync(file, 'mutation'); mutate = undefined; }
+      return result;
+    } finally { active--; }
+  });
   const [left, right] = await Promise.all([first(), second()]);
   assert.deepEqual(left, right);
   assert.ok(peak <= 8 && peak > 1);
@@ -141,19 +138,18 @@ test('a failed older hash cannot overwrite or delete a newer metadata generation
   const file = await put(config.root, 'src/input', 'old contents');
   const context = createSnapshotContext();
   const snapshot = createSnapshot(config, context);
-  const original = fs.createReadStream;
   let release;
   let reached;
   const blocked = new Promise(resolve => { reached = resolve; });
   const finish = new Promise(resolve => { release = resolve; });
   let reads = 0;
-  fs.createReadStream = function (path, ...args) {
-    if (path !== file || ++reads !== 1) return original(path, ...args);
-    const contents = fs.readFileSync(path);
-    return Readable.from((async function* () { yield contents; reached(); await finish; })());
-  };
-  syncBuiltinESMExports();
-  t.after(() => { fs.createReadStream = original; syncBuiltinESMExports(); });
+  interceptReads(t, async (path, read) => {
+    if (path !== file || ++reads !== 1) return read();
+    const result = await read();
+    reached();
+    await finish;
+    return result;
+  });
   const old = assert.rejects(snapshot(), /Input changed while hashing/);
   await blocked;
   await writeFile(file, 'new contents');

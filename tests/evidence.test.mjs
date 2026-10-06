@@ -386,3 +386,53 @@ test('snapshot factory rejects invalid selection and drains on cancellation', as
   await assert.rejects(inputs.snapshot(), /snapshot cancelled/);
   await inputs.close();
 });
+
+test('artifact proof runs before restoration admission and rejects replacement during the wait', async t => {
+  const f = await fixture(t);
+  await runCachedUnits(f.options);
+  const pool = new Admission({}, 1, { workers: 1, host: { cpus: 8, memoryMiB: 8192 },
+    sample: () => ({ busyCpus: 0, pressure: 0, memoryPressure: 0, availableMemoryMiB: 8192 }) });
+  t.after(() => pool.close());
+  await pool.acquire();
+  const waiting = deferred(), acquire = pool.acquire.bind(pool);
+  pool.acquire = options => { waiting.resolve(); return acquire(options); };
+  let restored = false, executed = false;
+  const running = runCachedUnits({ ...f.options, admission: pool,
+    execute: () => { executed = true; return 0; },
+    restoreEvidence: async () => { restored = true; assert.equal(pool.active, 1); return true; },
+  });
+  const rejected = assert.rejects(running, /Artifacts changed during restoration/);
+  await waiting.promise; // The successful first proof now precedes this wait.
+  assert.equal(restored, false);
+  await writeFile(f.declaration.files[0], 'replacement while waiting');
+  pool.release();
+  await rejected;
+  assert.equal(restored, true);
+  assert.equal(executed, false);
+  assert.equal(pool.active, 0);
+  assert.deepEqual(await f.records(), []);
+});
+
+test('abort while waiting after artifact proof preserves another admission owner and removes evidence', async t => {
+  const f = await fixture(t);
+  await runCachedUnits(f.options);
+  const controller = new AbortController(), reason = new Error('cancel before restoration admission');
+  const pool = new Admission({}, 1, { workers: 1, host: { cpus: 8, memoryMiB: 8192 },
+    sample: () => ({ busyCpus: 0, pressure: 0, memoryPressure: 0, availableMemoryMiB: 8192 }) });
+  t.after(() => pool.close());
+  await pool.acquire();
+  const waiting = deferred(), acquire = pool.acquire.bind(pool);
+  pool.acquire = options => { waiting.resolve(); return acquire(options); };
+  const running = runCachedUnits({ ...f.options, admission: pool, signal: controller.signal,
+    restoreEvidence: () => { throw new Error('must not restore without admission'); },
+    execute: () => { throw new Error('must not execute after abort'); },
+  });
+  const rejected = assert.rejects(running, error => error === reason);
+  await waiting.promise;
+  controller.abort(reason);
+  await rejected;
+  assert.equal(pool.active, 1, 'unacquired cleanup cannot release the unrelated owner');
+  pool.release();
+  assert.equal(pool.active, 0);
+  assert.deepEqual(await f.records(), []);
+});

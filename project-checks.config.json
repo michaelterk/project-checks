@@ -6,6 +6,7 @@
   ],
   "cache": true,
   "scanConcurrency": 32,
+  "inputConcurrency": 8,
   "verificationConcurrency": 32,
   "cacheDirectory": ".test-cache/project-checks",
   "resources": {

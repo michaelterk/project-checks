@@ -1,12 +1,14 @@
 import { withProcessSignal } from './cancellation.mjs';
+import { profileJsonRead, profileScanUnit, profileStage } from './scan-profile.mjs';
 import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { isAbsolute, join, resolve } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
-import { command, digest, integer, keys, object, text } from './util.mjs';
+import { command, digest, inputLimit, integer, keys, object, text } from './util.mjs';
 import { Admission } from './admission.mjs';
 import { createSnapshotContext } from './inputs.mjs';
 import { withProgress } from './progress.mjs';
+import { createPermits } from './permits.mjs';
 import { createFileQueue } from './file-queue.mjs';
 import { verificationConcurrency as defaultVerificationConcurrency } from './verification-pool.mjs';
 
@@ -16,7 +18,7 @@ export { scanConcurrency } from './scan-queue.mjs';
 const scanQueue = createScanQueue();
 export async function scanCacheJobs(operations, resources, scanConcurrency = defaultScanConcurrency, { logger = null, suite = 'checks' } = {}) {
   let latest;
-  const complete = Promise.allSettled(scanQueue.enqueue(operations, resources, scanConcurrency, logger ? state => { latest = state; } : undefined));
+  const complete = Promise.allSettled(scanQueue.enqueue(operations.map(profileScanUnit), resources, scanConcurrency, logger ? state => { latest = state; } : undefined));
   const report = () => {
     if (latest) logger.log(`CACHE_SCAN_PROGRESS: ${suite} | ${latest.scanned} out of ${latest.total} scanned | Workers: ${latest.active}`);
   };
@@ -42,13 +44,14 @@ export function cacheKey(snapshot, unitId) {
   return digest(JSON.stringify([snapshot.common, snapshot.units[unitId]]));
 }
 
-export async function runCachedUnits(options, { queueScan, cacheScan, prepareExecution, executeFiles } = {}) {
-  return withProgress(options, progress => withProcessSignal(options.signal, signal => runUnits({ ...options, progress, signal }, { queueScan, cacheScan, prepareExecution, executeFiles })));
+export async function runCachedUnits(options, { queueScan, cacheScan, prepareExecution, executeFiles, artifactContext, initialSnapshot, orderFiles, afterScan } = {}) {
+  return withProgress(options, progress => withProcessSignal(options.signal, signal => runUnits({ ...options, progress, signal }, { queueScan, cacheScan, prepareExecution, executeFiles, artifactContext, initialSnapshot, orderFiles, afterScan })));
 }
 
-async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, workers, scanConcurrency = defaultScanConcurrency, verificationConcurrency = defaultVerificationConcurrency, resources, execute, cache = true, signal, logger = console, admission: sharedAdmission, retryTimeouts = false, restoreEvidence, saveEvidence, diagnostics, normalPhase, progress }, { queueScan, cacheScan, prepareExecution, executeFiles }) {
+async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, workers, scanConcurrency = defaultScanConcurrency, inputConcurrency, verificationConcurrency = defaultVerificationConcurrency, resources, execute, cache = true, signal, logger = console, admission: sharedAdmission, retryTimeouts = false, restoreEvidence, saveEvidence, diagnostics, normalPhase, progress }, { queueScan, cacheScan, prepareExecution, executeFiles, artifactContext, initialSnapshot, orderFiles, afterScan }) {
   if (workers !== undefined) integer(workers, 'workers');
   integer(scanConcurrency, 'scanConcurrency');
+  if (inputConcurrency !== undefined) inputLimit(inputConcurrency);
   integer(verificationConcurrency, 'verificationConcurrency');
   if (typeof retryTimeouts !== 'boolean') throw new TypeError('retryTimeouts must be a boolean');
   text(suite, 'suite');
@@ -74,12 +77,12 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
   };
   signal?.throwIfAborted();
   progress && progress.files(suite, units.length);
-  const before = await takeSnapshot();
-  if (!isDeepStrictEqual(Object.keys(before.units).sort(), ids)) throw new Error('Current test-unit discovery changed before execution');
+  const before = initialSnapshot ? initialSnapshot.value : await takeSnapshot();
+  if (!isDeepStrictEqual(initialSnapshot ? [...initialSnapshot.files].sort() : Object.keys(before.units).sort(), ids)) throw new Error('Current test-unit discovery changed before execution');
   if (cache) await mkdir(cacheDirectory, { recursive: true });
   const results = new Array(units.length);
   const admission = sharedAdmission ?? (resources !== undefined ? new Admission(resources, units.length, { signal, workers }) : null);
-  const artifacts = saveEvidence ? createSnapshotContext({ signal }) : null;
+  const artifacts = saveEvidence ? artifactContext ?? createSnapshotContext({ signal, inputConcurrency }) : null;
   async function bindEvidence(value) {
     keys(value, ['files', 'metadata'], 'evidence');
     if (!Array.isArray(value.files) || !value.files.length) throw new TypeError('evidence.files must be a nonempty array of absolute regular-file paths');
@@ -96,6 +99,7 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
     return { ...plain, files, identities };
   }
   workers = admission?.capacity ?? workers ?? 1;
+  const restorationPermits = !admission && restoreEvidence ? createPermits(Math.min(scanConcurrency, workers), signal) : null;
   let fatal;
   let stopped = false;
   let inputsChanged = false;
@@ -105,13 +109,13 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
   const check = () => checking ??= takeSnapshot().finally(() => { checking = undefined; });
   const plan = units.map(unit => ({
     filename: cache ? join(cacheDirectory, cacheRecordName(suite, unit.id)) : undefined,
-    expected: cacheKey(before, unit.id), cached: false,
+    expected: initialSnapshot ? undefined : cacheKey(before, unit.id), cached: false,
   }));
   async function scanUnit(index, read = filename => readFile(filename, 'utf8')) {
     signal?.throwIfAborted();
     const entry = plan[index];
     let cached;
-    try { cached = JSON.parse(await read(entry.filename, signal)); }
+    try { cached = await profileJsonRead(() => read(entry.filename, signal), { file: units[index].id }); }
     catch (error) { if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error; }
     signal?.throwIfAborted();
     entry.cached = cached?.key === entry.expected && cached?.passed === true;
@@ -123,46 +127,42 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
     if (!entry.cached) return;
     const unit = units[index];
     entry.cached = false;
-    await admission?.acquire({ signal });
+    let releaseRestoration, admitted = false;
     try {
       signal?.throwIfAborted();
       if (stopped) return;
+      let verified;
       try {
-        let verified;
-        try {
-          const { identities, ...declaration } = entry.evidence ?? {};
-          const bound = await bindEvidence(declaration);
-          if (isDeepStrictEqual(bound.identities, identities)) verified = declaration;
-        } catch { signal?.throwIfAborted(); }
-        const restored = verified ? await restoreEvidence(unit, verified) : false;
+        const { identities, ...declaration } = entry.evidence ?? {};
+        // Pure artifact binding uses the input queue; command admission belongs
+        // to restoration, which may start coverage-provider subprocesses.
+        const bound = await profileStage('artifact-check-before', () => bindEvidence(declaration), { suite, file: unit.id });
+        if (isDeepStrictEqual(bound.identities, identities)) verified = declaration;
+      } catch { signal?.throwIfAborted(); }
+      if (verified) {
+        releaseRestoration = await profileStage('restoration-admission', () => restorationPermits ? restorationPermits.acquire() : admission?.acquire({ signal }), { suite, file: unit.id });
+        admitted = Boolean(admission);
+        signal?.throwIfAborted();
+        if (stopped) return;
+        const restored = await profileStage('coverage-restoration', () => restoreEvidence(unit, verified), { suite, file: unit.id });
         if (typeof restored !== 'boolean') throw new TypeError('restoreEvidence must return a boolean');
         signal?.throwIfAborted();
-        if (restored && !isDeepStrictEqual((await bindEvidence(verified)).identities, entry.evidence.identities)) {
+        if (restored && !isDeepStrictEqual((await profileStage('artifact-check-after', () => bindEvidence(verified), { suite, file: unit.id })).identities, entry.evidence.identities)) {
           throw new Error(`Artifacts changed during restoration of ${suite}/${unit.id}; suite has not passed.`);
         }
         entry.cached = restored;
-      } catch (error) {
-        await rm(entry.filename, { force: true });
-        throw error;
       }
       if (!entry.cached) await rm(entry.filename, { force: true });
+    } catch (error) {
+      await rm(entry.filename, { force: true });
+      throw error;
     } finally {
       delete entry.evidence;
-      admission?.release();
+      releaseRestoration?.();
+      if (admitted) admission.release();
     }
   }
-  async function scan(operation, limit = scanConcurrency) {
-    let next = 0;
-    await Promise.all(Array.from({ length: Math.min(limit, units.length) }, async () => {
-      try {
-        while (!stopped && next < units.length) {
-          signal?.throwIfAborted();
-          await operation(next++);
-        }
-      } catch (error) { if (!stopped) fatal = error; stopped = true; if (!sharedAdmission) admission?.close(); }
-    }));
-    if (stopped) throw fatal;
-  }
+
   async function runUnit(index, retry = false, originalFailure = 0, admitted = false, scheduling) {
     const unit = units[index];
     const { filename, expected } = plan[index];
@@ -237,27 +237,36 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
   const runnable = [];
   try {
     const started = performance.now();
-    if (queueScan) {
-      const prepare = () => queueScan(units.map((_, index) => async () => {
+    const jobs = units.map((unit, index) => Object.assign(async () => {
+      if (stopped) throw fatal;
+      let stage = 'input preparation';
+      try {
         signal?.throwIfAborted();
+        if (initialSnapshot) {
+          await initialSnapshot.unit(unit.id);
+          plan[index].expected = cacheKey(before, unit.id);
+        }
         if (!cache) return;
-        await scanUnit(index, filename => readFile(filename, 'utf8'));
-        if (restoreEvidence) await restoreUnit(index);
-      }), scanConcurrency);
-      await (diagnostics ? diagnostics.span(suite, 'cache-scan', prepare) : prepare());
-    } else if (cache) {
-      if (!cacheScan) logger?.log(`CACHE_SCAN: ${suite} | Scanning ${units.length} test files | Concurrency: ${scanConcurrency}`);
-      const prepare = async () => {
-        await scanCacheJobs(units.map((_, index) => async () => {
-          if (stopped) throw fatal;
-          try { await scanUnit(index); }
-          catch (error) { if (!stopped) fatal = error; stopped = true; throw error; }
-        }), resources, scanConcurrency, { logger: progress === false ? null : logger, suite });
-        if (stopped) throw fatal;
-        if (restoreEvidence) await scan(restoreUnit, Math.min(scanConcurrency, workers));
-      };
+        stage = 'cache comparison';
+        await scanUnit(index);
+        if (restoreEvidence) {
+          stage = 'evidence restoration';
+          await restoreUnit(index);
+        }
+      } catch (error) {
+        if (!stopped) fatal = signal?.aborted ? signal.reason
+          : new Error(`${suite}/${unit.id}: ${stage}: ${error.message}`, { cause: error });
+        stopped = true;
+        throw fatal;
+      }
+    }, { scanIdentity: { suite, file: unit.id } }));
+    if (queueScan || cache || initialSnapshot) {
+      if (!queueScan && !cacheScan) logger?.log(`CACHE_SCAN: ${suite} | Scanning ${units.length} test files | Concurrency: ${scanConcurrency}`);
+      const prepare = () => queueScan ? queueScan(jobs, scanConcurrency)
+        : scanCacheJobs(jobs, resources, scanConcurrency, { logger: progress === false ? null : logger, suite });
       await (diagnostics ? diagnostics.span(suite, 'cache-scan', prepare) : prepare());
     }
+    await afterScan?.();
     signal?.throwIfAborted();
     for (let index = 0; index < units.length; index++) {
       const { id } = units[index];
@@ -270,6 +279,7 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
       diagnostics?.file(suite, id, 'cache-hit');
       progress && progress.file(suite, id, 'cache-hit');
     }
+    if (orderFiles) runnable.sort((a, b) => orderFiles(units[a].id, units[b].id));
     if (cacheScan) {
       await cacheScan({
         total: units.length, cached: units.length - runnable.length,
@@ -299,7 +309,8 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
   }
   finally {
     for (const index of runnable) if (!startedFiles.has(index)) progress && progress.file(suite, units[index].id, 'file-cancelled');
-    await artifacts?.close();
+    restorationPermits?.close();
+    if (!artifactContext) await artifacts?.close();
     if (!sharedAdmission) admission?.close();
   }
   if (stopped) throw fatal;

@@ -2,11 +2,11 @@ import { validateCoverage } from './coverage.mjs';
 import { readFile, stat } from 'node:fs/promises';
 import { dirname, isAbsolute, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { command, integer, keys, text } from './util.mjs';
+import { command, inputLimit, integer, keys, text } from './util.mjs';
 import { selectConcurrency } from './resources.mjs';
 import defaultConfig from '../project-checks.config.json' with { type: 'json' };
 
-const options = ['extends', 'root', 'testDirectory', 'pattern', 'files', 'command', 'inputs', 'testInputs', 'excludeTestsFromInputs', 'ignore', 'directoryIgnore', 'workers', 'scanConcurrency', 'verificationConcurrency', 'resources', 'cache', 'cacheDirectory', 'suite', 'env', 'testFixtureInputs', 'signal', 'logger', 'stdio', 'retryTimeouts', 'retryTimeoutMs', 'timeoutMs', 'admission', 'snapshotContext', 'diagnostics', 'progress', 'durationHints', 'initialDurations', 'select', 'setup', 'filters', 'engine', 'coverage', 'frameworkArgs', 'normalizeNpmEnvironment'];
+const options = ['extends', 'root', 'testDirectory', 'pattern', 'files', 'command', 'inputs', 'testInputs', 'excludeTestsFromInputs', 'ignore', 'directoryIgnore', 'workers', 'scanConcurrency', 'inputConcurrency', 'verificationConcurrency', 'resources', 'cache', 'cacheDirectory', 'suite', 'env', 'testFixtureInputs', 'signal', 'logger', 'stdio', 'retryTimeouts', 'retryTimeoutMs', 'timeoutMs', 'admission', 'snapshotContext', 'diagnostics', 'progress', 'durationHints', 'initialDurations', 'select', 'setup', 'filters', 'engine', 'coverage', 'frameworkArgs', 'normalizeNpmEnvironment'];
 export const defaultDirectoryIgnore = defaultConfig.directoryIgnore;
 export const defaultIgnore = defaultConfig.ignore;
 
@@ -51,6 +51,7 @@ export function defineConfig(config) {
   }
   if (config.workers !== undefined) integer(config.workers, 'workers');
   if (config.scanConcurrency !== undefined) integer(config.scanConcurrency, 'scanConcurrency');
+  if (config.inputConcurrency !== undefined) inputLimit(config.inputConcurrency);
   if (config.verificationConcurrency !== undefined) integer(config.verificationConcurrency, 'verificationConcurrency');
   if (config.resources !== undefined) selectConcurrency(config.resources, { cpus: 1, memoryMiB: 1 });
   if (config.cache !== undefined && typeof config.cache !== 'boolean') throw new TypeError('cache must be a boolean');
@@ -94,7 +95,7 @@ export function defineConfig(config) {
   return config;
 }
 
-export async function loadConfig(filename, { cwd = process.cwd(), ancestors = [], sources } = {}) {
+export async function loadConfig(filename, { cwd = process.cwd(), ancestors = [], sources, explicit } = {}) {
   let file;
   if (filename !== undefined) file = resolve(cwd, text(filename, 'config filename'));
   else {
@@ -108,9 +109,14 @@ export async function loadConfig(filename, { cwd = process.cwd(), ancestors = []
   const source = await readFile(file, 'utf8');
   sources?.set(file, source);
   const value = file.endsWith('.json') ? JSON.parse(source) : (await import(pathToFileURL(file).href)).default;
-  defineConfig(value);
+  try { defineConfig(value); }
+  catch (error) {
+    if (error.message.includes('inputConcurrency')) throw new TypeError(`${file}: ${error.message}`, { cause: error });
+    throw error;
+  }
+  for (const [key, setting] of Object.entries(value)) if (setting !== undefined) explicit?.add(key);
   if (ancestors.includes(file)) throw new Error(`Config extends cycle: ${file}`);
-  const inherited = value.extends ? await loadConfig(resolve(dirname(file), value.extends), { ancestors: [...ancestors, file], sources }) : structuredClone(defaultConfig);
+  const inherited = value.extends ? await loadConfig(resolve(dirname(file), value.extends), { ancestors: [...ancestors, file], sources, explicit }) : structuredClone(defaultConfig);
   const overrides = Object.fromEntries(Object.entries(value).filter(([, setting]) => setting !== undefined));
   const resources = Object.fromEntries(Object.entries(value.resources ?? {}).filter(([, setting]) => setting !== undefined));
   return {

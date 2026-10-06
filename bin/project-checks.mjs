@@ -50,7 +50,8 @@ try {
   }
   if (showHelp) console.log(help);
   else {
-    const config = { ...await loadConfig(['checks', 'coverage'].includes(action) ? undefined : filename), ...overrides };
+    const explicit = new Set();
+    const config = { ...await loadConfig(['checks', 'coverage'].includes(action) ? undefined : filename, { explicit }), ...overrides };
     if (action === 'coverage') {
       for (const definition of await loadChecks(filename ?? 'project-checks.project.json', { target })) {
         if (!definition.config) continue;
@@ -67,7 +68,7 @@ try {
       controller = new AbortController();
       process.once('SIGINT', abort);
       process.once('SIGTERM', abort);
-      const result = action === 'checks' ? await runChecks(await loadChecks(filename ?? 'project-checks.project.json', { target, files: overrides.files, cache: overrides.cache, filters: overrides.filters, frameworkArgs: overrides.frameworkArgs }), { resources: config.resources, workers: overrides.workers, scanConcurrency: config.scanConcurrency, verificationConcurrency: config.verificationConcurrency, signal: controller.signal }) : await runTests({ ...config, signal: controller.signal });
+      const result = action === 'checks' ? await runChecks(await loadChecks(filename ?? 'project-checks.project.json', { target, files: overrides.files, cache: overrides.cache, filters: overrides.filters, frameworkArgs: overrides.frameworkArgs }), { resources: config.resources, workers: overrides.workers, scanConcurrency: config.scanConcurrency, inputConcurrency: explicit.has('inputConcurrency') ? config.inputConcurrency : undefined, verificationConcurrency: config.verificationConcurrency, signal: controller.signal }) : await runTests({ ...config, signal: controller.signal });
       process.exitCode = result.exitCode;
     }
   }

@@ -1,3 +1,4 @@
+import { scanHashWorkers } from './input-hash-pool.mjs';
 import { isDeepStrictEqual } from 'node:util';
 import { createCoverage } from './coverage.mjs';
 import { Admission } from './admission.mjs';
@@ -32,21 +33,23 @@ async function normalizeConfig(options) {
 }
 
 function fileSnapshot(config) {
-  const context = config.snapshotContext ?? createSnapshotContext({ signal: config.signal });
+  const context = config.snapshotContext ?? createSnapshotContext({ signal: config.signal, inputConcurrency: config.inputConcurrency });
   const snapshot = createSnapshot(config, context);
   let closed = false;
   const pending = new Set();
+  const track = operation => {
+    if (closed) return Promise.reject(new Error('File snapshot closed'));
+    const result = Promise.resolve().then(operation);
+    pending.add(result);
+    result.then(() => pending.delete(result), () => pending.delete(result));
+    return result;
+  };
   return {
-    snapshot: () => {
-      if (closed) return Promise.reject(new Error('File snapshot closed'));
-      const operation = snapshot();
-      pending.add(operation);
-      operation.then(
-        () => pending.delete(operation),
-        () => pending.delete(operation),
-      );
-      return operation;
-    },
+    prepare: inventory => track(async () => {
+      const prepared = await snapshot.prepare(inventory);
+      return { ...prepared, unit: id => track(() => prepared.unit(id)) };
+    }),
+    snapshot: () => track(snapshot),
     close: async () => {
       closed = true;
       await Promise.allSettled(pending);
@@ -70,14 +73,14 @@ async function runTestsWithSignal(options, { retained, normalPhase, cacheScan, q
   const diagnostics = config.diagnostics;
   const span = (stage, operation, fields) =>
     diagnostics ? diagnostics.span(config.suite, stage, operation, fields) : operation();
-  const inventory = await span('test-discovery', () => discoverTests(config));
+  const inventory = await span('test-discovery', () => options.snapshotContext?.discoverInventory(config) ?? discoverTests(config));
   const selection = selectTests({ ...config, files: undefined }, inventory);
   const files = selectTests({ ...config, files: options.files ?? selection }, inventory);
   if (files.some(id => !selection.includes(id))) throw new Error('File is outside the selected suite');
   if (!files.length) throw new Error(`No test files found in ${config.testDirectory}`);
   diagnostics?.files(config.suite, files.length);
   config.progress && config.progress.files(config.suite, options.engine === 'playwright' && options.frameworkArgs?.length ? 1 : files.length);
-  const context = config.snapshotContext ?? createSnapshotContext({ signal: config.signal });
+  const context = config.snapshotContext ?? createSnapshotContext({ signal: config.signal, inputConcurrency: config.inputConcurrency });
   config.snapshotContext = context;
   let inputs, artifacts, fixture;
   let before;
@@ -88,7 +91,7 @@ async function runTestsWithSignal(options, { retained, normalPhase, cacheScan, q
     finally { try { await artifacts?.close(); } finally { await inputs?.close(); } }
   };
   try {
-    const hints = await span('duration-hints', () => createDurationHints(config, files, context));
+    const hints = await span('duration-hints', () => createDurationHints(config));
     const env = commandEnvironment(options.env);
     if (config.normalizeNpmEnvironment) {
       for (const name of ['INIT_CWD', 'NODE', 'npm_execpath', 'npm_node_execpath', 'npm_config_local_prefix', 'npm_config_prefix', 'npm_config_user_agent']) delete env[name];
@@ -140,8 +143,12 @@ async function runTestsWithSignal(options, { retained, normalPhase, cacheScan, q
     const retryTimeouts = options.retryTimeouts ?? false;
     const retryTimeoutMs = options.retryTimeoutMs ?? 60000;
     inputs = fileSnapshot(config);
-    before = await inputs.snapshot();
-    let snapshotCalls = 0;
+    if (!options.snapshotContext) context.beginScanGeneration({ hashWorkers: options.admission ? 0 : scanHashWorkers(admission) });
+    const initialSnapshot = await inputs.prepare(inventory);
+    before = initialSnapshot.value;
+    const prepareUnit = initialSnapshot.unit;
+    initialSnapshot.unit = async id => hints.identify(id, await prepareUnit(id));
+    let snapshotCalls = 1;
     let lastSnapshotSeconds = 0;
     const result = await runCachedUnits({
       cacheDirectory: config.cacheDirectory,
@@ -149,6 +156,7 @@ async function runTestsWithSignal(options, { retained, normalPhase, cacheScan, q
       units,
       workers: options.workers,
       scanConcurrency: config.scanConcurrency,
+      inputConcurrency: config.inputConcurrency,
       verificationConcurrency: config.verificationConcurrency,
       resources: options.resources ?? {},
       cache: config.cache ?? true,
@@ -164,7 +172,7 @@ async function runTestsWithSignal(options, { retained, normalPhase, cacheScan, q
         const call = ++snapshotCalls;
         const started = performance.now();
         return span(
-          call === 1 ? 'snapshot-initial' : 'snapshot-recheck',
+          'snapshot-recheck',
           () => span('snapshot-inputs', inputs.snapshot, { call }),
           { call },
         ).finally(() => {
@@ -199,7 +207,7 @@ async function runTestsWithSignal(options, { retained, normalPhase, cacheScan, q
         if (status === 0) hints.record(unit.id, (performance.now() - started) / 1000);
         return status;
       },
-    }, { queueScan, cacheScan, prepareExecution, executeFiles });
+    }, { queueScan, cacheScan, prepareExecution, executeFiles, artifactContext: context, initialSnapshot, afterScan: !options.snapshotContext ? () => context.finishScanGeneration() : undefined, orderFiles: (a, b) => hints.priority(b) - hints.priority(a) });
     diagnostics?.event('snapshot-final', { suite: config.suite, call: snapshotCalls, seconds: lastSnapshotSeconds });
     if (!result.inputsChanged) await hints.save();
     if (!result.exitCode && artifacts && files.length === selection.length) {
@@ -209,6 +217,7 @@ async function runTestsWithSignal(options, { retained, normalPhase, cacheScan, q
     }
     const verify = async () => {
       if (!isDeepStrictEqual(before, await inputs.snapshot())) throw new Error('Check inputs changed during invocation');
+      await artifacts?.verifySources();
     };
     if (!result.exitCode) {
       await verify();

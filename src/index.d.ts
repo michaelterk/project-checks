@@ -57,6 +57,8 @@ export interface TestConfig {
   workers?: number;
   /** Initial adaptive cache scan concurrency; positive integer. Default: 32. */
   scanConcurrency?: number;
+  /** Maximum concurrent input filesystem operations; positive integer. Default: 8. */
+  inputConcurrency?: number;
   /** Maximum concurrent passing-file verification jobs; positive integer. Default: 32. */
   verificationConcurrency?: number;
   resources?: ResourcePolicy;
@@ -158,6 +160,8 @@ export class Admission {
 export interface CachedUnitsOptions<T extends TestUnit = TestUnit> {
   /** Initial adaptive scan concurrency; positive integer. Default: packaged JSON value (32). */
   scanConcurrency?: number;
+  /** Maximum concurrent artifact filesystem operations; positive integer. Default: 8. */
+  inputConcurrency?: number;
   /** Maximum concurrent passing-file verification jobs; positive integer. Default: 32. */
   verificationConcurrency?: number;
   progress?: TestProgress | false;
@@ -221,6 +225,8 @@ export function runWithCpuQuota(command: string[], options?: { resources?: Resou
 
 /** Opaque hashing queue and content memoization shared by file snapshots. */
 export interface SnapshotContext {
+  /** Verified source hashing; scan owners recheck shared proofs before accepting hits. */
+  sourceHash?(file: string): Promise<string | null>;
   close(): Promise<void>;
 }
 export interface Diagnostics {
@@ -234,7 +240,7 @@ export interface Diagnostics {
   observeAdmission(admission: Admission): void;
   close(exitCode: number): void;
 }
-export function createSnapshotContext(options?: { signal?: AbortSignal }): SnapshotContext;
+export function createSnapshotContext(options?: { signal?: AbortSignal; inputConcurrency?: number }): SnapshotContext;
 export function createDiagnostics(options?: { logger?: Logger | false; suites?: string[]; progress?: false }): Diagnostics;
 
 export interface TestProgress {
@@ -275,6 +281,8 @@ export function runChecks(definitions: CheckDefinition[], options?: {
   resources?: ResourcePolicy; workers?: number; signal?: AbortSignal; logger?: Logger | false;
   /** Overrides suite scan settings for the shared global scan. */
   scanConcurrency?: number;
+  /** Overrides suite input settings for the shared filesystem queue. */
+  inputConcurrency?: number;
   /** Overrides suite verification settings for the shared validation pool. */
   verificationConcurrency?: number;
   progress?: TestProgress | false;

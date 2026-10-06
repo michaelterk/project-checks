@@ -2,11 +2,11 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { join, sep, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { gzip, gunzipSync } from 'node:zlib';
+import { gzip } from 'node:zlib';
 import { promisify } from 'node:util';
 import { runCommand } from './command.mjs';
 import { keys } from './util.mjs';
-import { normalizeCoverageArtifact, restoreCoverageArtifact } from './coverage-paths.mjs';
+import { normalizeCoverageArtifact, validatePortablePythonArtifact, validatePortableV8Artifact, validateCoverageSources } from './coverage-paths.mjs';
 
 const compress = promisify(gzip);
 export const defaultMinimum = { lines: 80, branches: 80, functions: 80 };
@@ -21,11 +21,6 @@ export function validateCoverage(value) {
   for (const field of ['include', 'exclude']) if (value[field] !== undefined && (!Array.isArray(value[field]) || value[field].some(item => typeof item !== 'string' || !item))) throw new TypeError(`coverage.${field} must be an array of patterns`);
   for (const field of ['python', 'configFile', 'report']) if (value[field] !== undefined && (typeof value[field] !== 'string' || !value[field])) throw new TypeError(`coverage.${field} must be a nonempty string`);
 }
-function reports(bytes) {
-  const value = JSON.parse(gunzipSync(bytes));
-  if (!Array.isArray(value) || !value.length || !value.every(report => Array.isArray(report.result))) throw new Error('Invalid V8 coverage contribution');
-  return value;
-}
 export async function createCoverage(config, environment) {
   const definition = config.coverage;
   validateCoverage(definition);
@@ -35,7 +30,7 @@ export async function createCoverage(config, environment) {
   await mkdir(directory, { recursive: true });
   const staging = await mkdtemp(join(directory, '.run-'));
   const measured = join(staging, 'measurement.json');
-  const outputs = new Map(), contributions = new Map();
+  const outputs = new Map(), contributions = new Map(), sourceProofs = new Map();
   const prefix = pathToFileURL(`${config.root}${sep}`).href;
   const python = definition.python ?? 'python3';
   const configFile = definition.configFile ? resolve(config.root, definition.configFile) : undefined;
@@ -48,9 +43,14 @@ export async function createCoverage(config, environment) {
   }
   async function materialize(source, sources) {
     const destination = join(staging, randomUUID());
-    const bytes = await restoreCoverageArtifact(await readFile(source), { provider, root: config.root, sources });
-    if (provider === 'v8') reports(bytes);
-    await writeFile(destination, bytes, { flag: 'wx', mode: 0o600 });
+    const original = await readFile(source);
+    const options = { provider, root: config.root, sources, context: config.snapshotContext };
+    if (provider === 'v8') await validatePortableV8Artifact(original, options);
+    await writeFile(destination, original, { flag: 'wx', mode: 0o600 });
+    if (provider === 'python') {
+      try { await validatePortablePythonArtifact(destination, options); }
+      catch (error) { await rm(destination, { force: true }).catch(() => {}); throw error; }
+    }
     return destination;
   }
   return {
@@ -84,18 +84,32 @@ export async function createCoverage(config, environment) {
         await writeFile(`${artifact}.tmp`, await compress(JSON.stringify(values)), { flag: 'wx', mode: 0o600 });
         await rename(`${artifact}.tmp`, artifact);
       }
-      const normalized = await normalizeCoverageArtifact(await readFile(artifact), { provider, sourceRoot: config.root });
+      const normalized = await normalizeCoverageArtifact(await readFile(artifact), { provider, sourceRoot: config.root, context: config.snapshotContext });
       await writeFile(`${artifact}.tmp`, normalized.bytes, { flag: 'wx', mode: 0o600 });
       await rename(`${artifact}.tmp`, artifact);
       contributions.set(unit.id, await materialize(artifact, normalized.sources));
+      sourceProofs.set(unit.id, normalized.sources);
       await rm(output, { recursive: true, force: true });
       outputs.delete(unit.id);
       return { files: [artifact], metadata: { format: `project-checks-${provider}-v2`, unit: unit.id, sources: normalized.sources } };
     },
     async restoreEvidence(unit, { files, metadata }) {
       if (files.length !== 1 || metadata?.format !== `project-checks-${provider}-v2` || metadata.unit !== unit.id) return false;
-      try { contributions.set(unit.id, await materialize(files[0], metadata.sources)); return true; }
+      try {
+        contributions.set(unit.id, await materialize(files[0], metadata.sources));
+        sourceProofs.set(unit.id, metadata.sources);
+        config.snapshotContext?.acceptSourceProof?.(config.root, metadata.sources);
+        return true;
+      }
       catch (error) { config.signal?.throwIfAborted(); return false; }
+    },
+    async verifySources() {
+      const sources = {};
+      for (const proof of sourceProofs.values()) for (const [path, hash] of Object.entries(proof)) {
+        if (Object.hasOwn(sources, path) && sources[path] !== hash) throw new Error(`Covered source changed: ${path}`);
+        Object.defineProperty(sources, path, { value: hash, enumerable: true, configurable: true });
+      }
+      await validateCoverageSources({ root: config.root, sources, context: config.snapshotContext });
     },
     async aggregate(units) {
       if (units.some(unit => !contributions.has(unit.id))) throw new Error('Every current file must supply a valid coverage contribution');
@@ -113,7 +127,7 @@ export async function createCoverage(config, environment) {
         ...(definition.exclude ?? []).map(value => `--test-coverage-exclude=${value}`),
         ...Object.entries(minimum).map(([name, value]) => `--test-coverage-${name}=${Math.floor(value)}`),
         '--test', join(import.meta.dirname, 'coverage-merge.mjs')], {
-        ...commandOptions, env: { ...environment, PROJECT_CHECKS_COVERAGE_MANIFEST: manifest, PROJECT_CHECKS_COVERAGE_REPORT: summaryFile },
+        ...commandOptions, env: { ...environment, PROJECT_CHECKS_COVERAGE_MANIFEST: manifest, PROJECT_CHECKS_COVERAGE_REPORT: summaryFile, PROJECT_CHECKS_COVERAGE_ROOT: config.root },
       });
       if (status) return status;
       const summary = JSON.parse(await readFile(summaryFile, 'utf8'));

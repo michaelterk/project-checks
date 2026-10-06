@@ -12,24 +12,18 @@ async function readHints(path) {
   }
 }
 
-export async function createDurationHints(config, files, context) {
+export async function createDurationHints(config) {
   const measured = {};
   const path = resolve(config.cacheDirectory, `durations-${encodeURIComponent(config.suite)}.json`);
   const hashes = new Map();
-  if (config.durationHints) {
-    const hints = await readHints(path);
-    const identities = await context.identify(
-      files.map((file) => resolve(config.root, file)),
-      config,
-    );
-    files.forEach((file, index) => hashes.set(file, identities[index][1]));
-    const priority = (file) => {
+  const hints = config.durationHints ? await readHints(path) : {};
+  return {
+    identify(file, hash) { if (config.durationHints) hashes.set(file, hash); },
+    priority(file) {
+      if (!config.durationHints) return 0;
       const seconds = hints[file]?.hash === hashes.get(file) ? hints[file].seconds : config.initialDurations?.[file];
       return Number.isFinite(seconds) && seconds > 0 ? seconds : 0;
-    };
-    files.sort((left, right) => priority(right) - priority(left));
-  }
-  return {
+    },
     record(file, seconds) {
       if (config.durationHints) measured[file] = { hash: hashes.get(file), seconds };
     },

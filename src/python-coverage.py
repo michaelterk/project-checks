@@ -46,12 +46,26 @@ def aggregate(manifest, destination, config, root, minimum, report):
     coverage = Coverage(data_file=str(destination), config_file=str(config) if config else True)
     # Empty databases are valid no-op contributions; update combines all others.
     data = coverage.get_data()
+    root_path = os.path.abspath(root)
+
+    def map_path(name):
+        # update also maps existing target tracer paths, so this must be
+        # idempotent for absolute paths already inside the current root.
+        mapped = os.path.abspath(os.path.join(root_path, name))
+        if os.path.commonpath([root_path, mapped]) != root_path:
+            raise ValueError(f"Covered source escapes its project root: {name}")
+        return mapped
+
     for name in files:
         source = Path(name)
         validate(source)
         contribution = CoverageData(basename=str(source))
         contribution.read()
-        data.update(contribution)
+        for filename in contribution.measured_files():
+            if os.path.isabs(filename):
+                raise ValueError(f"Expected portable coverage source: {filename}")
+            map_path(filename)
+        data.update(contribution, map_path=map_path)
     coverage.save()
     coverage.report()
     report_file = str(destination) + ".json"

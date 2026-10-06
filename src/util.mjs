@@ -13,6 +13,14 @@ export function integer(value, label, minimum = 1) {
   return value;
 }
 
+export function inputLimit(value) {
+  if (!Number.isSafeInteger(value) || value < 1) {
+    const received = value === null ? 'null' : `${typeof value} ${typeof value === 'string' ? JSON.stringify(value) : String(value)}`;
+    throw new TypeError(`inputConcurrency must be a positive safe integer; received ${received}`);
+  }
+  return value;
+}
+
 export function text(value, label) {
   if (typeof value !== 'string' || !value.length || value.includes('\0')) throw new TypeError(`${label} must be a nonempty string without NUL characters`);
   return value;

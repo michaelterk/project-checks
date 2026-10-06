@@ -31,6 +31,7 @@ test('all independent and dependent suites are queued before the first of 32 sca
   for (let index = 1; index < 40; index += 2) await writeFile(join(root, `test/${index}.test.mjs`), 'new');
   const reads = new Map();
   let active = 0, peak = 0, commands = 0;
+  const fullBatch = Promise.withResolvers();
   let slowConfigReady = false;
   const lines = [];
   observeRecords(t, cacheDirectory, async (file, read) => {
@@ -39,7 +40,8 @@ test('all independent and dependent suites are queued before the first of 32 sca
     active++;
     peak = Math.max(peak, active);
     reads.set(file, (reads.get(file) ?? 0) + 1);
-    try { await delay(3); return await read(); }
+    if (active === 32) fullBatch.resolve();
+    try { await fullBatch.promise; return await read(); }
     finally { active--; }
   });
   const logger = { log: line => {
@@ -80,11 +82,13 @@ test('global scan failure drains siblings and never starts builds or setup', asy
   for (let index = 0; index < 40; index++) await put(root, `test/${index}.test.mjs`, '');
   const cacheDirectory = join(root, '.test-cache/project-checks');
   let active = 0, entered = 0, setup = 0;
+  const fullBatch = Promise.withResolvers();
   const failure = new Error('global scan read failed');
   observeRecords(t, cacheDirectory, async () => {
     active++;
     const index = entered++;
-    try { await delay(index ? 20 : 5); throw failure; }
+    if (entered === 32) fullBatch.resolve();
+    try { await fullBatch.promise; await delay(index ? 20 : 5); throw failure; }
     finally { active--; }
   });
   await assert.rejects(runChecks([
@@ -92,7 +96,7 @@ test('global scan failure drains siblings and never starts builds or setup', asy
     ...['one', 'two'].map(id => ({ id, config: {
       ...config(root, id), setup: () => { setup++; return { execute: () => 0 }; },
     } })),
-  ], { logger: false, workers: 1 }), error => error === failure);
+  ], { logger: false, workers: 1 }), error => error.cause === failure && /cache comparison/.test(error.message));
   assert.equal(entered, 32, 'the remaining queued files never start I/O after a fatal scan failure');
   assert.equal(active, 0);
   assert.equal(setup, 0);

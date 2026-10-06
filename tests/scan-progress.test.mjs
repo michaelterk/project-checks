@@ -73,7 +73,7 @@ test('standalone failed scans exclude untouched queued units from progress', asy
     units: ids.map(id => ({ id, identity: 'fixture' })),
     snapshot: () => ({ common: 'same', units: Object.fromEntries(ids.map(id => [id, 'same'])) }),
     execute: () => { throw Error('failed scans cannot execute tests'); },
-  }), error => error === failure);
+  }), error => error.cause === failure && /broken\/first: cache comparison/.test(error.message));
   assert.equal(reads, 1);
   assert.equal(lines.filter(line => line.startsWith('CACHE_SCAN_PROGRESS:')).at(-1),
     'CACHE_SCAN_PROGRESS: broken | 0 out of 3 scanned | Workers: 0');

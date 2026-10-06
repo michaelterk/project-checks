@@ -352,7 +352,9 @@ test('a failing dependency callback drains its blocked sibling before snapshot c
     await Promise.resolve();
     assert.equal(closed, false);
     release();
-    assert.equal((await failed).message, 'dependency failed');
+    const error = await failed;
+    assert.equal(error.cause?.message, 'dependency failed');
+    assert.match(error.message, /dependency discovery: dependency failed/);
     await closing;
   } finally {
     release();

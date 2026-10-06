@@ -1,20 +1,24 @@
+import { scanHashWorkers } from './input-hash-pool.mjs';
 import { resolve } from 'node:path';
+import { profileStage } from './scan-profile.mjs';
 import { createFileQueue } from './file-queue.mjs';
 import { Admission } from './admission.mjs';
 import { withProcessSignal } from './cancellation.mjs';
-import { loadConfig } from './config.mjs';
+import { defineConfig, loadConfig } from './config.mjs';
 import { runCommand } from './command.mjs';
 import { createSnapshotContext } from './inputs.mjs';
 import { runTests } from './runner.mjs';
-import { command, integer, keys, text } from './util.mjs';
+import { command, inputLimit, integer, keys, text } from './util.mjs';
 import { createProgress } from './progress.mjs';
 import { scanCacheJobs, scanConcurrency as defaultScanConcurrency } from './cache.mjs';
+import defaultConfig from '../project-checks.config.json' with { type: 'json' };
 
 // Definitions describe ownership and ordering. Every command, fixture attempt,
 // retry and coverage gate uses the same invocation-owned admission pool.
 export async function runChecks(definitions, options = {}) {
-  keys(options, ['resources', 'workers', 'scanConcurrency', 'verificationConcurrency', 'signal', 'logger', 'progress'], 'check options');
+  keys(options, ['resources', 'workers', 'scanConcurrency', 'inputConcurrency', 'verificationConcurrency', 'signal', 'logger', 'progress'], 'check options');
   if (options.scanConcurrency !== undefined) integer(options.scanConcurrency, 'scanConcurrency');
+  if (options.inputConcurrency !== undefined) inputLimit(options.inputConcurrency);
   if (options.verificationConcurrency !== undefined) integer(options.verificationConcurrency, 'verificationConcurrency');
   const byId = new Map();
   for (const definition of definitions) {
@@ -58,7 +62,7 @@ export async function runChecks(definitions, options = {}) {
     const progress = options.progress ?? createProgress({ logger, suites: definitions.filter(definition => definition.config !== undefined).map(definition => definition.id) });
     let exitCode = 2;
     const admission = new Admission(options.resources ?? {}, Number.MAX_SAFE_INTEGER, { signal, workers: options.workers });
-    const snapshotContext = createSnapshotContext({ signal });
+    let snapshotContext;
     const pending = new Map(), completed = new Map(), launched = new Set(), suites = new Map();
     const retained = [];
     const blocked = new Error('Check prerequisite failed');
@@ -139,6 +143,28 @@ export async function runChecks(definitions, options = {}) {
       const testDefinitions = definitions.filter(definition => definition.config !== undefined);
       const started = performance.now();
       if (testDefinitions.length) logger?.log('CACHE_SCAN: checks | Collecting all selected test files');
+      let configError;
+      const preparedConfigs = await Promise.allSettled(testDefinitions.filter(({ id }) => !failedPrerequisite(id)).map(async definition => {
+        try {
+          signal.throwIfAborted();
+          await definition.verify?.();
+          signal.throwIfAborted();
+          const config = typeof definition.config === 'function' ? await definition.config({ signal })
+            : typeof definition.config === 'string' ? await loadConfig(resolve(definition.cwd ?? process.cwd(), definition.config)) : definition.config;
+          signal.throwIfAborted();
+          defineConfig(config);
+          return [definition.id, config];
+        } catch (error) {
+          if (!configError) { configError = error; controller.abort(error); }
+          throw error;
+        }
+      }));
+      if (configError) throw configError;
+      const configs = new Map(preparedConfigs.map(result => result.value));
+      const inputConcurrency = options.inputConcurrency ?? (configs.size
+        ? Math.min(...[...configs.values()].map(config => config.inputConcurrency ?? defaultConfig.inputConcurrency)) : defaultConfig.inputConcurrency);
+      snapshotContext = createSnapshotContext({ signal, inputConcurrency });
+      snapshotContext.beginScanGeneration({ hashWorkers: scanHashWorkers(admission) });
       for (const definition of testDefinitions) {
         const { id } = definition;
         if (failedPrerequisite(id)) {
@@ -156,14 +182,12 @@ export async function runChecks(definitions, options = {}) {
         track(id, (async () => {
           try {
             signal.throwIfAborted();
-            await definition.verify?.();
-            const config = typeof definition.config === 'function' ? await definition.config({ signal })
-              : typeof definition.config === 'string' ? await loadConfig(resolve(definition.cwd ?? process.cwd(), definition.config)) : definition.config;
+            const config = configs.get(id);
             const suiteProgress = progress ? {
               files: (_, total) => progress.files(id, total),
               file: (_, ...args) => progress.file(id, ...args),
             } : false;
-            return { id, ...await runTests({ ...config, signal, admission, snapshotContext, logger: logger ?? false, progress: suiteProgress }, {
+            return { id, ...await runTests({ ...config, inputConcurrency: options.inputConcurrency ?? config.inputConcurrency, signal, admission, snapshotContext, logger: logger ?? false, progress: suiteProgress }, {
               retained, normalPhase: phases.get(id),
               executeFiles: () => fileQueue.run(id),
               queueScan: (jobs, scanConcurrency) => { queued.resolve({ jobs, scanConcurrency }); return scanned.promise; },
@@ -178,7 +202,7 @@ export async function runChecks(definitions, options = {}) {
           }
         })());
       }
-      const inventories = await Promise.all([...suites.values()].map(suite => suite.inventory));
+      const inventories = await profileStage('collect-inputs', () => Promise.all([...suites.values()].map(suite => suite.inventory)));
       const inventoryError = inventories.find(result => result.status === 'rejected');
       if (inventoryError) throw inventoryError.reason;
       signal.throwIfAborted();
@@ -188,14 +212,15 @@ export async function runChecks(definitions, options = {}) {
       if (testDefinitions.length) logger?.log(`CACHE_SCAN: checks | Queued: ${jobs.length} test files | Concurrency: ${scanConcurrency}`);
       scanning = true;
       try {
-        await scanCacheJobs(jobs.map(run => async () => {
+        await profileStage('scan-queue', () => scanCacheJobs(jobs.map(run => Object.assign(async () => {
           try { signal.throwIfAborted(); await run(); }
           catch (error) { controller.abort(error); throw error; }
-        }), options.resources, scanConcurrency, { logger: options.progress === false ? null : logger });
+        }, { scanIdentity: run.scanIdentity })), options.resources, scanConcurrency, { logger: options.progress === false ? null : logger }));
       } finally {
         scanning = false;
         if (signal.aborted) scanned.reject(signal.reason);
       }
+      await profileStage('scan-acceptance', () => snapshotContext.finishScanGeneration());
       scanned.resolve();
       const prepared = await Promise.all([...suites.values()].map(suite => suite.prepared));
       const preparationError = prepared.find(result => result.status === 'rejected');
@@ -204,6 +229,11 @@ export async function runChecks(definitions, options = {}) {
       const total = prepared.reduce((sum, { value }) => sum + value.total, 0);
       const cached = prepared.reduce((sum, { value }) => sum + value.cached, 0);
       if (testDefinitions.length) logger?.log(`CACHE_SCAN: checks | Will run: ${total - cached} | Will skip: ${cached} | Total: ${total} | Duration: ${((performance.now() - started) / 1000).toFixed(2)}s`);
+      if (process.env.PROJECT_CHECKS_SCAN_ONLY === '1') {
+        exitCode = 0;
+        logger?.log(`SCAN_ONLY: Complete | Cached: ${cached} | Cache misses: ${total - cached} | Test execution suppressed`);
+        return { exitCode, scanOnly: true, total, cached };
+      }
       const verificationConcurrency = options.verificationConcurrency ?? (prepared.length
         ? Math.min(...prepared.map(({ value }) => value.verificationConcurrency)) : undefined);
       fileQueue = createFileQueue([...suites.keys()].map((id, index) => ({ id, jobs: prepared[index].value.jobs })), admission, signal, { verificationConcurrency });
@@ -232,7 +262,7 @@ export async function runChecks(definitions, options = {}) {
       signal.removeEventListener('abort', stopPreparation);
       try {
         const closed = await Promise.allSettled(retained.map(handle => handle.close()));
-        await snapshotContext.close();
+        await snapshotContext?.close();
         admission.report(logger, 'checks');
         admission.close();
         const failure = closed.find(result => result.status === 'rejected');

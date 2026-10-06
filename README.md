@@ -23,7 +23,7 @@ and install that archive in another project:
 npm pack
 
 # In your project (adjust the path)
-npm install --save-dev /path/to/project-checks/project-checks-0.4.2.tgz
+npm install --save-dev /path/to/project-checks/project-checks-0.5.0.tgz
 ```
 
 After a maintainer publishes it under this name, installation will be
@@ -238,8 +238,11 @@ project-checks coverage --config project-checks.project.json --target complete
 nested projects and suites with test dependencies. It populates one shared queue
 with a scan job for every selected test file before any scan worker starts.
 The scan pool starts with `scanConcurrency` workers (default 32) and drains this complete queue; suites do not feed additional jobs as
-earlier jobs finish. Each job checks its cache record and validates and restores
-retained artifacts under resource admission. Cache-disabled files enter the plan
+earlier jobs finish. Each job discovers its file dependencies, fingerprints its
+inputs, compares the cache record, and validates and restores retained artifacts
+under resource admission. Dependency identities and in-flight reads are shared
+within a snapshot; later snapshots rediscover paths and recheck metadata. Suite
+collection does not fingerprint every file before queueing. Cache-disabled files enter the plan
 as runnable without reading evidence.
 
 One combined summary reports the number of files planned to run or be skipped.
@@ -429,6 +432,7 @@ inside Node's own test runner.
 | `ignore` | `.git`, `.test-cache`, `__pycache__` trees | Replaces default root-relative exclusions |
 | `workers` | Automatically tuned CPU/RAM-derived count | Positive integer worker cap |
 | `scanConcurrency` | `32` from packaged JSON | Positive integer initial cache scan concurrency; adaptive growth can exceed it |
+| `inputConcurrency` | `8` from packaged JSON | Positive integer cap on concurrent input and artifact filesystem operations |
 | `verificationConcurrency` | `32` from packaged JSON | Positive integer cap on concurrent passing-file validation jobs |
 | `resources` | See below | Resource policy |
 | `cache` | `true` | Read/write passing evidence |
@@ -477,28 +481,37 @@ active startup value and the strictest resource policy. Linux I/O pressure comes
 the sampling interval); unavailable I/O data falls back to CPU and memory checks.
 Missing CPU or available-memory telemetry prevents growth. Artifact validation
 and restoration also retain command admission, independently of scan concurrency.
-Input fingerprinting bounds filesystem work at eight operations within one
-invocation, with fresh metadata on every snapshot. Content digests and path-only
-exclusion decisions are reused; listings and snapshots are not.
+Input fingerprinting bounds filesystem work at `inputConcurrency` operations within one
+invocation. The initial scan shares test inventories, identical dependency-root
+projections and serialized fingerprint records within one generation. Later
+snapshots rediscover paths and check fresh metadata. Coverage source proofs are
+shared during the scan and independently rechecked before accepting cached hits;
+normal completion rechecks them again after aggregation and dependent checks.
+Content digests remain reusable only while fresh metadata matches. Owned initial
+scans use up to four hash workers within the input cap and existing CPU/memory
+budget, reserving a CPU for coordination. Workers close at the scan boundary;
+cancellation drains open file handles before thread termination.
 
-The startup scan and passing-file verification settings live in the package's
+The input, startup scan and passing-file verification settings live in the package's
 `project-checks.config.json`. A consuming project can override them in its own
 `project-checks.config.json` or an inherited suite configuration:
 
 ```json
 {
   "scanConcurrency": 32,
+  "inputConcurrency": 8,
   "verificationConcurrency": 32
 }
 ```
 
-`runTests` and `runCachedUnits` accept both settings. For `runChecks`, explicit
-options control the global scan and shared verification pool; otherwise the
-smallest selected suite value applies to each setting. The CLI `checks` command
-uses the consuming project's automatically loaded root configuration for both.
+`runTests` accepts all three settings; `runCachedUnits` accepts the input setting
+for artifact evidence alongside its scan and verification settings. For `runChecks`,
+explicit options control the shared input queue, global scan and verification pool;
+otherwise the smallest selected suite value applies to each setting. The CLI
+`checks` command uses the consuming project's automatically loaded root configuration.
 `verificationConcurrency` is a fixed maximum; `scanConcurrency` is the starting
 value for adaptive scanning. `workers` and `--workers` continue to control test
-execution admission independently of both settings.
+execution admission independently of these settings.
 
 Admission targets at most `resources.cpuQuotaPercent` of detected host CPU capacity (default 90%), reserving roughly
 10% by default for other work even when `cpuPercent` is higher. Automatic runs start at half
@@ -524,10 +537,13 @@ calibration runs or saved tuning profiles are used. Each invocation learns anew.
 Cached passes bypass admission. A short summary reports peak fresh workers,
 sampled CPU, minimum available RAM and the final effective CPU weight.
 
-`runTests` can share one `Admission` and `createSnapshotContext({ signal })`
+`runTests` can share one `Admission` and `createSnapshotContext({ signal, inputConcurrency })`
 across concurrent suites. Close those caller-owned resources after all suite
 promises settle. Each file-snapshot handle drains its own calls on `close()` and
-rejects subsequent snapshots without closing a shared context.
+rejects subsequent snapshots without closing a shared context. A caller-owned
+context keeps the limit set when it was created. Standalone suites with a
+caller-owned `Admission` use inline hashing so independent contexts do not each
+claim its full CPU budget; managed `runChecks` owns one shared hash pool.
 
 `createDiagnostics({ logger })` starts invocation-scoped resource sampling and
 emits `TEST_DIAGNOSTIC` JSON records. Use `suiteStart`/`suiteEnd` for setup and
