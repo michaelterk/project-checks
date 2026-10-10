@@ -289,6 +289,10 @@ is written atomically per file, so completed passes survive a later test failure
 or interruption. A failed test reruns on the next invocation. Corrupt evidence
 also reruns. Input snapshots are checked after successful commands and again
 before reporting suite success, including when all tests were cached.
+If inputs change during a run, only their consuming tests lose eligibility to
+save passing evidence; independent tests retain their passes. Shared input
+changes fence every consumer. The whole invocation still fails its final input
+check so a release cannot proceed using a changed snapshot.
 
 The default `inputs: ['.']` fingerprints ordinary project files, subject to the
 packaged `directoryIgnore` policy. Declare dependencies and tested build outputs

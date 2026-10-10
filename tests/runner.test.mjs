@@ -52,6 +52,41 @@ test('explicit shared inputs allow individual test edits and additions to rerun 
   assert.equal((await runTests(f.options)).total, 2);
 });
 
+test('a public asset changing during execution reruns only its consumers next time', async t => {
+  const root = await temporary(t);
+  for (const name of ['public', 'editor', 'results']) await put(root, `test/${name}.test.mjs`, '// fixture');
+  await put(root, 'public.svg', 'first icon');
+  await put(root, 'application.mjs', '// application');
+  const calls = [];
+  let changed = false;
+  const options = {
+    root, suite: 'site', workers: 1, inputs: [], coverage: false, logger: false,
+    testInputs: {
+      'test/public.test.mjs': ['public.svg'],
+      'test/editor.test.mjs': ['application.mjs'],
+      'test/results.test.mjs': ['application.mjs'],
+    },
+    command: [process.execPath, '-e', '', '{file}'],
+    setup: () => ({ execute: async command => {
+      calls.push(command.at(-1));
+      if (!changed) {
+        changed = true;
+        await put(root, 'public.svg', 'changed icon');
+      }
+      return 0;
+    } }),
+  };
+  const first = await runTests(options);
+  assert.equal(first.exitCode, 1);
+  assert.equal(first.inputsChanged, true);
+  assert.equal(calls.length, 3);
+  calls.length = 0;
+  const second = await runTests(options);
+  assert.equal(second.exitCode, 0);
+  assert.equal(second.cached, 2);
+  assert.deepEqual(calls, ['test/public.test.mjs']);
+});
+
 test('default folder scans omit incidental environments and dependencies but bind explicit packages, siblings and symlink targets', async t => {
   const f = await fixture(t);
   const external = await temporary(t);

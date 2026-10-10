@@ -171,6 +171,78 @@ test('input mutation is detected even when the snapshot callback returns the sam
   assert.deepEqual(f.calls, ['first', 'second']);
 });
 
+test('a mid-run unit input change preserves other units passing evidence', async t => {
+  const f = await fixture(t);
+  f.options.execute = async unit => {
+    if (unit.id === 'first') f.inputs.units.first = 'changed-mid-run';
+    return 0;
+  };
+  const result = await runCachedUnits(f.options);
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.inputsChanged, true);
+  assert.deepEqual(await readdir(f.directory), [cacheRecordName('fixture', 'second')]);
+  f.options.execute = async unit => { f.calls.push(unit.id); return 0; };
+  assert.equal((await runCachedUnits(f.options)).exitCode, 0);
+  assert.deepEqual(f.calls, ['first']);
+});
+
+test('parallel validation fences only the unit whose inputs changed', async t => {
+  const f = await fixture(t);
+  f.options.workers = 2;
+  const entered = Promise.withResolvers();
+  const release = Promise.withResolvers();
+  f.options.execute = async unit => {
+    if (unit.id === 'first') {
+      entered.resolve();
+      await release.promise;
+    } else {
+      await entered.promise;
+      f.inputs.units.first = 'changed-during-first';
+      release.resolve();
+    }
+    return 0;
+  };
+  assert.equal((await runCachedUnits(f.options)).inputsChanged, true);
+  assert.deepEqual(await readdir(f.directory), [cacheRecordName('fixture', 'second')]);
+});
+
+test('observed changes stay fenced for their owner after the bytes are restored', async t => {
+  const f = await fixture(t);
+  const observed = Promise.withResolvers();
+  f.options.snapshot = () => {
+    const value = structuredClone(f.inputs);
+    if (value.units.second === 'changed') observed.resolve();
+    return value;
+  };
+  f.options.execute = async unit => {
+    if (unit.id === 'first') f.inputs.units.second = 'changed';
+    else {
+      await observed.promise;
+      f.inputs.units.second = 'v1';
+    }
+    return 0;
+  };
+  assert.equal((await runCachedUnits(f.options)).inputsChanged, true);
+  assert.deepEqual(await readdir(f.directory), [cacheRecordName('fixture', 'first')]);
+  f.options.execute = async unit => { f.calls.push(unit.id); return 0; };
+  await runCachedUnits(f.options);
+  assert.deepEqual(f.calls, ['second']);
+});
+
+test('changes during evidence collection fence their owner without blocking other evidence', async t => {
+  const f = await fixture(t);
+  const artifact = join(await temporary(t), 'artifact');
+  await writeFile(artifact, 'fixture evidence');
+  f.options.execute = () => 0;
+  f.options.restoreEvidence = () => true;
+  f.options.saveEvidence = unit => {
+    if (unit.id === 'first') f.inputs.units.first = 'changed-during-evidence';
+    return { files: [artifact], metadata: { owner: unit.id } };
+  };
+  assert.equal((await runCachedUnits(f.options)).inputsChanged, true);
+  assert.deepEqual(await readdir(f.directory), [cacheRecordName('fixture', 'second')]);
+});
+
 test('corrupt evidence reruns and cache stores only hashes, without environment secrets', async t => {
   const f = await fixture(t);
   f.options.execute = async () => 0;

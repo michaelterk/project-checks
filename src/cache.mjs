@@ -103,10 +103,18 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
   let fatal;
   let stopped = false;
   let inputsChanged = false;
+  const changedUnits = new Set();
   let checking;
   const retries = [];
   const startedFiles = new Set();
-  const check = () => checking ??= takeSnapshot().finally(() => { checking = undefined; });
+  const observeSnapshot = value => {
+    if (!isDeepStrictEqual(before, value)) inputsChanged = true;
+    for (const id of ids) {
+      if (before.common !== value.common || before.units[id] !== value.units[id]) changedUnits.add(id);
+    }
+    return value;
+  };
+  const check = () => checking ??= takeSnapshot().then(observeSnapshot).finally(() => { checking = undefined; });
   const plan = units.map(unit => ({
     filename: cache ? join(cacheDirectory, cacheRecordName(suite, unit.id)) : undefined,
     expected: initialSnapshot ? undefined : cacheKey(before, unit.id), cached: false,
@@ -194,7 +202,8 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
       if (status !== 0) { finished = true; return; }
       const finalize = async () => {
         signal?.throwIfAborted();
-        if (!isDeepStrictEqual(before, await check()) || inputsChanged) {
+        await check();
+        if (changedUnits.has(unit.id)) {
           logger?.error(`Inputs changed during ${suite}/${unit.id}; no passing evidence saved.`);
           inputsChanged = true;
           finished = true;
@@ -205,7 +214,8 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
           const declaration = await saveEvidence(unit);
           signal?.throwIfAborted();
           evidence = await bindEvidence(declaration);
-          if (!isDeepStrictEqual(before, await takeSnapshot()) || inputsChanged) {
+          observeSnapshot(await takeSnapshot());
+          if (changedUnits.has(unit.id)) {
             logger?.error(`Inputs changed while saving ${suite}/${unit.id}; no passing evidence saved.`);
             inputsChanged = true;
             finished = true;
@@ -218,7 +228,7 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
           try {
             await writeFile(temporary, JSON.stringify({ key: expected, passed: true, ...(saveEvidence ? { evidence } : {}) }), { mode: 0o600, flag: 'wx' });
             signal?.throwIfAborted();
-            if (inputsChanged) { finished = true; return; }
+            if (changedUnits.has(unit.id)) { finished = true; return; }
             await rename(temporary, filename);
           } finally { await rm(temporary, { force: true }); }
         }
@@ -303,7 +313,7 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
     for (const { index, originalFailure } of retries) {
       normalPhase?.(false);
       signal?.throwIfAborted();
-      if (!isDeepStrictEqual(before, await check())) inputsChanged = true;
+      await check();
       await runUnit(index, true, originalFailure);
     }
   }
@@ -315,7 +325,7 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
   }
   if (stopped) throw fatal;
   signal?.throwIfAborted();
-  if (!isDeepStrictEqual(before, await takeSnapshot())) {
+  if (!isDeepStrictEqual(before, observeSnapshot(await takeSnapshot()))) {
     logger?.error(`Inputs changed during ${suite}; suite has not passed.`);
     inputsChanged = true;
   }
