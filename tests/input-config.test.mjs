@@ -13,7 +13,7 @@ test('input concurrency inherits the packaged default and parent JSON settings',
   await put(root, 'inherited.json', JSON.stringify({ extends: 'base.json' }));
   await put(root, 'override.json', JSON.stringify({ extends: 'base.json', inputConcurrency: 5 }));
   await put(root, 'default.json', '{}');
-  assert.equal((await loadConfig(join(root, 'default.json'))).inputConcurrency, 8);
+  assert.equal((await loadConfig(join(root, 'default.json'))).inputConcurrency, undefined);
   assert.equal((await loadConfig(join(root, 'inherited.json'))).inputConcurrency, 3);
   assert.equal((await loadConfig(join(root, 'override.json'))).inputConcurrency, 5);
   const invalid = await put(root, 'invalid.json', JSON.stringify({ inputConcurrency: 'many' }));
@@ -142,4 +142,21 @@ test('checks CLI uses suite JSON input limit unless root JSON explicitly overrid
   const overridden = execute();
   assert.equal(overridden.status, 0, details(overridden));
   await assertPeak(overridden, 4);
+});
+
+test('loaded startup settings above32 control one scanner without a default alias cap', async t => {
+  const root = await temporary(t);
+  for (const [name, settings] of Object.entries({ scan: { scanConcurrency: 64 }, alias: { inputConcurrency: 64 } })) {
+    const path = await put(root, `${name}.json`, JSON.stringify(settings));
+    const config = await loadConfig(path), context = createSnapshotContext(config);
+    const release = Promise.withResolvers(), reached = Promise.withResolvers();
+    let active = 0, peak = 0;
+    const work = Promise.all(Array.from({ length: 65 }, () => context.run(async () => {
+      peak = Math.max(peak, ++active);
+      if (active === 64) reached.resolve();
+      try { await release.promise; } finally { active--; }
+    })));
+    try { await reached.promise; assert.equal(peak, 64); }
+    finally { release.resolve(); await work; await context.close(); }
+  }
 });

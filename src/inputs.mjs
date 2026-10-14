@@ -1,8 +1,6 @@
 import { createHashPool } from './input-hash-pool.mjs';
 import { inputMetadata } from './input-hash-sync.mjs';
-import { createHash } from 'node:crypto';
-import { createReadStream } from 'node:fs';
-import { glob, open, lstat as fsLstat, readdir as fsReaddir, readlink as fsReadlink, realpath as fsRealpath } from 'node:fs/promises';
+import { glob, lstat as fsLstat, readdir as fsReaddir, readlink as fsReadlink, realpath as fsRealpath } from 'node:fs/promises';
 import { dirname, join, matchesGlob, relative, resolve } from 'node:path';
 import { digest, inside, inputLimit, slash, text } from './util.mjs';
 import { defineConfig, defaultDirectoryIgnore } from './config.mjs';
@@ -38,45 +36,17 @@ function directoryExclusions(config, root, cache) {
 }
 
 // One queue bounds leaf work. Visitors enqueue children without awaiting them.
-export function createSnapshotContext({ signal, inputConcurrency = defaultConfig.inputConcurrency } = {}) {
-  inputLimit(inputConcurrency);
-  const queueProfile = profileQueue('input-filesystem-queue', inputConcurrency);
-  const waiting = [];
-  const idle = [];
-  const digests = new Map();
-  const exclusions = new Map();
+export function createSnapshotContext({ signal, inputConcurrency,
+  scanConcurrency = defaultConfig.scanConcurrency, resources } = {}) {
+  if (inputConcurrency !== undefined) inputLimit(inputConcurrency);
+  if (scanConcurrency !== undefined) inputLimit(scanConcurrency);
+  const digests = new Map(), exclusions = new Map();
   const directoryRoots = new Map(), directoryDecisions = new Map();
-  let active = 0;
-  let closed = false;
-  let closeReason;
-  let sourceScan, scanProjections, scanRecords, scanInventories, scanLeaves;
-  let hashPool, scanWorkerCount = 0, closing;
+  let closed = false, closeReason, closing;
+  let sourceScan, scanProjections, scanRecords, scanInventories, scanLeaves, scanDirectories;
+  const pool = createHashPool({ workers: inputConcurrency ?? scanConcurrency, resources });
   const acceptedSources = new Map();
-  function drain() {
-    while (active < inputConcurrency && waiting.length) {
-      const { operation, resolve, reject, queuedAt } = waiting.shift();
-      active++;
-      queueProfile?.admit(queuedAt, active, waiting.length);
-      Promise.resolve().then(operation).then(
-        value => closed ? reject(closeReason) : resolve(value),
-        error => reject(closed ? closeReason : error),
-      ).finally(() => {
-        active--;
-        queueProfile?.state(active, waiting.length);
-        drain();
-        if (closed && !active) {
-          queueProfile?.close();
-          idle.splice(0).forEach(resolve => resolve());
-        }
-      });
-    }
-  }
-  const run = operation => new Promise((resolve, reject) => {
-    if (closed) { reject(closeReason); return; }
-    const queuedAt = queueProfile?.state(active, waiting.length + 1);
-    waiting.push({ operation, resolve, reject, queuedAt });
-    drain();
-  });
+  const run = operation => pool.run(operation);
   function excluded(config) {
     // These decisions depend on paths and rules only, never filesystem state.
     const rules = JSON.stringify([config.root, config.cacheDirectory, config.ignore]);
@@ -101,90 +71,56 @@ export function createSnapshotContext({ signal, inputConcurrency = defaultConfig
     if (!roots.has(root)) roots.set(root, directoryExclusions(config, root, directoryDecisions));
     return roots.get(root);
   }
-  const metadata = inputMetadata;
-  function fileIdentity(file, info, source = false) {
-    const leaf = scanLeaves?.get(file);
-    if (leaf) return leaf.then(value => value.kind === 'file' && value.identity === metadata(info) ? value.hash : hashIdentity(file, info, source));
-    return hashIdentity(file, info, source);
+  function freshEntry(file) {
+    return pool.runWithWorker(async hash => {
+      const info = await lstat(file, { bigint: true }, 'identify-entry');
+      if (!info.isFile()) return { kind: info.isDirectory() ? 'directory' : info.isSymbolicLink() ? 'symlink' : 'other' };
+      const identity = inputMetadata(info);
+      let entry = digests.get(file);
+      if (entry?.identity !== identity) {
+        entry = { identity };
+        entry.hash = hash(file, identity).catch(error => {
+          if (digests.get(file) === entry) digests.delete(file);
+          throw error;
+        });
+        digests.set(file, entry);
+      }
+      return { kind: 'file', identity, hash: await entry.hash };
+    });
   }
-  function hashIdentity(file, info, source = false) {
-    const identity = metadata(info);
-    const existing = digests.get(file);
-    if (existing?.identity === identity) return existing.hash;
-    const entry = { identity };
-    const read = async () => {
-      if (scanWorkerCount) {
-        hashPool ??= createHashPool({ workers: scanWorkerCount });
-        return profileStage('input-worker-hash', () => hashPool.hash(file, identity), { file });
+  function inspectEntry(file, fresh = false) {
+    const memo = fresh ? undefined : scanLeaves;
+    if (!memo) return freshEntry(file);
+    if (memo.has(file)) return memo.get(file);
+    const preceding = digests.get(file);
+    const operation = (async () => {
+      const cached = preceding ? { identity: preceding.identity, hash: await preceding.hash } : undefined;
+      if (closed) throw closeReason;
+      const value = await profileStage('input-worker-inspection', () => pool.inspect(file, cached), { file });
+      if (value.kind === 'file' && digests.get(file) === preceding) {
+        if (!preceding || preceding.identity !== value.identity) digests.set(file, { identity: value.identity, hash: Promise.resolve(value.hash) });
       }
-      const hash = createHash('sha256');
-      let bytes = 0;
-      if (info.size > 0n && info.size <= 65536n) {
-        const buffer = Buffer.allocUnsafe(Number(info.size));
-        const handle = await open(file, 'r');
-        let failed = false;
-        try {
-          while (true) {
-            const { bytesRead } = await handle.read(buffer, 0, buffer.length, null);
-            if (!bytesRead) break;
-            bytes += bytesRead;
-            hash.update(buffer.subarray(0, bytesRead));
-          }
-        } catch (error) { failed = true; throw error; }
-        finally {
-          profileContentRead(file, bytes, 'buffered');
-          try { await handle.close(); } catch (error) { if (!failed) throw error; }
-        }
-      } else {
-        try { for await (const chunk of createReadStream(file)) { bytes += chunk.length; hash.update(chunk); } }
-        finally { profileContentRead(file, bytes); }
-      }
-      // Read through EOF even when reported size is smaller than readable data.
-      // Virtual regular files can report zero; they retain the streaming reader.
-      if (metadata(await lstat(file, { bigint: true }, 'hash-post-read')) !== identity) throw new Error(`Input changed while hashing: ${file}`);
-      return hash.digest('hex');
-    };
-    entry.hash = (source ? profileStage('coverage-source-read', read, { file }) : read()).catch(error => {
-      if (digests.get(file) === entry) digests.delete(file);
+      return value;
+    })().catch(error => {
+      if (memo?.get(file) === operation) memo.delete(file);
+      if (digests.get(file) === preceding) digests.delete(file);
       throw error;
     });
-    digests.set(file, entry);
-    return entry.hash;
+    memo?.set(file, operation);
+    return operation;
   }
-  function inspectLeaf(file) {
-    const memo = scanLeaves;
-    if (!memo.has(file)) {
-      // Capture the preceding owner before publishing this promise. Later
-      // fileIdentity callers await us; this ordering cannot create a cycle.
-      const preceding = digests.get(file);
-      let operation;
-      operation = (async () => {
-        const cached = preceding ? { identity: preceding.identity, hash: await preceding.hash } : undefined;
-        if (closed) throw closeReason;
-        hashPool ??= createHashPool({ workers: scanWorkerCount });
-        const value = await profileStage('input-worker-inspection', () => hashPool.inspect(file, cached), { file });
-        if (value.kind === 'file' && digests.get(file) === preceding) digests.set(file, { identity: value.identity, hash: Promise.resolve(value.hash) });
-        return value;
-      })().catch(error => {
-        if (memo.get(file) === operation) memo.delete(file);
-        throw error;
-      });
-      memo.set(file, operation);
-    }
-    return memo.get(file);
-  }
-  // Recheck metadata on every use, sharing the same verified bytes/digest as inputs.
-  const freshSourceHash = file => profileStage('coverage-source-check', () => run(async () => {
+  // Resolve aliases afresh, then inspect/hash the canonical regular file in one job.
+  const freshSourceHash = file => profileStage('coverage-source-check', async () => {
     try {
-      const canonical = await realpath(file);
-      const info = await lstat(canonical, { bigint: true }, 'coverage-source');
-      if (!info.isFile()) throw new TypeError(`Covered source must be a regular file: ${file}`);
-      return await fileIdentity(canonical, info, true);
+      const canonical = await run(() => realpath(file));
+      const value = await inspectEntry(canonical);
+      if (value.kind !== 'file') throw new TypeError(`Covered source must be a regular file: ${file}`);
+      return value.hash;
     } catch (error) {
       if (error.code === 'ENOENT') return null; // V8 synthetic eval scripts.
       throw error;
     }
-  }), { file });
+  }, { file });
   const sourceHash = file => {
     if (!sourceScan) return freshSourceHash(file);
     if (!sourceScan.has(file)) {
@@ -197,14 +133,14 @@ export function createSnapshotContext({ signal, inputConcurrency = defaultConfig
     }
     return sourceScan.get(file);
   };
-  function beginScanGeneration({ hashWorkers = 0 } = {}) {
-    if (sourceScan || hashPool) throw new Error('Input scan generation already active');
-    scanWorkerCount = Math.min(inputConcurrency, hashWorkers);
+  function beginScanGeneration() {
+    if (sourceScan) throw new Error('Input scan generation already active');
     sourceScan = new Map();
     scanProjections = new Map();
     scanRecords = new WeakMap();
     scanInventories = new Map();
     scanLeaves = new Map();
+    scanDirectories = new Map();
     acceptedSources.clear();
   }
   function acceptSourceProof(root, sources) {
@@ -235,20 +171,17 @@ export function createSnapshotContext({ signal, inputConcurrency = defaultConfig
     return scanProjections.get(key);
   }
   function cancelScanGeneration(reason) {
-    sourceScan = scanProjections = scanRecords = scanInventories = scanLeaves = undefined;
-    scanWorkerCount = 0;
+    sourceScan = scanProjections = scanRecords = scanInventories = scanLeaves = scanDirectories = undefined;
     acceptedSources.clear();
-    return hashPool?.close(reason);
+    return pool.close(reason);
   }
   async function finishScanGeneration() {
     // Disable memoization before the independent freshness gate; every accepted
     // path is checked, including synthetic missing sources and symlink targets.
-    sourceScan = scanProjections = scanRecords = scanInventories = scanLeaves = undefined;
+    sourceScan = scanProjections = scanRecords = scanInventories = scanLeaves = scanDirectories = undefined;
     const proofs = [...acceptedSources];
     acceptedSources.clear();
-    scanWorkerCount = 0;
-    await hashPool?.close();
-    hashPool = undefined;
+
     const settled = await profileStage('coverage-source-acceptance', () => Promise.allSettled(proofs.map(async ([file, expected]) => {
       if (await freshSourceHash(file) !== expected) throw new Error(`Covered source changed during cache scan: ${file}`);
     })));
@@ -261,49 +194,53 @@ export function createSnapshotContext({ signal, inputConcurrency = defaultConfig
       const values = new Array(files.length);
       let remaining = 0;
       const failures = [];
-      function enqueue(file, ancestors, assign, directoryExcluded, regularHint = false) {
+      function enqueue(file, ancestors, assign, directoryExcluded) {
         remaining++;
-        run(async () => {
+        // A directory releases its scanner slot before it queues child jobs.
+        // Aggregation stays on the coordinator and never waits inside admission.
+        (async () => {
           if (failures.length) return;
-          let info;
-          try {
-            if (regularHint && scanWorkerCount && !config.regularFilesOnly) {
-              const value = await inspectLeaf(file);
-              if (value.kind === 'file') { assign(['file', value.hash]); return; }
-            }
-            info = await lstat(file, { bigint: true }, config.regularFilesOnly ? 'artifact-proof' : 'identify-entry');
-          }
+          let value;
+          try { value = await inspectEntry(file, Boolean(config.regularFilesOnly)); }
           catch (error) {
             if (error.code === 'ENOENT' && config.allowMissing && !config.regularFilesOnly) { assign(['missing']); return; }
             throw error;
           }
-          if (config.regularFilesOnly && !info.isFile()) throw new TypeError(`Artifact must be a regular file: ${file}`);
-          if (info.isSymbolicLink()) {
-            const readlinkTarget = await readlink(file);
-            const target = await realpath(file).catch(error => {
-              if (error.code === 'ENOENT' && config.allowMissing) return resolve(dirname(file), readlinkTarget);
-              throw error;
+          if (config.regularFilesOnly && value.kind !== 'file') throw new TypeError(`Artifact must be a regular file: ${file}`);
+          if (value.kind === 'file') { assign(['file', value.hash]); return; }
+          if (value.kind === 'symlink') {
+            const { readlinkTarget, target } = await run(async () => {
+              const readlinkTarget = await readlink(file);
+              const target = await realpath(file).catch(error => {
+                if (error.code === 'ENOENT' && config.allowMissing) return resolve(dirname(file), readlinkTarget);
+                throw error;
+              });
+              return { readlinkTarget, target };
             });
-            const value = ['symlink', readlinkTarget, null];
-            assign(value);
-            if (ancestors.has(target)) value[2] = ['cycle', target];
-            else enqueue(target, ancestors, identity => { value[2] = identity; }, directoryExcluded);
-          } else if (info.isFile()) {
-            assign(['file', await fileIdentity(file, info)]);
-          } else if (info.isDirectory()) {
-            const canonical = await realpath(file);
+            const identity = ['symlink', readlinkTarget, null];
+            assign(identity);
+            if (ancestors.has(target)) identity[2] = ['cycle', target];
+            else enqueue(target, ancestors, nested => { identity[2] = nested; }, directoryExcluded);
+          } else if (value.kind === 'directory') {
+            let discovery = scanDirectories?.get(file);
+            if (!discovery) {
+              discovery = run(async () => ({ canonical: await realpath(file),
+                children: (await readdir(file, { withFileTypes: true })).map(entry => entry.name).sort() }));
+              scanDirectories?.set(file, discovery);
+              discovery.catch(() => { if (scanDirectories?.get(file) === discovery) scanDirectories.delete(file); });
+            }
+            const { canonical, children: names } = await discovery;
             if (config.fixtureCacheDirectory && (inside(config.cacheDirectory, file) || inside(config.fixtureCacheDirectory, canonical))) {
               throw new Error(`Fixture directory must stay outside cacheDirectory: ${file}`);
             }
             if (ancestors.has(canonical)) { assign(['cycle', canonical]); return; }
             const nested = new Set(ancestors).add(canonical);
-            const children = (await readdir(file, { withFileTypes: true })).sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0)
-              .map(entry => ({ file: join(file, entry.name), regular: entry.isFile(), value: [entry.name, null] }))
+            const children = names.map(name => ({ file: join(file, name), value: [name, null] }))
               .filter(entry => !exclude(entry.file) && !directoryExcluded(entry.file) && !excludedFiles.has(entry.file));
             assign(['directory', children.map(entry => entry.value)]);
-            for (const entry of children) enqueue(entry.file, nested, identity => { entry.value[1] = identity; }, directoryExcluded, entry.regular);
+            for (const entry of children) enqueue(entry.file, nested, identity => { entry.value[1] = identity; }, directoryExcluded);
           } else throw new Error(`Unsupported input type: ${file}`);
-        }).catch(error => { if (!failures.length) failures.push(error); }).finally(() => {
+        })().catch(error => { if (!failures.length) failures.push(error); }).finally(() => {
           if (!--remaining) failures.length ? reject(failures[0]) : resolveIdentities(values);
         });
       }
@@ -316,18 +253,14 @@ export function createSnapshotContext({ signal, inputConcurrency = defaultConfig
     if (!closed) closeReason = reason;
     closed = true;
     const hashing = cancelScanGeneration(closeReason);
-    waiting.splice(0).forEach(({ reject }) => reject(closeReason));
-    queueProfile?.state(active, 0);
-    if (!active) queueProfile?.close();
     signal?.removeEventListener('abort', abort);
-    const draining = active ? new Promise(resolve => idle.push(resolve)) : Promise.resolve();
-    closing = Promise.all([draining, hashing]).then(() => {});
+    closing = Promise.resolve(hashing).then(() => {});
     return closing;
   };
   const abort = () => { void close(signal.reason).catch(() => {}); };
   signal?.addEventListener('abort', abort, { once: true });
   if (signal?.aborted) abort();
-  return { run, excluded, directoryExcluded, identify, discoverInventory, projectionMemo, fingerprintRecords: () => scanRecords ?? new WeakMap(), sourceHash, beginScanGeneration, acceptSourceProof, cancelScanGeneration, finishScanGeneration, digests, exclusions, close };
+  return { run, scanState: pool.state, excluded, directoryExcluded, identify, discoverInventory, projectionMemo, fingerprintRecords: () => scanRecords ?? new WeakMap(), sourceHash, beginScanGeneration, acceptSourceProof, cancelScanGeneration, finishScanGeneration, digests, exclusions, close };
 }
 
 export async function discoverTests({ root, testDirectory, pattern, ignore }) {
@@ -506,7 +439,7 @@ export function createSnapshot(config, context = createSnapshotContext()) {
           (async () => {
             if (!fixtures.length) return [];
             fixtureProjection ??= (async () => {
-              const fixtureCacheDirectory = await realpath(config.cacheDirectory).catch(error => {
+              const fixtureCacheDirectory = await context.run(() => realpath(config.cacheDirectory)).catch(error => {
                 if (error.code === 'ENOENT') return config.cacheDirectory;
                 throw error;
               });

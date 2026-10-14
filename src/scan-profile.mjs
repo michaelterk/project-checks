@@ -92,7 +92,7 @@ export function profileQueue(name, capacity, now = () => performance.now()) {
   const started = now();
   let last = started, finished, active = 0, waiting = 0;
   let peakActive = 0, peakWaiting = 0, admittedTasks = 0;
-  let busyMilliseconds = 0, atCapacityMilliseconds = 0, activeTaskMilliseconds = 0;
+  let busyMilliseconds = 0, atCapacityMilliseconds = 0, activeTaskMilliseconds = 0, capacityMilliseconds = 0;
   let queueWaitMilliseconds = 0, maximumQueueWaitMilliseconds = 0;
   function account(time) {
     if (finished !== undefined) return;
@@ -100,6 +100,7 @@ export function profileQueue(name, capacity, now = () => performance.now()) {
     if (active) busyMilliseconds += elapsed;
     if (active === capacity) atCapacityMilliseconds += elapsed;
     activeTaskMilliseconds += active * elapsed;
+    capacityMilliseconds += capacity * elapsed;
     last = time;
   }
   function state(nextActive, nextWaiting, time = now()) {
@@ -112,6 +113,7 @@ export function profileQueue(name, capacity, now = () => performance.now()) {
   }
   const queue = {
     state,
+    resize(value) { account(now()); capacity = value; },
     admit(queuedAt, nextActive, nextWaiting) {
       const time = state(nextActive, nextWaiting);
       admittedTasks++;
@@ -129,7 +131,7 @@ export function profileQueue(name, capacity, now = () => performance.now()) {
         atCapacityPercentOfLifetime: percent(atCapacityMilliseconds, lifetimeMilliseconds),
         atCapacityPercentOfBusy: percent(atCapacityMilliseconds, busyMilliseconds),
         averageActiveTasks: lifetimeMilliseconds ? activeTaskMilliseconds / lifetimeMilliseconds : 0,
-        capacityUtilizationPercent: percent(activeTaskMilliseconds, lifetimeMilliseconds * capacity),
+        capacityUtilizationPercent: percent(activeTaskMilliseconds, capacityMilliseconds),
         queueWaitMilliseconds, maximumQueueWaitMilliseconds,
       };
     },

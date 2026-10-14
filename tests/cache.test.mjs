@@ -5,7 +5,7 @@ import { syncBuiltinESMExports } from 'node:module';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import test from 'node:test';
-import { Admission, cacheKey, cacheRecordName, runCachedUnits } from '../src/index.mjs';
+import { Admission, createSnapshotContext, cacheKey, cacheRecordName, runCachedUnits } from '../src/index.mjs';
 import { temporary } from './helpers.mjs';
 
 async function fixture(t) {
@@ -34,11 +34,13 @@ test('upfront plans share 32 concurrent reads and never reread records during ex
   const directory = await temporary(t);
   const ids = Array.from({ length: 40 }, (_, index) => `file-${index}`);
   const inputs = { common: 'shared', units: Object.fromEntries(ids.map(id => [id, 'v1'])) };
+  const context = createSnapshotContext();
+  t.after(() => context.close());
   const options = suite => ({
     suite, cacheDirectory: directory, workers: 1, logger: null,
     units: ids.map(id => ({ id, identity: 'fixture' })), snapshot: () => inputs,
   });
-  for (const suite of ['one', 'two']) await runCachedUnits({ ...options(suite), execute: () => 0 });
+  for (const suite of ['one', 'two']) await runCachedUnits({ ...options(suite), execute: () => 0 }, { artifactContext: context });
   const changed = ids.filter((_, index) => index % 2);
   for (const id of changed) inputs.units[id] = 'v2';
   const owners = new Map(['one', 'two'].flatMap(suite => ids.map(id =>
@@ -65,7 +67,7 @@ test('upfront plans share 32 concurrent reads and never reread records during ex
       calls[suite].push(unit.id);
       return 0;
     },
-  })));
+  }, { artifactContext: context })));
   assert.equal(peak, 32);
   assert.equal(reads.size, 80);
   assert.ok([...reads.values()].every(count => count === 1));

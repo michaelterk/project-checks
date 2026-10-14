@@ -5,7 +5,7 @@ export const inputMetadata = info => [info.dev, info.ino, info.mode, info.size, 
 
 // A worker owns this fixed buffer and one file handle at a time. Read actual
 // bytes through EOF, including virtual regular files with misleading st_size.
-export function hashInputSync(file, expected, buffer, cancelled = () => false, metrics = {}, duringRead) {
+export function hashInputSync(file, expected, buffer, cancelled = () => false, metrics = {}) {
   const check = () => {
     if (cancelled()) throw Object.assign(new Error(`Input hashing cancelled: ${file}`), { code: 'INPUT_HASH_CANCELLED', path: file });
   };
@@ -18,7 +18,6 @@ export function hashInputSync(file, expected, buffer, cancelled = () => false, m
   try {
     while (true) {
       check();
-      duringRead?.(metrics.bytes);
       const bytes = readSync(descriptor, buffer, 0, buffer.length, null);
       if (!bytes) break;
       metrics.bytes += bytes;
@@ -34,14 +33,14 @@ export function hashInputSync(file, expected, buffer, cancelled = () => false, m
 
 // Directory entries are hints only: inspect the actual current type in this
 // worker before either trusting a prior digest or reading bytes.
-export function inspectInputSync(file, cached, buffer, cancelled, metrics = {}, beforeHash, duringRead) {
+export function inspectInputSync(file, cached, buffer, cancelled, metrics = {}) {
   if (cancelled()) throw Object.assign(new Error(`Input hashing cancelled: ${file}`), { code: 'INPUT_HASH_CANCELLED', path: file });
   metrics.initialStat = true;
   const info = lstatSync(file, { bigint: true });
-  if (!info.isFile()) return { kind: 'other' };
+  if (!info.isFile()) return { kind: info.isDirectory() ? 'directory' : info.isSymbolicLink() ? 'symlink' : 'other' };
   const identity = inputMetadata(info);
   let hash;
   if (cached?.identity === identity) hash = cached.hash;
-  else { beforeHash?.(info); hash = hashInputSync(file, identity, buffer, cancelled, metrics, duringRead); }
+  else hash = hashInputSync(file, identity, buffer, cancelled, metrics);
   return { kind: 'file', identity, hash };
 }

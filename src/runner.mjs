@@ -1,4 +1,3 @@
-import { scanHashWorkers } from './input-hash-pool.mjs';
 import { isDeepStrictEqual } from 'node:util';
 import { createCoverage } from './coverage.mjs';
 import { Admission } from './admission.mjs';
@@ -43,7 +42,7 @@ async function normalizeConfig(options) {
 }
 
 function fileSnapshot(config) {
-  const context = config.snapshotContext ?? createSnapshotContext({ signal: config.signal, inputConcurrency: config.inputConcurrency });
+  const context = config.snapshotContext ?? createSnapshotContext({ signal: config.signal, inputConcurrency: config.inputConcurrency ?? config.scanConcurrency ?? defaultScanConcurrency, resources: config.resources });
   const snapshot = createSnapshot(config, context);
   let closed = false;
   const pending = new Set();
@@ -105,7 +104,7 @@ async function runTestsWithSignal(options, { retained, normalPhase, cacheScan, q
     return { exitCode: 0, total: 0, passed: 0, failed: 0, cached: 0, excluded: selectedFiles.length, results: [] };
   }
   applyExclusions(config, excluded);
-  const context = config.snapshotContext ?? createSnapshotContext({ signal: config.signal, inputConcurrency: config.inputConcurrency });
+  const context = config.snapshotContext ?? createSnapshotContext({ signal: config.signal, inputConcurrency: config.inputConcurrency ?? config.scanConcurrency ?? defaultScanConcurrency, resources: config.resources });
   config.snapshotContext = context;
   let inputs, artifacts, fixture;
   let before;
@@ -169,7 +168,7 @@ async function runTestsWithSignal(options, { retained, normalPhase, cacheScan, q
     const retryTimeouts = options.retryTimeouts ?? false;
     const retryTimeoutMs = options.retryTimeoutMs ?? 60000;
     inputs = fileSnapshot(config);
-    if (!options.snapshotContext) context.beginScanGeneration({ hashWorkers: options.admission ? 0 : scanHashWorkers(admission) });
+    if (!options.snapshotContext) context.beginScanGeneration();
     const initialSnapshot = await inputs.prepare(inventory);
     before = initialSnapshot.value;
     const prepareUnit = initialSnapshot.unit;

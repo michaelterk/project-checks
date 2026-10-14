@@ -1,4 +1,3 @@
-import { scanHashWorkers } from './input-hash-pool.mjs';
 import { resolve } from 'node:path';
 import { profileStage } from './scan-profile.mjs';
 import { createFileQueue } from './file-queue.mjs';
@@ -171,10 +170,10 @@ export async function runChecks(definitions, options = {}) {
       }));
       if (configError) throw configError;
       const configs = new Map(preparedConfigs.map(result => result.value));
-      const inputConcurrency = options.inputConcurrency ?? (configs.size
-        ? Math.min(...[...configs.values()].map(config => config.inputConcurrency ?? defaultConfig.inputConcurrency)) : defaultConfig.inputConcurrency);
-      snapshotContext = createSnapshotContext({ signal, inputConcurrency });
-      snapshotContext.beginScanGeneration({ hashWorkers: scanHashWorkers(admission) });
+      const inputConcurrency = options.inputConcurrency ?? options.scanConcurrency ?? (configs.size
+        ? Math.min(...[...configs.values()].map(config => config.inputConcurrency ?? config.scanConcurrency ?? defaultConfig.scanConcurrency)) : defaultConfig.scanConcurrency);
+      snapshotContext = createSnapshotContext({ signal, inputConcurrency, resources: options.resources });
+      snapshotContext.beginScanGeneration();
       for (const definition of testDefinitions) {
         const { id } = definition;
         if (failedPrerequisite(id)) {
@@ -235,7 +234,7 @@ export async function runChecks(definitions, options = {}) {
         await profileStage('scan-queue', () => scanCacheJobs(jobs.map(run => Object.assign(async () => {
           try { signal.throwIfAborted(); await run(); }
           catch (error) { controller.abort(error); throw error; }
-        }, { scanIdentity: run.scanIdentity })), options.resources, scanConcurrency, { logger: options.progress === false ? null : logger }));
+        }, { scanIdentity: run.scanIdentity })), options.resources, scanConcurrency, { logger: options.progress === false ? null : logger, snapshotContext }));
       } finally {
         scanning = false;
         if (signal.aborted) scanned.reject(signal.reason);

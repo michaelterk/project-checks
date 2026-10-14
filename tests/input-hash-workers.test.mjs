@@ -6,7 +6,7 @@ import { lstat, rm, symlink, writeFile } from 'node:fs/promises';
 import { syncBuiltinESMExports } from 'node:module';
 import { join } from 'node:path';
 import test from 'node:test';
-import { createHashPool, scanHashWorkers } from '../src/input-hash-pool.mjs';
+import { createHashPool } from '../src/input-hash-pool.mjs';
 import { hashInputSync, inputMetadata } from '../src/input-hash-sync.mjs';
 import { createSnapshotContext } from '../src/inputs.mjs';
 import { digest } from '../src/util.mjs';
@@ -22,13 +22,6 @@ function fakeWorkers() {
   }
   return { workers, createWorker: options => new Fake(options) };
 }
-
-test('hash worker count leaves a coordinator CPU and honors resource and memory caps', () => {
-  assert.equal(scanHashWorkers({ selected: { cpuBudget: 8, workers: 8 } }), 4);
-  assert.equal(scanHashWorkers({ selected: { cpuBudget: 3.9, workers: 8 } }), 2);
-  assert.equal(scanHashWorkers({ selected: { cpuBudget: 8, workers: 1 } }), 1);
-  assert.equal(scanHashWorkers({ selected: { cpuBudget: 1, workers: 1 } }), 0);
-});
 
 test('pool starts lazily, caps jobs, rejects queued cancellation and drains active workers before termination', async () => {
   const fake = fakeWorkers(), pool = createHashPool({ workers: 2, createWorker: fake.createWorker });
@@ -96,25 +89,12 @@ test('worker failures retain filesystem code and path and a subsequent explicit 
   assert.equal(await pool.hash(file, inputMetadata(await lstat(file, { bigint: true }))), digest('later'));
 });
 
-test('worker post-read proof rejects file races and parent evicts the failed digest', async t => {
+test('synchronous post-read proof rejects changed bytes rather than publishing a digest', async t => {
   const root = await temporary(t), file = await put(root, 'source', 'first');
-  // Make the rewrite observable even within one filesystem clock tick.
   await promises.utimes(file, new Date(0), new Date(0));
-  const context = createSnapshotContext();
-  t.after(() => context.close());
-  context.beginScanGeneration({ hashWorkers: 1 });
-  const original = promises.lstat;
-  let mutate = true;
-  promises.lstat = async (path, ...args) => {
-    const info = await original(path, ...args);
-    if (path === file && mutate) { mutate = false; await writeFile(file, 'later'); }
-    return info;
-  };
-  syncBuiltinESMExports();
-  t.after(() => { promises.lstat = original; syncBuiltinESMExports(); });
-  await assert.rejects(context.sourceHash(file), error => error.message.includes('Input changed while hashing') && error.message.includes(file));
-  assert.equal(context.digests.has(file), false);
-  assert.equal(await context.sourceHash(file), digest('later'));
+  const identity = inputMetadata(await lstat(file, { bigint: true }));
+  await writeFile(file, 'later');
+  assert.throws(() => hashInputSync(file, identity, Buffer.alloc(65536)), /Input changed while hashing/);
 });
 
 test('synchronous worker cancellation closes the descriptor between bounded chunks', async t => {
@@ -157,7 +137,7 @@ test('worker inspection freshly checks cached metadata and returns changed non-f
   await rm(file);
   await assert.rejects(pool.inspect(file, first), error => error.code === 'ENOENT' && error.path === file);
   await symlink(root, file);
-  assert.deepEqual(await pool.inspect(file, first), { kind: 'other' });
+  assert.deepEqual(await pool.inspect(file, first), { kind: 'symlink' });
 });
 
 test('worker leaf inspection shares overlapping projections and preserves legacy directory order and fresh generations', async t => {
@@ -216,72 +196,73 @@ test('worker leaf type changes after readdir fall back to symlink traversal and 
   await context.finishScanGeneration();
 });
 
-test('worker batches cap eight owned jobs, publish partial results and drain cancellation before termination', async () => {
+test('every input file is independently admitted and completed', async () => {
   const fake = fakeWorkers(), pool = createHashPool({ workers: 1, createWorker: fake.createWorker });
-  const first = pool.hash('first', 'identity');
-  const jobs = Array.from({ length: 10 }, (_, index) => pool.hash(`queued-${index}`, 'identity'));
-  fake.workers[0].complete();
-  await first;
-  const worker = fake.workers[0];
-  assert.equal(worker.job.jobs.length, 8);
-  const completed = worker.job.jobs.splice(0, 2);
-  worker.emit('message', { results: completed.map(({ id }) => ({ id, hash: 'partial', metrics: {} })), done: false });
-  assert.deepEqual(await Promise.all(jobs.slice(0, 2)), ['partial', 'partial']);
-  const reason = new Error('abort partial batch');
-  const rejected = jobs.slice(2).map(job => assert.rejects(job, error => error === reason));
-  let closed = false;
-  const closing = pool.close(reason).then(() => { closed = true; });
-  await Promise.all(rejected.slice(6));
-  assert.equal(closed, false);
-  assert.equal(worker.terminated, false);
-  worker.complete();
-  await Promise.all([...rejected, closing]);
-  assert.equal(worker.dispatched, 9, 'two still-queued jobs never ran');
-  assert.equal(worker.terminated, true);
+  const jobs = Array.from({ length: 10 }, (_, index) => pool.inspect(`file-${index}`));
+  for (let index = 0; index < jobs.length; index++) {
+    assert.equal(fake.workers[0].job.jobs.length, 1);
+    fake.workers[0].complete();
+    await jobs[index];
+  }
+  await pool.close();
+  assert.equal(fake.workers[0].dispatched, 10);
 });
 
-test('worker batch protocol rejects unknown IDs, duplicates and incomplete final messages without retry', async () => {
+test('worker protocol rejects unknown IDs and duplicate results without retry', async () => {
   for (const kind of ['unknown', 'duplicate', 'incomplete']) {
     const fake = fakeWorkers(), pool = createHashPool({ workers: 1, createWorker: fake.createWorker });
     const first = pool.hash('first', 'identity');
-    const jobs = [pool.hash('second', 'identity'), pool.hash('third', 'identity')];
-    const rejected = jobs.map(job => assert.rejects(job, /Invalid input hash worker response/));
-    fake.workers[0].complete(); await first;
-    const worker = fake.workers[0], [second] = worker.job.jobs;
+    const rejected = assert.rejects(first, /Invalid input scanner worker response/);
+    const worker = fake.workers[0], [job] = worker.job.jobs;
     worker.job = undefined;
-    const value = { id: second.id, hash: 'invalid', metrics: {} };
+    const value = { id: job.id, hash: 'invalid', metrics: {} };
     worker.emit('message', { done: true, results: kind === 'unknown' ? [{ ...value, id: -1 }]
-      : kind === 'duplicate' ? [value, value] : [value] });
-    await Promise.all(rejected); await pool.close();
-    assert.equal(worker.dispatched, 3);
+      : kind === 'duplicate' ? [value, value] : [] });
+    await rejected; await pool.close();
+    assert.equal(worker.dispatched, 1);
     assert.equal(worker.terminated, true);
   }
 });
 
-test('real worker batches isolate per-file errors and flush completed results before a fresh large-file read', async t => {
-  const { Worker } = await import('node:worker_threads');
-  const root = await temporary(t);
-  const small = await put(root, 'small', 'small'), largeBytes = Buffer.alloc(4 * 1024 * 1024, 1);
-  const large = await put(root, 'large', largeBytes);
-  const worker = new Worker(new URL('../src/input-hash-worker.mjs', import.meta.url), {
-    workerData: { cancellation: new SharedArrayBuffer(4) }, execArgv: [],
-  });
-  t.after(() => worker.terminate());
-  const messages = [], finished = Promise.withResolvers();
-  worker.on('error', finished.reject);
-  worker.on('message', message => { messages.push(message); if (message.done) finished.resolve(); });
-  worker.postMessage({ jobs: [
-    { id: 1, file: small, inspect: true }, { id: 2, file: join(root, 'missing'), inspect: true },
-    { id: 3, file: large, inspect: true, cached: { identity: 'stale-small-size-hint', hash: 'invalid' } },
-    { id: 4, file: small, inspect: true },
-  ] });
-  await finished.promise;
-  const results = messages.flatMap(message => message.results);
-  assert.deepEqual(results.map(value => value.id), [1, 2, 3, 4]);
-  assert.equal(results[0].hash.hash, digest('small'));
-  assert.equal(results[1].error.code, 'ENOENT');
-  assert.equal(results[2].hash.hash, digest(largeBytes));
-  assert.equal(results[3].hash.hash, digest('small'));
-  assert.ok(messages.findIndex(message => message.results.some(value => value.id === 1))
-    < messages.findIndex(message => message.results.some(value => value.id === 3)), 'large actual size flushes preceding small results before its hash');
+test('real workers isolate per-file errors and release ownership before another file', async t => {
+  const root = await temporary(t), small = await put(root, 'small', 'small');
+  const bytes = Buffer.alloc(4 * 1024 * 1024, 1), large = await put(root, 'large', bytes);
+  const pool = createHashPool({ workers: 1 });
+  t.after(() => pool.close());
+  const results = await Promise.allSettled([pool.inspect(small), pool.inspect(join(root, 'missing')), pool.inspect(large)]);
+  assert.equal(results[0].value.hash, digest('small'));
+  assert.equal(results[1].reason.code, 'ENOENT');
+  assert.equal(results[2].value.hash, digest(bytes));
+});
+
+test('borrowed file worker cancellation drains its one outer admission exactly once', async () => {
+  const fake = fakeWorkers(), pool = createHashPool({ workers: 1, createWorker: fake.createWorker });
+  const file = pool.runWithWorker(hash => hash('owned-file', 'identity'));
+  await new Promise(resolve => setImmediate(resolve));
+  const queued = pool.inspect('queued-file'), reason = new Error('cancel borrowed reader');
+  const rejected = assert.rejects(file, error => error === reason);
+  const pending = assert.rejects(queued, error => error === reason);
+  let closed = false;
+  const closing = pool.close(reason).then(() => { closed = true; });
+  await pending;
+  assert.equal(pool.state().active, 1);
+  assert.equal(closed, false);
+  fake.workers[0].complete();
+  await Promise.all([rejected, closing]);
+  assert.equal(pool.state().active, 0);
+  assert.equal(fake.workers[0].dispatched, 1);
+  assert.equal(fake.workers[0].terminated, true);
+});
+
+test('borrowed worker failure releases the outer file admission without retry', async () => {
+  const fake = fakeWorkers(), pool = createHashPool({ workers: 1, createWorker: fake.createWorker });
+  const file = pool.runWithWorker(hash => hash('owned-file', 'identity'));
+  await new Promise(resolve => setImmediate(resolve));
+  const failure = new Error('owned worker failed'), rejected = assert.rejects(file, error => error === failure);
+  fake.workers[0].job = undefined;
+  fake.workers[0].emit('error', failure);
+  await rejected; await pool.close();
+  assert.equal(pool.state().active, 0);
+  assert.equal(fake.workers[0].dispatched, 1);
+  assert.equal(fake.workers[0].terminated, true);
 });

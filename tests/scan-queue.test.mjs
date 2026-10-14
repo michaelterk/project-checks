@@ -1,101 +1,95 @@
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import test from 'node:test';
-import { createScanQueue } from '../src/scan-queue.mjs';
+import { createHashPool } from '../src/input-hash-pool.mjs';
+import { createSnapshotContext } from '../src/inputs.mjs';
+import { digest } from '../src/util.mjs';
+import { put, temporary } from './helpers.mjs';
+import { join } from 'node:path';
 
 const host = { cpus: 16, cpuQuotaCpus: 16, memoryMiB: 16384 };
-const reading = () => ({ busyCpus: 2, pressure: 0, memoryPressure: 0, ioPressure: 0, availableMemoryMiB: 8192 });
+const telemetry = () => ({ busyCpus: 2, pressure: 0, memoryPressure: 0, ioPressure: 0, availableMemoryMiB: 8192 });
 const flush = () => new Promise(resolve => setImmediate(resolve));
-
-async function pool(t, telemetry = reading()) {
+function fixture(t, initial = 32, overrides = {}) {
   t.mock.timers.enable({ apis: ['setInterval'] });
-  const queue = createScanQueue({ host, sample: () => telemetry });
-  const release = Promise.withResolvers();
-  let active = 0, started = 0;
-  const operations = Array.from({ length: 80 }, () => async () => {
-    active++; started++;
-    try { await release.promise; } finally { active--; }
+  const reading = { ...telemetry(), ...overrides }, workers = [];
+  class Fake extends EventEmitter {
+    constructor() { super(); workers.push(this); }
+    postMessage(message) { assert.equal(this.job, undefined); [this.job] = message.jobs; }
+    complete() { const job = this.job; this.job = undefined; this.emit('message', { results: [{ id: job.id, hash: 'digest', metrics: {} }], done: true }); }
+    async terminate() { assert.equal(this.job, undefined); this.retired = true; this.emit('exit', 1); }
+  }
+  const pool = createHashPool({ workers: initial, host, sample: () => reading, createWorker: () => new Fake() });
+  const jobs = Array.from({ length: 80 }, (_, index) => pool.inspect(`file-${index}`));
+  const settled = Promise.allSettled(jobs);
+  t.after(async () => {
+    const closing = pool.close();
+    workers.filter(worker => worker.job).forEach(worker => worker.complete());
+    await Promise.all([settled, closing]);
   });
-  const settled = Promise.allSettled(queue.enqueue(operations));
-  t.after(async () => { release.resolve(); await settled; });
-  await flush();
-  return { telemetry, queue, release, settled, active: () => active, started: () => started };
+  return { pool, workers, reading, active: () => workers.filter(worker => worker.job).length };
 }
 
-test('cache scan starts 32 workers and grows by eight each second of spare CPU', async t => {
-  const p = await pool(t);
-  assert.equal(p.active(), 32);
+test('input scanner starts32 independently owned files and grows on spare capacity', async t => {
+  const f = fixture(t);
+  assert.equal(f.active(), 32);
   t.mock.timers.tick(1000);
-  await flush();
-  assert.equal(p.active(), 40);
+  assert.equal(f.active(), 40);
   t.mock.timers.tick(1000);
-  await flush();
-  assert.equal(p.active(), 48);
-  p.release.resolve();
-  assert.ok((await p.settled).every(result => result.status === 'fulfilled'));
-  assert.equal(p.started(), 80);
-  const hold = Promise.withResolvers();
-  let started = 0;
-  const next = Promise.all(p.queue.enqueue(Array.from({ length: 50 }, () => async () => { started++; await hold.promise; })));
-  await flush();
-  assert.equal(started, 32, 'an idle pool restarts at 32');
-  hold.resolve();
-  await next;
+  assert.equal(f.active(), 48);
+  assert.ok(f.workers.every(worker => worker.job.id > 0));
 });
 
-test('CPU, memory and I/O pressure each prevent cache-scan growth', async t => {
-  const p = await pool(t);
-  for (const change of [
-    { busyCpus: 12 }, // Eight more workers would exceed the 90% CPU budget.
-    { busyCpus: NaN },
-    { pressure: 0.1 },
-    { memoryPressure: 0.1 },
-    { availableMemoryMiB: 1 },
-    { availableMemoryMiB: NaN },
-    { ioPressure: 0.1 },
-  ]) {
-    Object.assign(p.telemetry, reading(), change);
+test('CPU and memory pressure shrink BELOW startup without interrupting owned files', async t => {
+  for (const pressure of ['busyCpus', 'memoryPressure']) await t.test(pressure, async t => {
+    const f = fixture(t);
+    f.reading[pressure] = pressure === 'busyCpus' ? 16 : 0.2;
     t.mock.timers.tick(1000);
+    assert.equal(f.pool.state().limit, 24);
+    assert.equal(f.active(), 32, 'active files finish under their original ownership');
+    f.workers.slice(0, 8).forEach(worker => worker.complete());
     await flush();
-    assert.equal(p.active(), 32, JSON.stringify(change));
-  }
-  Object.assign(p.telemetry, reading(), { ioPressure: NaN });
-  t.mock.timers.tick(1000);
-  await flush();
-  assert.equal(p.active(), 40, 'missing I/O pressure data falls back to CPU and memory guards');
+    assert.equal(f.active(), 24, 'the reduced pool admits no replacements at capacity');
+    assert.equal(f.workers.filter(worker => worker.retired).length, 8);
+    t.mock.timers.tick(1000);
+    assert.equal(f.pool.state().limit, 16);
+    f.workers.filter(worker => worker.job).slice(0, 8).forEach(worker => worker.complete());
+    await flush();
+    assert.equal(f.active(), 16);
+    // Close before the next iteration: mocks and every worker retain one owner.
+    const closing = f.pool.close();
+    f.workers.filter(worker => worker.job).forEach(worker => worker.complete());
+    await closing;
+  });
 });
 
-test('shared scans respect the strictest active CPU budget', async t => {
-  const p = await pool(t);
-  const sibling = Promise.all(p.queue.enqueue([() => p.release.promise], { cpuPercent: 10 }));
-  t.mock.timers.tick(1000);
-  await flush();
-  assert.equal(p.active(), 32);
-  p.release.resolve();
-  await Promise.all([p.settled, sibling]);
+test('metadata tasks and file hashing consume the SAME scanner admission', async t => {
+  const f = fixture(t, 2), release = Promise.withResolvers();
+  f.workers.forEach(worker => worker.complete());
+  const metadata = f.pool.run(() => release.promise);
+  // Earlier file work remains queued; no separate filesystem pool can bypass it.
+  assert.equal(f.pool.state().active, 2);
+  assert.equal(f.pool.state().waiting, 77);
+  const closing = f.pool.close();
+  const rejected = assert.rejects(metadata, /Input scanner pool closed/);
+  f.workers.filter(worker => worker.job).forEach(worker => worker.complete());
+  release.resolve();
+  await Promise.all([rejected, closing]);
 });
 
-test('pressure reduces future admissions without interrupting active scans', async t => {
-  t.mock.timers.enable({ apis: ['setInterval'] });
-  const telemetry = reading();
-  const queue = createScanQueue({ host, sample: () => telemetry });
-  const holds = Array.from({ length: 60 }, () => Promise.withResolvers());
-  let started = 0;
-  const done = Promise.all(queue.enqueue(holds.map(hold => async () => { started++; await hold.promise; })));
-  t.after(async () => { holds.forEach(hold => hold.resolve()); await done; });
-  await flush();
-  t.mock.timers.tick(1000);
-  await flush();
-  assert.equal(started, 40);
-  telemetry.ioPressure = 0.2;
-  t.mock.timers.tick(1000);
-  await flush();
-  assert.equal(started, 40);
-  holds.slice(0, 8).forEach(hold => hold.resolve());
-  await flush();
-  assert.equal(started, 40, 'the raised pool drains back to 32 before admitting more jobs');
-  holds[8].resolve();
-  await flush();
-  assert.equal(started, 41);
+test('deep directories aggregate child work without holding a scanner slot', async t => {
+  const root = await temporary(t), path = 'tree/a/b/c/d/e/f/file';
+  await put(root, path, 'leaf');
+  await put(root, 'tree/other', 'other');
+  const context = createSnapshotContext({ inputConcurrency: 1 });
+  t.after(() => context.close());
+  context.beginScanGeneration();
+  const identities = await context.identify([join(root, 'tree')], { root, cacheDirectory: join(root, '.cache'), ignore: [] });
+  assert.equal(context.digests.size, 2);
+  assert.ok(JSON.stringify(identities).includes(digest('leaf')));
+  assert.ok(JSON.stringify(identities).includes(digest('other')));
+  assert.deepEqual(context.scanState(), { active: 0, waiting: 0, limit: 1 });
+  await context.finishScanGeneration();
 });
 
 test('I/O telemetry measures stall fractions and tolerates unsupported pressure files', async t => {
@@ -113,86 +107,35 @@ test('I/O telemetry measures stall fractions and tolerates unsupported pressure 
   syncBuiltinESMExports();
   t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
   const sample = resourceSampler();
-  total += 200000;
-  now += 1000;
+  total += 200000; now += 1000;
   assert.equal(sample().ioPressure, 0.2);
-  unsupported = true;
-  now += 1000;
+  unsupported = true; now += 1000;
   assert.ok(Number.isNaN(sample().ioPressure));
 });
 
-test('configured scan startup also defines the adaptive floor and resets between runs', async t => {
-  t.mock.timers.enable({ apis: ['setInterval'] });
-  const telemetry = reading();
-  const queue = createScanQueue({ host, sample: () => telemetry });
-  const holds = Array.from({ length: 40 }, () => Promise.withResolvers());
-  const states = [];
-  let active = 0;
-  const done = Promise.all(queue.enqueue(holds.map(hold => async () => {
-    active++;
-    try { await hold.promise; } finally { active--; }
-  }), {}, 4, state => states.push(state)));
-  t.after(async () => { holds.forEach(hold => hold.resolve()); await done; });
-  await flush();
-  assert.equal(active, 4);
-  assert.deepEqual(states.at(-1), { total: 40, scanned: 0, active: 4 });
-  t.mock.timers.tick(1000);
-  await flush();
-  assert.equal(active, 12, 'growth keeps the existing eight-worker increment');
-  assert.equal(states.at(-1).active, 12);
-  telemetry.ioPressure = 0.2;
-  t.mock.timers.tick(1000);
-  holds.slice(0, 8).forEach(hold => hold.resolve());
-  await flush();
-  assert.equal(active, 4, 'pressure drains back to the configured floor');
-  assert.deepEqual(states.at(-1), { total: 40, scanned: 8, active: 4 });
-  holds.forEach(hold => hold.resolve());
-  await done;
-  assert.deepEqual(states.at(-1), { total: 40, scanned: 40, active: 0 });
-  const release = Promise.withResolvers();
-  const next = Promise.all(queue.enqueue(Array.from({ length: 8 }, () => async () => {
-    active++;
-    try { await release.promise; } finally { active--; }
-  }), {}, 2));
-  t.after(async () => { release.resolve(); await next; });
-  await flush();
-  assert.equal(active, 2, 'the next project uses its own startup value');
-  release.resolve();
-  await next;
+test('initial low memory clamps admission before any file worker starts', t => {
+  const f = fixture(t, 32, { availableMemoryMiB: 96 });
+  assert.equal(f.pool.state().limit, 3);
+  assert.equal(f.active(), 3);
 });
 
-test('concurrent scan batches share the smaller configured startup without interrupting work', async t => {
-  t.mock.timers.enable({ apis: ['setInterval'] });
-  const queue = createScanQueue({ host, sample: reading });
-  const releaseFirst = Promise.withResolvers(), releaseSecond = Promise.withResolvers();
-  let active = 0;
-  const jobs = release => Array.from({ length: 12 }, () => async () => {
-    active++;
-    try { await release.promise; } finally { active--; }
-  });
-  const first = Promise.all(queue.enqueue(jobs(releaseFirst), {}, 2));
-  const second = Promise.all(queue.enqueue(jobs(releaseSecond), {}, 6));
-  t.after(async () => { releaseFirst.resolve(); releaseSecond.resolve(); await Promise.all([first, second]); });
-  await flush();
-  assert.equal(active, 2);
-  releaseFirst.resolve();
-  await first;
-  await flush();
-  assert.equal(active, 6, 'the remaining batch gets its configured startup once the smaller batch drains');
-  releaseSecond.resolve();
-  await second;
+test('an explicit scanner startup above32 has no hidden lower hash or filesystem cap', t => {
+  const f = fixture(t, 64);
+  assert.equal(f.pool.state().limit, 64);
+  assert.equal(f.active(), 64);
 });
 
-test('a new batch with the same startup value preserves adaptive growth', async t => {
-  const p = await pool(t);
+test('a pool reduced to one recovers using a smaller safe growth increment', async t => {
+  const f = fixture(t, 32);
+  f.reading.busyCpus = 16;
+  t.mock.timers.tick(4000);
+  assert.equal(f.pool.state().limit, 1);
+  f.workers.slice(0, 31).forEach(worker => worker.complete());
+  await flush();
+  assert.equal(f.active(), 1);
+  f.reading.busyCpus = 2;
   t.mock.timers.tick(1000);
-  await flush();
-  assert.equal(p.active(), 40);
-  const sibling = Promise.all(p.queue.enqueue([() => p.release.promise]));
-  await flush();
-  t.mock.timers.tick(1000);
-  await flush();
-  assert.equal(p.active(), 48, 'joining a default batch does not reset the learned scan limit');
-  p.release.resolve();
-  await Promise.all([p.settled, sibling]);
+  // CPU budget14.4 allows six extra files, but would reject an all-eight jump.
+  assert.equal(f.pool.state().limit, 7);
+  assert.equal(f.active(), 7);
 });

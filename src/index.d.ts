@@ -57,9 +57,9 @@ export interface TestConfig {
   directoryIgnore?: { directories?: string[]; files?: string[] };
   /** Worker cap; omitted starts at half the CPU budget and tunes within resource caps. */
   workers?: number;
-  /** Initial adaptive cache scan concurrency; positive integer. Default: 32. */
+  /** Initial adaptive input scanner concurrency; positive integer. Default: 32. */
   scanConcurrency?: number;
-  /** Maximum concurrent input filesystem operations; positive integer. Default: 8. */
+  /** Compatibility startup setting for the same adaptive input scanner; positive integer. Default: scanConcurrency. */
   inputConcurrency?: number;
   /** Maximum concurrent passing-file verification jobs; positive integer. Default: 32. */
   verificationConcurrency?: number;
@@ -162,7 +162,7 @@ export class Admission {
 export interface CachedUnitsOptions<T extends TestUnit = TestUnit> {
   /** Initial adaptive scan concurrency; positive integer. Default: packaged JSON value (32). */
   scanConcurrency?: number;
-  /** Maximum concurrent artifact filesystem operations; positive integer. Default: 8. */
+  /** Compatibility startup setting for the same adaptive artifact/input scanner; positive integer. Default: scanConcurrency. */
   inputConcurrency?: number;
   /** Maximum concurrent passing-file verification jobs; positive integer. Default: 32. */
   verificationConcurrency?: number;
@@ -247,7 +247,7 @@ export interface FailureExclusions {
   /** Freeze changes before final result reconciliation. Must be idempotent. */
   close(): Promise<void>;
 }
-export function createSnapshotContext(options?: { signal?: AbortSignal; inputConcurrency?: number }): SnapshotContext;
+export function createSnapshotContext(options?: { signal?: AbortSignal; inputConcurrency?: number; scanConcurrency?: number; resources?: ResourcePolicy }): SnapshotContext;
 export function createDiagnostics(options?: { logger?: Logger | false; suites?: string[]; progress?: false;
   /** Observe structured resource, inventory, queue and verified file-progress events. */
   onEvent?: (event: { event: string; [key: string]: unknown }) => void;
@@ -296,7 +296,7 @@ export function runChecks(definitions: CheckDefinition[], options?: {
   resources?: ResourcePolicy; workers?: number; signal?: AbortSignal; logger?: Logger | false;
   /** Overrides suite scan settings for the shared global scan. */
   scanConcurrency?: number;
-  /** Overrides suite input settings for the shared filesystem queue. */
+  /** Overrides the initial size of the shared adaptive input scanner. */
   inputConcurrency?: number;
   /** Overrides suite verification settings for the shared validation pool. */
   verificationConcurrency?: number;

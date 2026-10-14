@@ -165,8 +165,8 @@ process.exitCode = (await runChecks(checks)).exitCode;
 `runChecks` owns shared admission, cancellation and cleanup. It first runs command
 prerequisites needed by selected suites, so configuration factories see completed
 build outputs. Failed prerequisites prevent their consumers from loading or
-running. It then collects all remaining suite inventories and fills one scan
-queue with every selected test before starting the scan workers. Test dependencies
+running. It then collects all remaining suite inventories and starts their dependency plans together.
+Individual input entries enter one adaptive scanner shared by every suite. Test dependencies
 still control execution and fixture setup after the global scan. A command needed
 to prepare a suite cannot depend on test results; such graphs fail before execution.
 Duplicate IDs,
@@ -236,15 +236,17 @@ project-checks coverage --config project-checks.project.json --target complete
 ## Cache behavior and inputs
 
 `runChecks` runs required builds, then collects every selected suite, including
-nested projects and suites with test dependencies. It populates one shared queue
-with a scan job for every selected test file before any scan worker starts.
-The scan pool starts with `scanConcurrency` workers (default 32) and drains this complete queue; suites do not feed additional jobs as
-earlier jobs finish. Each job discovers its file dependencies, fingerprints its
-inputs, compares the cache record, and validates and restores retained artifacts
-under resource admission. Dependency identities and in-flight reads are shared
-within a snapshot; later snapshots rediscover paths and recheck metadata. Suite
-collection does not fingerprint every file before queueing. Cache-disabled files enter the plan
-as runnable without reading evidence.
+nested projects and suites with test dependencies. Each selected test has a plan
+that discovers dependencies, fingerprints inputs, compares its cache record, and
+validates retained artifacts. Plans run concurrently; their filesystem work uses
+one invocation-owned adaptive input scanner, initially `scanConcurrency` workers
+(default 32). A regular file is one work unit: its worker checks metadata, reads
+and hashes its bytes if needed, then verifies metadata before releasing its slot.
+Directories enumerate children and release admission before aggregating child
+results. Large directories therefore spread file work across the scanner.
+Dependency identities, directory inventories and reads are shared during the
+initial scan; later snapshots rediscover paths and recheck metadata.
+Cache-disabled files enter the plan as runnable without reading evidence.
 
 One combined summary reports the number of files planned to run or be skipped.
 Build prerequisites run before the queue is populated; other commands, fixture
@@ -272,16 +274,16 @@ the same execution/finalization lifecycle and scan their own selected files.
 ```text
 CACHE_SCAN: checks | Collecting all selected test files
 CACHE_SCAN: checks | Queued: 240 test files | Concurrency: 32
-CACHE_SCAN_PROGRESS: checks | 0 out of 240 scanned | Workers: 32
-CACHE_SCAN_PROGRESS: checks | 112 out of 240 scanned | Workers: 40
-CACHE_SCAN_PROGRESS: checks | 240 out of 240 scanned | Workers: 0
+CACHE_SCAN_PROGRESS: checks | 0 out of 240 scanned | Plans: 240 | Input workers: 0
+CACHE_SCAN_PROGRESS: checks | 112 out of 240 scanned | Plans: 128 | Input workers: 40
+CACHE_SCAN_PROGRESS: checks | 240 out of 240 scanned | Plans: 0 | Input workers: 0
 CACHE_SCAN: checks | Will run: 32 | Will skip: 208 | Total: 240 | Duration: 2.12s
 ```
 
 Scan progress prints at startup, once per second while scanning, and after all
-scan jobs drain. `Workers` counts currently active scan jobs for this invocation,
-including artifact validation, and reflects adaptive growth. Failed or cancelled
-jobs do not count as scanned. `progress: false` suppresses these live updates;
+test plans drain. `Plans` counts unfinished test plans; `Input workers` counts
+currently admitted input tasks, including metadata and cache-record I/O. Failed or
+cancelled plans do not count as scanned. `progress: false` suppresses these live updates;
 `logger: false` silences all output.
 
 Only zero-exit tests with unchanged inputs receive passing evidence. Evidence
@@ -436,8 +438,8 @@ inside Node's own test runner.
 | `directoryIgnore` | Packaged JSON folder/file policy | Replaces the complete traversal policy; explicit dependency/output subtrees retain their directories |
 | `ignore` | `.git`, `.test-cache`, `__pycache__` trees | Replaces default root-relative exclusions |
 | `workers` | Automatically tuned CPU/RAM-derived count | Positive integer worker cap |
-| `scanConcurrency` | `32` from packaged JSON | Positive integer initial cache scan concurrency; adaptive growth can exceed it |
-| `inputConcurrency` | `8` from packaged JSON | Positive integer cap on concurrent input and artifact filesystem operations |
+| `scanConcurrency` | `32` from packaged JSON | Initial adaptive input scanner concurrency; growth can exceed it and pressure can reduce it to one |
+| `inputConcurrency` | Unset; uses `scanConcurrency` | Compatibility startup setting for the same adaptive input scanner |
 | `verificationConcurrency` | `32` from packaged JSON | Positive integer cap on concurrent passing-file validation jobs |
 | `resources` | See below | Resource policy |
 | `cache` | `true` | Read/write passing evidence |
@@ -474,28 +476,27 @@ Programmatic callers can pass one `Admission` instance to several
 one learned CPU weight; each suite keeps its own snapshot and passing evidence.
 The caller closes that pool after all calls settle. Explicit `workers` on
 `Admission` bounds artifact restoration and execution, within RAM, unit and
-worker caps. Lightweight passing-record reads use a separate shared adaptive
-pool, starting at the configured `scanConcurrency` (default 32). Once per second, a queued backlog can add eight
-workers when measured CPU use predicts room for those workers within the active
-CPU budgets, free RAM covers the reserve plus a worker estimate, and CPU, memory,
-and I/O pressure each remain at or below 5%. Scan batches share the strictest
-active resource policy. CPU saturation or pressure reduces future admissions by
-eight, down to the configured startup value; active scans drain normally. An idle
-pool uses the next invocation's startup value. Concurrent batches use the smaller
-active startup value and the strictest resource policy. Linux I/O pressure comes from `/proc/pressure/io` (`some` stall time over
-the sampling interval); unavailable I/O data falls back to CPU and memory checks.
-Missing CPU or available-memory telemetry prevents growth. Artifact validation
-and restoration also retain command admission, independently of scan concurrency.
-Input fingerprinting bounds filesystem work at `inputConcurrency` operations within one
-invocation. The initial scan shares test inventories, identical dependency-root
-projections and serialized fingerprint records within one generation. Later
-snapshots rediscover paths and check fresh metadata. Coverage source proofs are
-shared during the scan and independently rechecked before accepting cached hits;
-normal completion rechecks them again after aggregation and dependent checks.
-Content digests remain reusable only while fresh metadata matches. Owned initial
-scans use up to four hash workers within the input cap and existing CPU/memory
-budget, reserving a CPU for coordination. Workers close at the scan boundary;
-cancellation drains open file handles before thread termination.
+worker caps. Input fingerprinting, directory metadata, coverage source checks,
+artifact proofs and passing-record reads use one adaptive scanner. It starts at
+`scanConcurrency` (default 32); `inputConcurrency` remains a compatibility startup
+setting for that same scanner. There is no separate filesystem or hash-thread cap.
+Once per second, a queued backlog can add up to eight admissions when measured CPU use
+predicts room within the CPU budget, free RAM covers worker estimates, and CPU,
+memory and I/O pressure each remain at or below 5%. Saturation or pressure reduces
+future admissions by eight, down to one, including below the configured startup.
+Active files finish normally; surplus idle threads retire without interrupting a
+read. Threads start lazily and own one fixed 64 KiB buffer each; a 32 MiB allowance
+per thread bounds admission against the resource memory budget. Linux I/O pressure
+comes from `/proc/pressure/io`; missing CPU or free-memory telemetry prevents
+growth, and unavailable pressure telemetry falls back to the remaining checks.
+
+Initial scans share inventories, entry inspection, directory child lists and
+serialized fingerprint records within one generation. Filtering and symlink/cycle
+contexts remain specific to each projection. Later snapshots discover paths and
+check fresh metadata. Coverage source proofs are independently rechecked before
+accepting cached hits and after aggregation and dependent checks. Content digests
+remain reusable only while fresh metadata matches. Cancellation drains active
+file handles before thread termination; the invocation closes its scanner.
 
 Setting `PROJECT_CHECKS_SCAN_PROFILE=1` emits a final `SCAN_PROFILE` JSON record
 from CLI `run` and `checks` invocations with detailed scan and verification metrics.
@@ -507,18 +508,19 @@ The input, startup scan and passing-file verification settings live in the packa
 ```json
 {
   "scanConcurrency": 32,
-  "inputConcurrency": 8,
   "verificationConcurrency": 32
 }
 ```
 
 `runTests` accepts all three settings; `runCachedUnits` accepts the input setting
 for artifact evidence alongside its scan and verification settings. For `runChecks`,
-explicit options control the shared input queue, global scan and verification pool;
-otherwise the smallest selected suite value applies to each setting. The CLI
+explicit options control the shared input scanner and verification pool;
+otherwise the smallest selected suite startup setting applies. An explicitly
+configured `inputConcurrency` takes precedence over that suite’s `scanConcurrency`;
+no inherited input default limits an explicitly larger scanner startup. The CLI
 `checks` command uses the consuming project's automatically loaded root configuration.
-`verificationConcurrency` is a fixed maximum; `scanConcurrency` is the starting
-value for adaptive scanning. `workers` and `--workers` continue to control test
+`verificationConcurrency` is a fixed maximum; `scanConcurrency` and the compatibility
+`inputConcurrency` setting choose the startup value of one adaptive scanner. `workers` and `--workers` continue to control test
 execution admission independently of these settings.
 
 Admission targets at most `resources.cpuQuotaPercent` of detected host CPU capacity (default 90%), reserving roughly
@@ -551,7 +553,7 @@ promises settle. Each file-snapshot handle drains its own calls on `close()` and
 rejects subsequent snapshots without closing a shared context. A caller-owned
 context keeps the limit set when it was created. Standalone suites with a
 caller-owned `Admission` use inline hashing so independent contexts do not each
-claim its full CPU budget; managed `runChecks` owns one shared hash pool.
+claim its full CPU budget; managed `runChecks` owns one shared input scanner.
 
 `createDiagnostics({ logger })` starts invocation-scoped resource sampling and
 emits `TEST_DIAGNOSTIC` JSON records. Use `suiteStart`/`suiteEnd` for setup and

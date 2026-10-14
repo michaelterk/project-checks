@@ -8,7 +8,6 @@ import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import test from 'node:test';
 import { defineConfig, loadConfig, loadChecks, runCachedUnits, runChecks, runTests } from '../src/index.mjs';
-import { createScanQueue } from '../src/scan-queue.mjs';
 import { put, temporary } from './helpers.mjs';
 
 test('JSON scan settings inherit packaged and parent defaults and allow project overrides', async t => {
@@ -26,10 +25,8 @@ test('JSON scan settings inherit packaged and parent defaults and allow project 
 });
 
 test('invalid scan concurrency fails before execution in configuration and runner APIs', async () => {
-  const queue = createScanQueue();
   for (const scanConcurrency of [0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, null, '4', true]) {
     assert.throws(() => defineConfig({ scanConcurrency }), /scanConcurrency/);
-    assert.throws(() => queue.enqueue([], {}, scanConcurrency), /scanConcurrency/);
     await assert.rejects(runChecks([], { scanConcurrency, logger: false }), /scanConcurrency/);
     await assert.rejects(runCachedUnits({
       scanConcurrency, cache: false, logger: null, units: [{ id: 'file', identity: 'fixture' }],
@@ -74,8 +71,8 @@ test('JSON overrides control actual shared scan reads and invocation options tak
   assert.equal(reads, 80);
   assert.ok(first.results.every(result => result.cached === 40));
   assert.ok(lines.some(line => /Queued: 80 test files \| Concurrency: 2/.test(line)));
-  assert.ok(lines.some(line => /CACHE_SCAN_PROGRESS: checks \| 0 out of 80 scanned \| Workers: 2/.test(line)));
-  assert.ok(lines.some(line => /CACHE_SCAN_PROGRESS: checks \| 80 out of 80 scanned \| Workers: 0/.test(line)));
+  assert.ok(lines.some(line => /CACHE_SCAN_PROGRESS: checks \| 0 out of 80 scanned \| Plans: 80/.test(line)));
+  assert.ok(lines.some(line => /CACHE_SCAN_PROGRESS: checks \| 80 out of 80 scanned \| Plans: 0/.test(line)));
   peak = reads = 0;
   lines.length = 0;
   assert.equal((await runChecks(definitions, { workers: 1, scanConcurrency: 5, logger })).exitCode, 0);
@@ -88,7 +85,7 @@ test('JSON overrides control actual shared scan reads and invocation options tak
   assert.equal(peak, 2);
   assert.equal(reads, 40);
   assert.ok(lines.some(line => /Scanning 40 test files \| Concurrency: 2/.test(line)));
-  assert.ok(lines.some(line => /CACHE_SCAN_PROGRESS: one \| 40 out of 40 scanned \| Workers: 0/.test(line)));
+  assert.ok(lines.some(line => /CACHE_SCAN_PROGRESS: one \| 40 out of 40 scanned \| Plans: 0/.test(line)));
   lines.length = 0;
   await runTests({ ...await loadConfig(join(root, 'one.json')), logger, progress: false });
   assert.equal(lines.some(line => line.startsWith('CACHE_SCAN_PROGRESS:')), false);
@@ -120,10 +117,10 @@ test('CLI run and checks use project JSON scan settings', async t => {
   const run = execute(['run', '--workers', '1']);
   assert.equal(run.status, 0, run.stderr);
   assert.match(run.stdout, /Scanning 1 test files \| Concurrency: 7/);
-  assert.match(run.stdout, /CACHE_SCAN_PROGRESS: tests \| 1 out of 1 scanned \| Workers: 0/);
+  assert.match(run.stdout, /CACHE_SCAN_PROGRESS: tests \| 1 out of 1 scanned \| Plans: 0/);
   const checks = execute(['checks', '--config', 'checks.json', '--workers', '1']);
   assert.equal(checks.status, 0, checks.stderr);
   assert.match(checks.stdout, /Queued: 1 test files \| Concurrency: 7/);
-  assert.match(checks.stdout, /CACHE_SCAN_PROGRESS: checks \| 1 out of 1 scanned \| Workers: 0/);
+  assert.match(checks.stdout, /CACHE_SCAN_PROGRESS: checks \| 1 out of 1 scanned \| Plans: 0/);
   assert.equal(JSON.parse(await readFile(join(root, 'project-checks.config.json'), 'utf8')).scanConcurrency, 7);
 });

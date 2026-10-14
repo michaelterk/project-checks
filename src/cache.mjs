@@ -12,19 +12,21 @@ import { createPermits } from './permits.mjs';
 import { createFileQueue } from './file-queue.mjs';
 import { verificationConcurrency as defaultVerificationConcurrency } from './verification-pool.mjs';
 
-import { createScanQueue, scanConcurrency as defaultScanConcurrency } from './scan-queue.mjs';
-export { scanConcurrency } from './scan-queue.mjs';
+import defaultConfig from '../project-checks.config.json' with { type: 'json' };
+export const scanConcurrency = defaultConfig.scanConcurrency;
+const defaultScanConcurrency = scanConcurrency;
 
-const scanQueue = createScanQueue();
-export async function scanCacheJobs(operations, resources, scanConcurrency = defaultScanConcurrency, { logger = null, suite = 'checks' } = {}) {
-  let latest;
-  const complete = Promise.allSettled(scanQueue.enqueue(operations.map(profileScanUnit), resources, scanConcurrency, logger ? state => { latest = state; } : undefined));
-  const report = () => {
-    if (latest) logger.log(`CACHE_SCAN_PROGRESS: ${suite} | ${latest.scanned} out of ${latest.total} scanned | Workers: ${latest.active}`);
-  };
+// Test plans discover inputs concurrently; the shared entry scanner bounds I/O.
+export async function scanCacheJobs(operations, resources, concurrency = defaultScanConcurrency, { logger = null, suite = 'checks', snapshotContext } = {}) {
+  integer(concurrency, 'scanConcurrency');
+  let active = operations.length, scanned = 0;
+  const report = () => logger?.log(`CACHE_SCAN_PROGRESS: ${suite} | ${scanned} out of ${operations.length} scanned | Plans: ${active}`
+    + (snapshotContext ? ` | Input workers: ${snapshotContext.scanState().active}` : ''));
+  report();
+  const complete = Promise.allSettled(operations.map(operation => Promise.resolve().then(profileScanUnit(operation))
+    .then(value => { scanned++; return value; }).finally(() => { active--; })));
   const timer = logger && operations.length ? setInterval(report, 1000) : undefined;
   try {
-    report();
     const settled = await complete;
     report();
     const failure = settled.find(result => result.status === 'rejected');
@@ -82,7 +84,8 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
   if (cache) await mkdir(cacheDirectory, { recursive: true });
   const results = new Array(units.length);
   const admission = sharedAdmission ?? (resources !== undefined ? new Admission(resources, units.length, { signal, workers }) : null);
-  const artifacts = saveEvidence ? artifactContext ?? createSnapshotContext({ signal, inputConcurrency }) : null;
+  const scanner = artifactContext ?? createSnapshotContext({ signal, inputConcurrency: inputConcurrency ?? scanConcurrency, resources });
+  const artifacts = saveEvidence ? scanner : null;
   async function bindEvidence(value) {
     keys(value, ['files', 'metadata'], 'evidence');
     if (!Array.isArray(value.files) || !value.files.length) throw new TypeError('evidence.files must be a nonempty array of absolute regular-file paths');
@@ -123,7 +126,7 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
     signal?.throwIfAborted();
     const entry = plan[index];
     let cached;
-    try { cached = await profileJsonRead(() => read(entry.filename, signal), { file: units[index].id }); }
+    try { cached = await profileJsonRead(() => scanner.run(() => read(entry.filename, signal)), { file: units[index].id }); }
     catch (error) { if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error; }
     signal?.throwIfAborted();
     entry.cached = cached?.key === entry.expected && cached?.passed === true;
@@ -273,7 +276,7 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
     if (queueScan || cache || initialSnapshot) {
       if (!queueScan && !cacheScan) logger?.log(`CACHE_SCAN: ${suite} | Scanning ${units.length} test files | Concurrency: ${scanConcurrency}`);
       const prepare = () => queueScan ? queueScan(jobs, scanConcurrency)
-        : scanCacheJobs(jobs, resources, scanConcurrency, { logger: progress === false ? null : logger, suite });
+        : scanCacheJobs(jobs, resources, scanConcurrency, { logger: progress === false ? null : logger, suite, snapshotContext: scanner });
       await (diagnostics ? diagnostics.span(suite, 'cache-scan', prepare) : prepare());
     }
     await afterScan?.();
@@ -321,7 +324,7 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
   finally {
     for (const index of runnable) if (!startedFiles.has(index)) progress && progress.file(suite, units[index].id, 'file-cancelled');
     restorationPermits?.close();
-    if (!artifactContext) await artifacts?.close();
+    if (!artifactContext) await scanner.close();
     if (!sharedAdmission) admission?.close();
   }
   if (stopped) throw fatal;

@@ -113,7 +113,7 @@ try {
       if (showDashboard) recorder = await createDashboardRecorder({ root: dashboardRoot, target: target ?? action, suites });
       if (showDiagnostics || showDashboard) diagnostics = createDiagnostics({ suites, onEvent: recorder?.event });
       const failureExclusions = recorder?.failureExclusions;
-      const result = action === 'checks' ? await runChecks(definitions, { resources: config.resources, workers: overrides.workers, scanConcurrency: config.scanConcurrency, inputConcurrency: explicit.has('inputConcurrency') ? config.inputConcurrency : undefined, verificationConcurrency: config.verificationConcurrency, signal: controller.signal, diagnostics, failureExclusions }) : await runTests({ ...config, signal: controller.signal, failureExclusions, ...(diagnostics ? { diagnostics } : {}) });
+      const result = action === 'checks' ? await runChecks(definitions, { resources: config.resources, workers: overrides.workers, scanConcurrency: explicit.has('scanConcurrency') ? config.scanConcurrency : undefined, inputConcurrency: explicit.has('inputConcurrency') ? config.inputConcurrency : undefined, verificationConcurrency: config.verificationConcurrency, signal: controller.signal, diagnostics, failureExclusions }) : await runTests({ ...config, signal: controller.signal, failureExclusions, ...(diagnostics ? { diagnostics } : {}) });
       process.exitCode = result.exitCode;
     }
   }

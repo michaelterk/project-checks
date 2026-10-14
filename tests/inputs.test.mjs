@@ -14,8 +14,8 @@ async function fixture(t) {
   return { root, testDirectory: 'test', pattern: '*.test.mjs', inputs: ['src'], ignore: [], cacheDirectory: join(root, '.test-cache') };
 }
 
-test('bounded context releases failed work and admits at most eight operations', async () => {
-  const context = createSnapshotContext();
+test('bounded context releases failed work and admits at most configured operations', async () => {
+  const context = createSnapshotContext({ inputConcurrency: 8 });
   let active = 0;
   let peak = 0;
   const release = [];
@@ -102,6 +102,7 @@ test('concurrent factories share digest reads, recheck metadata and retry failed
   const config = await fixture(t);
   for (let i = 0; i < 16; i++) await put(config.root, `src/${i}`, 'input');
   const context = createSnapshotContext();
+  t.after(() => context.close());
   const first = createSnapshot(config, context);
   const second = createSnapshot(config, context);
   const reads = new Map();
@@ -117,13 +118,15 @@ test('concurrent factories share digest reads, recheck metadata and retry failed
       return result;
     } finally { active--; }
   });
+  context.beginScanGeneration();
   const [left, right] = await Promise.all([first(), second()]);
   assert.deepEqual(left, right);
-  assert.ok(peak <= 8 && peak > 1);
+  assert.ok(peak <= 32 && peak > 1);
   assert.equal(reads.size, 17);
   assert.ok([...reads.values()].every(count => count === 1));
   assert.deepEqual(await second(), left);
   assert.ok([...reads.values()].every(count => count === 1));
+  await context.finishScanGeneration();
   mutate = join(config.root, 'src/0');
   await writeFile(mutate, 'new contents');
   await assert.rejects(first(), /Input changed while hashing/);
@@ -137,6 +140,7 @@ test('a failed older hash cannot overwrite or delete a newer metadata generation
   const config = await fixture(t);
   const file = await put(config.root, 'src/input', 'old contents');
   const context = createSnapshotContext();
+  t.after(() => context.close());
   const snapshot = createSnapshot(config, context);
   let release;
   let reached;
@@ -167,6 +171,7 @@ test('cached exclusion rules still detect new paths and changed ignore lists', a
   const config = await fixture(t);
   await put(config.root, 'src/first', 'first');
   const context = createSnapshotContext();
+  t.after(() => context.close());
   const snapshot = createSnapshot(config, context);
   const first = await snapshot();
   const rules = context.exclusions.values().next().value;
@@ -183,6 +188,7 @@ test('cached exclusion rules still detect new paths and changed ignore lists', a
 test('canonical literal exclusions retain native glob behavior for noncanonical patterns', async t => {
   const config = await fixture(t);
   const context = createSnapshotContext();
+  t.after(() => context.close());
   for (const pattern of ['deploy/test-all.mjs', './deploy/test-all.mjs', 'deploy/../deploy/test-all.mjs',
                          'src/', 'src/[ab]', '**/a', 'x(y)', 'star*', 'src\\a']) {
     config.ignore = [pattern];
@@ -218,6 +224,7 @@ test('missing roots drain active work without poisoning the context', async t =>
   const config = await fixture(t);
   await put(config.root, 'src/package/input', 'input');
   const context = createSnapshotContext();
+  t.after(() => context.close());
   try {
     await assert.rejects(context.identify([join(config.root, 'src'), join(config.root, 'missing')], config), /ENOENT/);
     assert.equal((await context.identify([join(config.root, 'src')], config))[0][0], 'directory');

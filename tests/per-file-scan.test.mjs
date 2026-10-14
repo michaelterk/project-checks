@@ -263,7 +263,7 @@ test('scan inventory has one owner per discovery definition and later generation
 });
 
 
-test('concurrent standalone suites sharing Admission do not create private hash pools', async t => {
+test('concurrent standalone suites sharing command Admission retain private fresh input scanners', async t => {
   const { Admission } = await import('../src/admission.mjs');
   const { interceptReads } = await import('./input-read-helpers.mjs');
   const config = await fixture(t);
@@ -280,6 +280,6 @@ test('concurrent standalone suites sharing Admission do not create private hash 
   ]);
   results.forEach(result => assert.equal(result.passed, 2));
   for (const name of ['a', 'b']) assert.equal(reads.get(join(config.root, `test/${name}.test.mjs`)), 2,
-    'each private context uses the inline reader under caller-owned Admission');
+    'each private input scanner independently verifies the current file');
   assert.equal(admission.active, 0);
 });

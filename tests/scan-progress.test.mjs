@@ -14,18 +14,18 @@ test('scan progress reports actual active workers, completed jobs, and stops aft
   const running = scanCacheJobs(holds.map(hold => () => hold.promise), {}, 2, { logger, suite: 'fixture' });
   t.after(async () => { holds.forEach(hold => hold.resolve()); await running; });
   await flush();
-  assert.deepEqual(lines, ['CACHE_SCAN_PROGRESS: fixture | 0 out of 3 scanned | Workers: 2']);
+  assert.deepEqual(lines, ['CACHE_SCAN_PROGRESS: fixture | 0 out of 3 scanned | Plans: 3']);
   holds[0].resolve();
   await flush();
   t.mock.timers.tick(1000);
-  assert.equal(lines.at(-1), 'CACHE_SCAN_PROGRESS: fixture | 1 out of 3 scanned | Workers: 2');
+  assert.equal(lines.at(-1), 'CACHE_SCAN_PROGRESS: fixture | 1 out of 3 scanned | Plans: 2');
   holds[1].resolve();
   await flush();
   t.mock.timers.tick(1000);
-  assert.equal(lines.at(-1), 'CACHE_SCAN_PROGRESS: fixture | 2 out of 3 scanned | Workers: 1');
+  assert.equal(lines.at(-1), 'CACHE_SCAN_PROGRESS: fixture | 2 out of 3 scanned | Plans: 1');
   holds[2].resolve();
   await running;
-  assert.equal(lines.at(-1), 'CACHE_SCAN_PROGRESS: fixture | 3 out of 3 scanned | Workers: 0');
+  assert.equal(lines.at(-1), 'CACHE_SCAN_PROGRESS: fixture | 3 out of 3 scanned | Plans: 0');
   const count = lines.length;
   t.mock.timers.tick(5000);
   assert.equal(lines.length, count, 'completed scans leave no progress timer behind');
@@ -43,10 +43,10 @@ test('a failed scan reports incomplete progress after every active job drains', 
   t.after(async () => { release.resolve(); await rejected; });
   await flush();
   t.mock.timers.tick(1000);
-  assert.equal(lines.at(-1), 'CACHE_SCAN_PROGRESS: broken | 1 out of 3 scanned | Workers: 1');
+  assert.equal(lines.at(-1), 'CACHE_SCAN_PROGRESS: broken | 1 out of 3 scanned | Plans: 1');
   release.resolve();
   await rejected;
-  assert.equal(lines.at(-1), 'CACHE_SCAN_PROGRESS: broken | 2 out of 3 scanned | Workers: 0');
+  assert.equal(lines.at(-1), 'CACHE_SCAN_PROGRESS: broken | 2 out of 3 scanned | Plans: 0');
   const count = lines.length;
   t.mock.timers.tick(5000);
   assert.equal(lines.length, count);
@@ -74,7 +74,7 @@ test('standalone failed scans exclude untouched queued units from progress', asy
     snapshot: () => ({ common: 'same', units: Object.fromEntries(ids.map(id => [id, 'same'])) }),
     execute: () => { throw Error('failed scans cannot execute tests'); },
   }), error => error.cause === failure && /broken\/first: cache comparison/.test(error.message));
-  assert.equal(reads, 1);
+  assert.equal(reads, 3);
   assert.equal(lines.filter(line => line.startsWith('CACHE_SCAN_PROGRESS:')).at(-1),
-    'CACHE_SCAN_PROGRESS: broken | 0 out of 3 scanned | Workers: 0');
+    'CACHE_SCAN_PROGRESS: broken | 0 out of 3 scanned | Plans: 0 | Input workers: 0');
 });
