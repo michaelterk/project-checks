@@ -290,6 +290,7 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
       progress && progress.file(suite, id, 'cache-hit');
     }
     if (orderFiles) runnable.sort((a, b) => orderFiles(units[a].id, units[b].id));
+    diagnostics?.event('file-order', { suite, files: runnable.map(index => units[index].id) });
     if (cacheScan) {
       await cacheScan({
         total: units.length, cached: units.length - runnable.length,

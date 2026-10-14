@@ -6,14 +6,20 @@ import { createProcessSampler } from './process-sampler.mjs';
 
 export function createDiagnostics(options = {}) {
   const logger = options.logger === false ? null : (options.logger ?? console);
-  const progress = options.progress === false ? false : createProgress({ logger, suites: options.suites });
+  if (options.onEvent !== undefined && typeof options.onEvent !== 'function') throw new TypeError('onEvent must be a function');
+  const progress = options.progress === false ? false : createProgress({ logger, suites: options.suites,
+    onEvent: options.onEvent ? (event, fields) => observe(event, fields) : undefined });
   const run = `${new Date().toISOString()}-${process.pid}-${randomUUID()}`;
   const suites = new Map();
   const stages = new Map();
   let admission;
   let sampleBoundary = () => {};
 
+  function observe(event, fields = {}) {
+    options.onEvent?.({ time: new Date().toISOString(), run, pid: process.pid, event, ...fields });
+  }
   function diagnostic(event, fields = {}) {
+    observe(event, fields);
     logger?.log(
       '\nTEST_DIAGNOSTIC ' +
         JSON.stringify({ time: new Date().toISOString(), run, pid: process.pid, event, ...fields }),

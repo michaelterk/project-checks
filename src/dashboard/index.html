@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Project checks</title>
+  <link rel="stylesheet" href="/dashboard.css">
+  <script type="module" src="/dashboard.js"></script>
+</head>
+<body>
+  <main>
+    <header><div><p class="eyebrow">Local test runner</p><h1>Project checks</h1></div><p id="connection" role="status">Connecting…</p></header>
+    <p id="project" class="path"></p>
+    <section aria-label="Current run">
+      <div class="run-heading"><h2 id="run-title">Waiting for a run</h2><span id="run-status"></span></div>
+      <p id="progress-label">Start checks with --dashboard to see their progress here.</p>
+      <progress id="progress" max="1" value="0" aria-labelledby="progress-label"></progress>
+      <dl class="metrics">
+        <div><dt>CPU · host</dt><dd id="cpu">—</dd></div>
+        <div><dt>Workers · active / limit</dt><dd id="workers">—</dd></div>
+        <div><dt>Cached files</dt><dd id="cached">—</dd></div>
+        <div><dt>Elapsed</dt><dd id="elapsed">—</dd></div>
+        <div><dt>Remaining · estimate</dt><dd id="eta">—</dd></div>
+      </dl>
+      <p id="timing-note" class="note"></p>
+      <p id="run-error" class="error" hidden></p>
+      <form id="discard-form" hidden>
+        <label id="exclude-current-label"><input id="exclude-current" type="checkbox"> Exclude failed test files from this run</label>
+        <label><input id="exclude-tests" type="checkbox"> Also exclude failed test files from future runs</label>
+        <button type="submit">Discard as obsolete</button>
+        <p id="discard-note" class="note">Removes this failed run and its manifest. Test source files are kept.</p>
+      </form>
+    </section>
+    <section aria-label="Test files">
+      <div class="toolbar">
+        <div id="views" role="group" aria-label="Filter test files">
+          <button type="button" data-view="running" aria-pressed="true">Running <span>0</span></button>
+          <button type="button" data-view="queued" aria-pressed="false">Queued <span>0</span></button>
+          <button type="button" data-view="completed" aria-pressed="false">Completed <span>0</span></button>
+          <button type="button" data-view="failed" aria-pressed="false">Failed <span>0</span></button>
+        </div>
+        <label class="search">Find a test <input id="search" type="search" placeholder="File or suite"></label>
+      </div>
+      <p id="list-note" class="note"></p>
+      <div class="table-wrap"><table><thead><tr><th scope="col">Test file</th><th scope="col">Suite</th><th scope="col">State</th><th scope="col">Time</th></tr></thead><tbody id="files"></tbody></table></div>
+      <p id="empty">No running test files.</p>
+    </section>
+    <details id="command-section" hidden><summary>Builds and other checks</summary><ul id="commands"></ul></details>
+    <section class="history" aria-labelledby="history-title"><h2 id="history-title">Run history</h2><p class="note">Choose a run to inspect its tests. Failed runs can be discarded above.</p><ul id="runs"></ul></section>
+    <p id="message" role="status"></p>
+  </main>
+  <template id="file-row"><tr><td class="path"></td><td></td><td></td><td></td></tr></template>
+  <template id="run-row"><li><button type="button"><span class="history-target"></span><time></time><span class="history-status"></span></button></li></template>
+</body>
+</html>

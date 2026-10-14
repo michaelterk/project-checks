@@ -6,7 +6,7 @@ import { command, inputLimit, integer, keys, text } from './util.mjs';
 import { selectConcurrency } from './resources.mjs';
 import defaultConfig from '../project-checks.config.json' with { type: 'json' };
 
-const options = ['extends', 'root', 'testDirectory', 'pattern', 'files', 'command', 'inputs', 'testInputs', 'excludeTestsFromInputs', 'ignore', 'directoryIgnore', 'workers', 'scanConcurrency', 'inputConcurrency', 'verificationConcurrency', 'resources', 'cache', 'cacheDirectory', 'suite', 'env', 'testFixtureInputs', 'signal', 'logger', 'stdio', 'retryTimeouts', 'retryTimeoutMs', 'timeoutMs', 'admission', 'snapshotContext', 'diagnostics', 'progress', 'durationHints', 'initialDurations', 'select', 'setup', 'filters', 'engine', 'coverage', 'frameworkArgs', 'normalizeNpmEnvironment'];
+const options = ['extends', 'root', 'testDirectory', 'pattern', 'files', 'command', 'inputs', 'testInputs', 'excludeTestsFromInputs', 'ignore', 'directoryIgnore', 'workers', 'scanConcurrency', 'inputConcurrency', 'verificationConcurrency', 'resources', 'cache', 'cacheDirectory', 'suite', 'env', 'testFixtureInputs', 'signal', 'logger', 'stdio', 'retryTimeouts', 'retryTimeoutMs', 'timeoutMs', 'admission', 'snapshotContext', 'diagnostics', 'progress', 'durationHints', 'initialDurations', 'select', 'setup', 'filters', 'engine', 'coverage', 'frameworkArgs', 'normalizeNpmEnvironment', 'failureExclusions'];
 export const defaultDirectoryIgnore = defaultConfig.directoryIgnore;
 export const defaultIgnore = defaultConfig.ignore;
 
@@ -82,6 +82,7 @@ export function defineConfig(config) {
     if (config[name] !== undefined && !methods.every(method => typeof config[name]?.[method] === 'function')) throw new TypeError(`${name} has invalid methods`);
   }
   if (config.progress !== undefined && config.progress !== false && !['files', 'file'].every(method => typeof config.progress?.[method] === 'function')) throw new TypeError('progress has invalid methods');
+  if (config.failureExclusions !== undefined && !['files', 'close'].every(method => typeof config.failureExclusions?.[method] === 'function')) throw new TypeError('failureExclusions has invalid methods');
   if (config.select !== undefined && typeof config.select !== 'function') {
     keys(config.select, ['include', 'exclude'], 'select');
     for (const field of ['include', 'exclude']) if (config.select[field] !== undefined) patterns(config.select[field], `select.${field}`, true);

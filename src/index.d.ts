@@ -32,6 +32,8 @@ export interface Logger {
 }
 
 export interface TestConfig {
+  /** Explicit current-invocation failure exclusions; never certifies excluded files. */
+  failureExclusions?: FailureExclusions;
   /** Project root. Defaults to cwd; loadConfig resolves it beside the config file. */
   root?: string;
   /** JSON configuration inherited before local field overrides. */
@@ -240,8 +242,16 @@ export interface Diagnostics {
   observeAdmission(admission: Admission): void;
   close(exitCode: number): void;
 }
+export interface FailureExclusions {
+  files(suite: string): Promise<string[]>;
+  /** Freeze changes before final result reconciliation. Must be idempotent. */
+  close(): Promise<void>;
+}
 export function createSnapshotContext(options?: { signal?: AbortSignal; inputConcurrency?: number }): SnapshotContext;
-export function createDiagnostics(options?: { logger?: Logger | false; suites?: string[]; progress?: false }): Diagnostics;
+export function createDiagnostics(options?: { logger?: Logger | false; suites?: string[]; progress?: false;
+  /** Observe structured resource, inventory, queue and verified file-progress events. */
+  onEvent?: (event: { event: string; [key: string]: unknown }) => void;
+}): Diagnostics;
 
 export interface TestProgress {
   files(suite: string, total: number): void;
@@ -249,7 +259,9 @@ export interface TestProgress {
   close?(exitCode: number): void;
 }
 /** Caller-owned reporter; supply all suite IDs to wait for a stable combined total. */
-export function createProgress(options?: { logger?: Logger | false | null; suites?: string[] }): TestProgress & { close(exitCode: number): void };
+export function createProgress(options?: { logger?: Logger | false | null; suites?: string[];
+  onEvent?: (event: string, fields: Record<string, unknown>) => void;
+}): TestProgress & { close(exitCode: number): void };
 
 export interface CoverageConfig {
   provider?: 'v8' | 'python';
@@ -278,6 +290,7 @@ export function loadChecks(filename: string, options?: {
   target?: string | string[]; files?: string[]; filters?: string[]; cache?: boolean; prefix?: string; frameworkArgs?: string[];
 }): Promise<CheckDefinition[]>;
 export function runChecks(definitions: CheckDefinition[], options?: {
+  failureExclusions?: FailureExclusions;
   /** Caller-owned invocation observer; close it after runChecks settles. */
   diagnostics?: Diagnostics;
   resources?: ResourcePolicy; workers?: number; signal?: AbortSignal; logger?: Logger | false;

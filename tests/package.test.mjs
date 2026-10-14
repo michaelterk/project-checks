@@ -21,6 +21,7 @@ test('packed package installs into an independent project and exposes imports, r
   assert.ok(names.includes('project-checks.config.json'));
   assert.ok(names.includes('src/index.d.ts'));
   assert.ok(names.includes('bin/project-checks.mjs'));
+  for (const asset of ['index.html', 'dashboard.css', 'dashboard.js']) assert.ok(names.includes(`src/dashboard/${asset}`));
   assert.ok(names.includes('examples/python/test/test_calculator.py'));
   assert.ok(names.includes('examples/node/test/add.test.mjs'));
   assert.ok(names.every(name => ['package.json', 'README.md', 'CONTRIBUTING.md', 'LICENSE', 'project-checks.config.json'].includes(name) || name.startsWith('src/') || name.startsWith('bin/') || name.startsWith('examples/')));

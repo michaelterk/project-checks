@@ -6,12 +6,22 @@ import { withProcessSignal } from './cancellation.mjs';
 import { readFile, realpath } from 'node:fs/promises';
 import { basename, join, resolve, delimiter } from 'node:path';
 import { defineConfig, defaultIgnore, defaultDirectoryIgnore } from './config.mjs';
-import { runCachedUnits } from './cache.mjs';
+import { runCachedUnits, scanConcurrency as defaultScanConcurrency } from './cache.mjs';
+import { verificationConcurrency as defaultVerificationConcurrency } from './verification-pool.mjs';
 import { commandEnvironment, runCommand } from './command.mjs';
 import { createSnapshot, createSnapshotContext, discoverTests, selectTests } from './inputs.mjs';
 import { inside } from './util.mjs';
 import { createDurationHints } from './durations.mjs';
 import { withProgress } from './progress.mjs';
+import { excludedTests } from './test-exclusions.mjs';
+import { excludeFailures } from './failure-exclusions.mjs';
+
+function applyExclusions(config, excluded) {
+  if (!excluded.size) return;
+  const select = config.select;
+  config.select = id => !excluded.has(id) && selectTests({ select }, [id]).length > 0;
+  if (config.files) config.files = config.files.filter(file => !excluded.has(file));
+}
 
 async function normalizeConfig(options) {
   defineConfig(options);
@@ -23,7 +33,7 @@ async function normalizeConfig(options) {
     testDirectory: options.testDirectory ?? 'test',
     pattern: options.pattern ?? '**/*.test.{js,mjs,cjs}',
     inputs: options.inputs ?? ['.'],
-    ignore: options.ignore ?? defaultIgnore,
+    ignore: [...(options.ignore ?? defaultIgnore), '.project-checks', '.project-checks/**'],
     directoryIgnore: options.directoryIgnore ?? structuredClone(defaultDirectoryIgnore),
     cacheDirectory: resolve(root, options.cacheDirectory ?? '.test-cache/project-checks'),
   };
@@ -75,11 +85,26 @@ async function runTestsWithSignal(options, { retained, normalPhase, cacheScan, q
     diagnostics ? diagnostics.span(config.suite, stage, operation, fields) : operation();
   const inventory = await span('test-discovery', () => options.snapshotContext?.discoverInventory(config) ?? discoverTests(config));
   const selection = selectTests({ ...config, files: undefined }, inventory);
-  const files = selectTests({ ...config, files: options.files ?? selection }, inventory);
-  if (files.some(id => !selection.includes(id))) throw new Error('File is outside the selected suite');
-  if (!files.length) throw new Error(`No test files found in ${config.testDirectory}`);
-  diagnostics?.files(config.suite, files.length);
-  config.progress && config.progress.files(config.suite, options.engine === 'playwright' && options.frameworkArgs?.length ? 1 : files.length);
+  const selectedFiles = selectTests({ ...config, files: options.files ?? selection }, inventory);
+  if (selectedFiles.some(id => !selection.includes(id))) throw new Error('File is outside the selected suite');
+  if (!selectedFiles.length) throw new Error(`No test files found in ${config.testDirectory}`);
+  const excluded = await excludedTests(root);
+  const files = selectedFiles.filter(file => !excluded.has(file));
+  if (files.length !== selectedFiles.length && options.logger !== false)
+    (options.logger ?? console).log(`${config.suite}: excluded ${selectedFiles.length - files.length} obsolete test files (.project-checks/excluded-tests)`);
+  const frameworkAction = options.engine === 'playwright' && options.frameworkArgs?.length && files.length;
+  const total = frameworkAction ? 1 : files.length;
+  diagnostics?.files(config.suite, total);
+  diagnostics?.event('inventory', { suite: config.suite, root, files: frameworkAction ? ['framework-action'] : files });
+  config.progress && config.progress.files(config.suite, total);
+  if (!files.length) {
+    await queueScan?.([], config.scanConcurrency ?? defaultScanConcurrency);
+    await cacheScan?.({ total: 0, cached: 0, jobs: [], verificationConcurrency: config.verificationConcurrency ?? defaultVerificationConcurrency });
+    await executeFiles?.();
+    options.signal?.throwIfAborted();
+    return { exitCode: 0, total: 0, passed: 0, failed: 0, cached: 0, excluded: selectedFiles.length, results: [] };
+  }
+  applyExclusions(config, excluded);
   const context = config.snapshotContext ?? createSnapshotContext({ signal: config.signal, inputConcurrency: config.inputConcurrency });
   config.snapshotContext = context;
   let inputs, artifacts, fixture;
@@ -127,7 +152,7 @@ async function runTestsWithSignal(options, { retained, normalPhase, cacheScan, q
     if (options.engine === 'playwright' && options.frameworkArgs?.length) {
       if (typeof template === 'function') throw new Error('Playwright actions require a command template');
       const action = { id: 'framework-action', command: [...template.flatMap(argument => argument.includes('{file}')
-        ? (options.files?.length ? files.map(id => argument.replaceAll('{file}', fileArgument(id))) : []) : [argument]), ...options.frameworkArgs] };
+        ? (options.files?.length || excluded.size ? files.map(id => argument.replaceAll('{file}', fileArgument(id))) : []) : [argument]), ...options.frameworkArgs] };
       return await runCachedUnits({
         suite: `${config.suite}/action`, cache: false, scanConcurrency: config.scanConcurrency, verificationConcurrency: config.verificationConcurrency, resources: {}, admission, signal: config.signal, logger,
         progress: config.progress ? {
@@ -208,24 +233,42 @@ async function runTestsWithSignal(options, { retained, normalPhase, cacheScan, q
         if (status === 0) hints.record(unit.id, (performance.now() - started) / 1000);
         return status;
       },
-    }, { queueScan, cacheScan, prepareExecution, executeFiles, artifactContext: context, initialSnapshot, afterScan: !options.snapshotContext ? () => context.finishScanGeneration() : undefined, orderFiles: (a, b) => hints.priority(b) - hints.priority(a) });
+    }, { queueScan, cacheScan, prepareExecution, executeFiles, artifactContext: context, initialSnapshot,
+      afterScan: async () => {
+        if (!options.snapshotContext) await context.finishScanGeneration();
+        diagnostics?.event('file-estimates', { suite: config.suite, files: files.map(file => ({ file, seconds: hints.priority(file) })) });
+      }, orderFiles: (a, b) => hints.priority(b) - hints.priority(a) });
     diagnostics?.event('snapshot-final', { suite: config.suite, call: snapshotCalls, seconds: lastSnapshotSeconds });
     if (!result.inputsChanged) await hints.save();
-    if (!result.exitCode && artifacts && files.length === selection.length) {
-      await admission.acquire({ signal: config.signal });
-      try { result.exitCode = await artifacts.aggregate(units); }
-      finally { admission.release(); }
-    }
     const verify = async () => {
       if (!isDeepStrictEqual(before, await inputs.snapshot())) throw new Error('Check inputs changed during invocation');
       await artifacts?.verifySources();
     };
-    if (!result.exitCode) {
-      await verify();
-      if (artifacts && files.length === selection.length) await artifacts.saveSummary(before);
-    }
+    let aggregated = false, reconciled = false;
+    const reconcile = async () => {
+      const changed = await excludeFailures(result, options.failureExclusions, config.suite, config.progress);
+      if (reconciled && !changed) return result;
+      reconciled = true;
+      const complete = files.length === selection.filter(file => !excluded.has(file)).length;
+      if (!result.exitCode && artifacts && complete && !aggregated) {
+        const eligible = units.filter(unit => !result.excludedFiles?.includes(unit.id));
+        if (eligible.length) {
+          await admission.acquire({ signal: config.signal });
+          try { result.exitCode = await artifacts.aggregate(eligible); }
+          finally { admission.release(); }
+        }
+        aggregated = true;
+      }
+      if (!result.exitCode) {
+        await verify();
+        if (artifacts && complete && !result.excluded) await artifacts.saveSummary(before);
+      }
+      return result;
+    };
+    if (!retained) await options.failureExclusions?.close();
+    await reconcile();
     if (retained) {
-      retained.push({ verify, close });
+      retained.push({ verify, close, reconcile: options.failureExclusions ? reconcile : undefined });
       deferred = true;
     }
     return result;
@@ -241,6 +284,7 @@ async function runTestsWithSignal(options, { retained, normalPhase, cacheScan, q
 
 export async function reportCoverage(options) {
   const config = await normalizeConfig(options);
+  applyExclusions(config, await excludedTests(config.root));
   if (config.coverage === false) return null;
   config.coverage ??= {};
   if (config.coverage.report) config.ignore = [...config.ignore, config.coverage.report, `${config.coverage.report}.*.tmp`];

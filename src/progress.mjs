@@ -1,7 +1,7 @@
 import { text } from './util.mjs';
 
 // Replace outcomes on retry so attempts never inflate the file totals.
-export function createProgress({ logger = console, suites } = {}) {
+export function createProgress({ logger = console, suites, onEvent } = {}) {
   if (logger && typeof logger.log !== 'function') throw new TypeError('progress logger must provide log');
   if (suites !== undefined) {
     if (!Array.isArray(suites) || new Set(suites).size !== suites.length) throw new TypeError('progress suites must be unique IDs');
@@ -10,6 +10,7 @@ export function createProgress({ logger = console, suites } = {}) {
   const started = performance.now();
   const totals = new Map();
   const files = new Map();
+  let excluded = 0;
   let lastPrinted = -Infinity;
   let closed = false;
   const output = message => logger && logger.log(`\n${message}`);
@@ -37,12 +38,16 @@ export function createProgress({ logger = console, suites } = {}) {
       if (closed) return;
       if (totals.get(suite) === total) return;
       totals.set(suite, total);
+      onEvent?.('progress-files', { suite, total });
       if (total === 0) for (const key of files.keys()) if (key.startsWith(`${suite}\0`)) files.delete(key);
       report(true);
     },
     file(suite, file, event, fields = {}) {
       if (closed) return;
       const key = `${suite}\0${file}`;
+      if (event === 'file-excluded' && files.delete(key)) {
+        totals.set(suite, Math.max(0, (totals.get(suite) ?? 0) - 1)); excluded++;
+      }
       if (event === 'file-queued') files.set(key, 'queued');
       else if (event === 'file-cancelled') files.set(key, 'cancelled');
       else if (event === 'file-validating') files.set(key, 'validating');
@@ -51,6 +56,7 @@ export function createProgress({ logger = console, suites } = {}) {
       else if (event === 'file-end') files.set(key,
         fields.timedOut ? 'timed-out' : fields.status === 0 ? 'success'
           : Number.isInteger(fields.status) ? 'failed' : 'interrupted');
+      onEvent?.('progress-file', { suite, file, kind: event, ...fields });
       report(event === 'file-end' && fields.status !== 0);
     },
     close(exitCode) {
@@ -60,7 +66,7 @@ export function createProgress({ logger = console, suites } = {}) {
       closed = true;
       const value = counts();
       const outcome = exitCode === 0 ? 'PASS' : exitCode === 130 ? 'INTERRUPTED' : 'FAIL';
-      output(`TEST_SUMMARY: Tests run: ${value.run} | Success: ${value.success} | Skipped because cache: ${value.cached} | Failed: ${value.failed} | Timed out: ${value.timedOut} | Duration: ${((performance.now() - started) / 1000).toFixed(2)}s | ${outcome}`);
+      output(`TEST_SUMMARY: Tests run: ${value.run} | Success: ${value.success} | Skipped because cache: ${value.cached} | Failed: ${value.failed} | Timed out: ${value.timedOut}${excluded ? ` | Excluded as obsolete: ${excluded}` : ''} | Duration: ${((performance.now() - started) / 1000).toFixed(2)}s | ${outcome}`);
     },
   };
 }

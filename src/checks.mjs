@@ -16,7 +16,8 @@ import defaultConfig from '../project-checks.config.json' with { type: 'json' };
 // Definitions describe ownership and ordering. Every command, fixture attempt,
 // retry and coverage gate uses the same invocation-owned admission pool.
 export async function runChecks(definitions, options = {}) {
-  keys(options, ['resources', 'workers', 'scanConcurrency', 'inputConcurrency', 'verificationConcurrency', 'signal', 'logger', 'progress', 'diagnostics'], 'check options');
+  keys(options, ['resources', 'workers', 'scanConcurrency', 'inputConcurrency', 'verificationConcurrency', 'signal', 'logger', 'progress', 'diagnostics', 'failureExclusions'], 'check options');
+  if (options.failureExclusions !== undefined) defineConfig({ failureExclusions: options.failureExclusions });
   if (options.diagnostics !== undefined) defineConfig({ diagnostics: options.diagnostics });
   if (options.scanConcurrency !== undefined) integer(options.scanConcurrency, 'scanConcurrency');
   if (options.inputConcurrency !== undefined) inputLimit(options.inputConcurrency);
@@ -97,8 +98,11 @@ export async function runChecks(definitions, options = {}) {
       await definition.verify?.();
       await admission.acquire({ signal });
       try {
+        diagnostics?.event('check-start', { suite: definition.id });
         const execute = () => runCommand(definition.command, { cwd: definition.cwd, env: definition.env, signal, logger });
-        return { id: definition.id, exitCode: await (diagnostics ? diagnostics.span(definition.id, 'command', execute) : execute()) };
+        const exitCode = await (diagnostics ? diagnostics.span(definition.id, 'command', execute) : execute());
+        diagnostics?.event('check-end', { suite: definition.id, exitCode });
+        return { id: definition.id, exitCode };
       }
       finally { admission.release(); }
     }
@@ -201,8 +205,10 @@ export async function runChecks(definitions, options = {}) {
               event: (event, fields) => diagnostics.event(event, { ...fields, suite: id }),
             } : config.diagnostics;
             diagnostics?.suiteStart?.(id);
-            return { id, ...await runTests({ ...config, diagnostics: suiteDiagnostics, inputConcurrency: options.inputConcurrency ?? config.inputConcurrency, signal, admission, snapshotContext, logger: logger ?? false, progress: suiteProgress }, {
-              retained, normalPhase: phases.get(id),
+            const failureExclusions = options.failureExclusions ? { ...options.failureExclusions,
+              files: () => options.failureExclusions.files(id) } : undefined;
+            return { id, ...await runTests({ ...config, diagnostics: suiteDiagnostics, failureExclusions, inputConcurrency: options.inputConcurrency ?? config.inputConcurrency, signal, admission, snapshotContext, logger: logger ?? false, progress: suiteProgress }, {
+              retained: { push: handle => retained.push({ ...handle, id }) }, normalPhase: phases.get(id),
               executeFiles: () => fileQueue.run(id),
               queueScan: (jobs, scanConcurrency) => { queued.resolve({ jobs, scanConcurrency }); return scanned.promise; },
               cacheScan: plan => { ready.resolve(plan); return permission.promise; },
@@ -257,6 +263,8 @@ export async function runChecks(definitions, options = {}) {
       do { settled = await Promise.all([...pending.values()]); } while (settled.length !== byId.size);
       const failure = settled.find(result => result.status === 'rejected');
       if (failure) throw failure.reason;
+      await options.failureExclusions?.close();
+      for (const handle of retained) if (handle.reconcile) Object.assign(completed.get(handle.id), await handle.reconcile());
       const results = definitions.map(({ id }) => completed.get(id));
       // Recheck all suites after dependents and aggregates have drained.
       for (const handle of retained) await handle.verify();

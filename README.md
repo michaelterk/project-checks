@@ -574,7 +574,50 @@ unavailable. Final diagnostic summaries report sampled peaks and sample coverage
 these are maxima of observations, not continuous peaks. With progress enabled,
 `PROCESS_SUMMARY` also prints these values as a plain line.
 
-### Progress and final summary
+### Local progress dashboard
+
+Add `--dashboard` to `run` or `checks` to print a loopback URL:
+
+```sh
+project-checks checks --config project-checks.project.json --dashboard
+project-checks run --dashboard --dashboard-port 4317
+project-checks dashboard
+```
+
+The page updates every second with completed/total **test files**, host CPU use,
+active workers and their current limit, cache hits, elapsed time, and estimated
+time remaining. Its Running, Queued, Completed, and Failed lists include file
+names and suites. Queued files follow scheduler order; dependencies, adaptive
+admission, and retries can change what starts next. Builds and other commands
+are shown separately. ETA uses source-bound duration hints when available, then
+observed durations; it stays unknown without enough evidence and excludes final
+validation overhead.
+
+The test command exits normally. Its small background server remains available
+for review and stops after 30 minutes without requests or active runs. The
+standalone `dashboard` command reopens saved history until Ctrl+C. Both bind
+only `127.0.0.1`; an omitted port selects an available one. The dashboard uses
+Node's standard library and local assets, with no external services.
+
+**Discard as obsolete** normally removes a completed failed invocation from
+history by deleting its run manifest. Two independent, unchecked options allow
+excluding its failed test files from the **current run** (while it is still
+active), from **future runs**, or both. An active run requires selecting the
+current-run option. Excluded current failures leave the run's file inventory
+and totals when the runner reconciles results; they are reported separately as
+excluded, never passed or cached. Coverage and final input checks still apply.
+Finalization closes current-run changes; a finished exit code cannot be rewritten,
+and already blocked dependent checks are not restarted.
+
+Run manifests live under `.test-cache/project-checks/dashboard/runs/` beside the
+project JSON (or the suite root for `run`). Current-run requests are scoped to
+that invocation. Future exclusions live as individual JSON records under the
+test root's `.project-checks/excluded-tests/`, apply even without `--dashboard`
+or with `--no-cache`, and survive deletion of the passing-test cache. Remove a
+record to restore its named test. Source files and passing evidence are never
+deleted by discard. No test is excluded unless its checkbox was selected.
+
+### Terminal progress and final summary
 
 `runTests`, `runCachedUnits`, and `runChecks` print plain, newline-separated
 progress and summary lines through their logger by default. Output remains
