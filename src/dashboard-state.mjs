@@ -50,6 +50,8 @@ export function createDashboardState({ root, target, suites = [], now = Date.now
       if (event === 'check-end') commands.set(suite, { ...commands.get(suite), suite,
         state: value.exitCode === 0 ? 'passed' : 'failed', exitCode: value.exitCode, endedAt: now() });
       if (event === 'sample') resources = { sampledAt: now(), cpuPercent: value.cpuPercent,
+        cpuPressure: value.cpuPressure, cpuWindowSeconds: value.cpuWindowSeconds,
+        cpuObservedSeconds: value.cpuObservedSeconds,
         availableMemoryMiB: value.availableMemoryMiB, processes: value.processCounts,
         workers: value.admission ? { active: value.admission.active, limit: value.admission.limit,
           capacity: value.admission.capacity } : null, stages: value.stages };

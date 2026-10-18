@@ -32,6 +32,8 @@ export interface Logger {
 }
 
 export interface TestConfig {
+  /** Optional host selection for consumers that offload compilation/checks. */
+  compilation?: { machineType?: string; executor?: 'local' | 'batch' };
   /** Explicit current-invocation failure exclusions; never certifies excluded files. */
   failureExclusions?: FailureExclusions;
   /** Project root. Defaults to cwd; loadConfig resolves it beside the config file. */

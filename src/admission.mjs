@@ -16,21 +16,42 @@ function cpuTimes() {
     total += Object.values(times).reduce((sum, value) => sum + value, 0);
     idle += times.idle;
   }
-  return { total, idle, count: processors.length, pressure: pressureTime('cpu'), memoryPressure: pressureTime('memory'), ioPressure: pressureTime('io'), time: performance.now() };
+  return { total, idle, count: processors.length, pressure: pressureTime('cpu'), memoryPressure: pressureTime('memory'), ioPressure: pressureTime('io'), time: performance.now(), availableMemoryMiB: process.availableMemory() / 1024 ** 2 };
 }
 
-export function resourceSampler() {
-  let previous = cpuTimes();
+export function resourceSampler({ read = cpuTimes } = {}) {
+  let previous = read();
+  let history = [previous];
   return () => {
-    const current = cpuTimes();
+    const current = read();
     const elapsed = current.time - previous.time;
-    const total = current.total - previous.total;
+    const reset = elapsed < 0 || current.count !== previous.count
+      || current.total < previous.total || current.idle < previous.idle
+      || current.pressure < previous.pressure;
+    if (reset) history = [current];
+    // Bound history to roughly 52 points, including frequent progress-boundary reads.
+    else if (current.time - history.at(-1).time >= 100) history.push(current);
+    const cutoff = current.time - 5000;
+    while (history.length > 1 && history[1].time <= cutoff) history.shift();
+    let baseline = history[0];
+    if (baseline.time < cutoff) {
+      const after = history[1] ?? current;
+      const ratio = (cutoff - baseline.time) / (after.time - baseline.time);
+      baseline = Object.fromEntries(['time', 'total', 'idle', 'pressure'].map(key =>
+        [key, baseline[key] + ratio * (after[key] - baseline[key])]));
+    }
+    const observed = current.time - baseline.time;
+    const total = current.total - baseline.total;
+    const idle = current.idle - baseline.idle;
+    const pressure = current.pressure - baseline.pressure;
     const value = {
-      busyCpus: total > 0 ? current.count * (1 - (current.idle - previous.idle) / total) : NaN,
-      pressure: elapsed > 0 ? (current.pressure - previous.pressure) / (elapsed * 1000) : NaN,
+      busyCpus: observed > 0 && total > 0 && idle >= 0 && idle <= total ? current.count * (1 - idle / total) : NaN,
+      pressure: observed > 0 && Number.isFinite(pressure) && pressure >= 0 ? Math.min(1, pressure / (observed * 1000)) : NaN,
+      cpuWindowSeconds: 5,
+      cpuObservedSeconds: Math.max(0, observed / 1000),
       memoryPressure: elapsed > 0 ? (current.memoryPressure - previous.memoryPressure) / (elapsed * 1000) : NaN,
       ioPressure: elapsed > 0 ? (current.ioPressure - previous.ioPressure) / (elapsed * 1000) : NaN,
-      availableMemoryMiB: process.availableMemory() / 1024 ** 2,
+      availableMemoryMiB: current.availableMemoryMiB,
     };
     previous = current;
     return value;
@@ -51,7 +72,7 @@ export class Admission {
     this.selected.cpuBudget = Math.min(this.selected.cpuBudget, this.host.cpus * (policy.cpuQuotaPercent ?? defaultResources.cpuQuotaPercent) / 100);
     this.memory = policy.memoryMiBPerWorker ?? defaultResources.memoryMiBPerWorker;
     this.reserve = policy.reserveMemoryMiB ?? defaultResources.reserveMemoryMiB;
-    this.capacity = Math.max(1, Math.min(units, Math.floor(this.selected.memoryBudgetMiB / this.memory), policy.maxWorkers ?? Infinity));
+    this.capacity = Math.max(1, Math.min(units, this.host.cpus * 2, Math.floor(this.selected.memoryBudgetMiB / this.memory), policy.maxWorkers ?? Infinity));
     this.fixedWorkers = workers === undefined ? undefined : Math.min(this.capacity, integer(workers, 'workers'));
     if (this.fixedWorkers !== undefined) this.capacity = this.fixedWorkers;
     const initial = this.fixedWorkers ?? Math.max(1, Math.min(this.capacity, Math.floor(this.host.cpus * 3 / 4),
@@ -180,7 +201,9 @@ export class Admission {
 
   report(logger, suite) {
     if (!this.peak) return;
-    const cpu = this.samples ? `${(100 * this.cpuSum / this.samples / this.host.cpus).toFixed(0)}% CPU capacity used` : 'CPU not yet sampled';
+    const { busyCpus } = this.sample();
+    const cpu = Number.isFinite(busyCpus)
+      ? `${(100 * busyCpus / this.host.cpus).toFixed(0)}% CPU capacity used (5s)` : 'CPU not yet sampled';
     const memory = Number.isFinite(this.minimumMemory) ? `${Math.floor(this.minimumMemory)} MiB minimum available RAM` : 'RAM unavailable';
     logger?.log(`${suite}: peak ${this.peak} workers, ${cpu}, ${memory}; effective CPU weight ${this.weight.toFixed(2)}`);
   }

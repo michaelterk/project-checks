@@ -127,6 +127,8 @@ export function createDiagnostics(options = {}) {
         elapsedSeconds: seconds,
         cpuPercent,
         cpuPressure: reading.pressure,
+        cpuWindowSeconds: reading.cpuWindowSeconds ?? 5,
+        cpuObservedSeconds: reading.cpuObservedSeconds ?? null,
         memoryPressure: reading.memoryPressure,
         availableMemoryMiB: reading.availableMemoryMiB,
         processCounts,

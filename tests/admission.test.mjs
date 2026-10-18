@@ -239,3 +239,18 @@ test('configured quota percent defines admission CPU headroom', t => {
     assert.equal(admission.selected.cpuBudget, 8 * cpuQuotaPercent / 100);
   }
 });
+
+
+test('adaptive capacity is twice host cores, with lower workload, RAM and explicit caps', t => {
+  for (const [cores, policy, units, capacity, initial] of [
+    [32, {}, 1000, 64, 24], [64, {}, 1000, 128, 48],
+    [32, { maxWorkers: 10 }, 1000, 10, 10], [32, { maxWorkers: 100 }, 1000, 64, 24],
+    [32, {}, 5, 5, 5], [32, { memoryMiBPerWorker: 16384 }, 1000, 8, 8],
+  ]) {
+    const admission = new Admission(policy, units, { host: { cpus: cores, memoryMiB: 131072 },
+      sample: () => ({ availableMemoryMiB: 131072 }) });
+    t.after(() => admission.close());
+    assert.equal(admission.capacity, capacity);
+    assert.equal(admission.limit, initial);
+  }
+});

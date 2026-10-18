@@ -24,7 +24,17 @@ function testId(id) {
 }
 
 export function defineConfig(config) {
-  keys(config, options, 'config');
+  keys(config, [...options, 'compilation'], 'config');
+  if (config.compilation !== undefined) {
+    keys(config.compilation, ['machineType', 'executor'], 'compilation');
+    if (config.compilation.executor !== undefined && !['local', 'batch'].includes(config.compilation.executor)) {
+      throw new TypeError('compilation.executor must be local or batch');
+    }
+    const machine = config.compilation.machineType;
+    if (machine !== undefined && (typeof machine !== 'string' || machine.trim() !== machine || !/^[a-z][a-z0-9-]{0,62}$/.test(machine))) {
+      throw new TypeError('compilation.machineType must be a valid machine type name');
+    }
+  }
   for (const key of ['root', 'testDirectory', 'cacheDirectory', 'suite']) if (config[key] !== undefined) text(config[key], key);
   if (config.testDirectory !== undefined) patterns([config.testDirectory], 'testDirectory');
   if (config.pattern !== undefined) patterns(typeof config.pattern === 'string' ? [config.pattern] : config.pattern, 'pattern');
@@ -123,6 +133,7 @@ export async function loadConfig(filename, { cwd = process.cwd(), ancestors = []
   return {
     ...inherited, ...overrides,
     resources: { ...inherited.resources, ...resources },
+    compilation: { ...inherited.compilation, ...Object.fromEntries(Object.entries(value.compilation ?? {}).filter(([, setting]) => setting !== undefined)) },
     root: resolve(dirname(file), value.root ?? '.'),
   };
 }

@@ -54,7 +54,8 @@ function renderRun() {
   if (counts.total === null) $('progress').removeAttribute('value');
   else $('progress').value = counts.finished;
   const resource = run.resources;
-  $('cpu').textContent = resource?.cpuPercent == null ? '—' : `${resource.cpuPercent.toFixed(0)}%`;
+  $('cpu').textContent = Number.isFinite(resource?.cpuPercent) ? `${resource.cpuPercent.toFixed(0)}%` : '—';
+  $('cpu-pressure').textContent = Number.isFinite(resource?.cpuPressure) ? `${(resource.cpuPressure * 100).toFixed(0)}%` : '—';
   $('workers').textContent = resource?.workers ? `${resource.workers.active} / ${resource.workers.limit}` : '—';
   $('workers').title = resource?.workers ? `Configured capacity: ${resource.workers.capacity}` : '';
   $('cached').textContent = counts.cached;

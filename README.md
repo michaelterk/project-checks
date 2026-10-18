@@ -67,6 +67,10 @@ TypeScript declarations are included.
 
 ## CLI
 
+The packaged JSON includes `compilation.machineType: "t2d-standard-32"` (32 physical
+cores). Consumers may override it in project JSON; `loadConfig` validates and
+inherits this metadata. Host provisioning remains the consuming project's owner.
+
 Create `project-checks.config.mjs` in your project:
 
 ```js
@@ -523,6 +527,11 @@ no inherited input default limits an explicitly larger scanner startup. The CLI
 `inputConcurrency` setting choose the startup value of one adaptive scanner. `workers` and `--workers` continue to control test
 execution admission independently of these settings.
 
+CPU usage and CPU pressure use trailing five-second counter averages for admission,
+hash scheduling, diagnostics and dashboard progress. Warmup reports the actual
+observed duration; memory readings remain immediate. Phase/run mean CPU summaries
+remain historical aggregates.
+
 Admission targets at most `resources.cpuQuotaPercent` of detected host CPU capacity (default 90%), reserving roughly
 10% by default for other work even when `cpuPercent` is higher. Automatic runs start at three quarters
 of available CPU cores (rounded down, minimum one), clamped by live free RAM and hard caps.
@@ -917,3 +926,8 @@ reuse an existing equal or tighter inherited kernel quota;
 its enclosing scope owner is responsible for detached-descendant cleanup. A
 stricter quota inside a package-owned scope fails explicitly; configure the
 outer runner instead.
+
+`compilation.executor` defaults to `local`; a repository release adapter may use
+`batch` and provide command-line overrides. Adaptive process admission starts at
+three quarters of host cores and caps at twice host cores, subject to workload,
+RAM and any lower explicit `resources.maxWorkers` limit.
