@@ -29,26 +29,26 @@ test('automatically lowers CPU weight one worker at a time after sustained spare
 });
 
 test('20% CPU pressure independently reduces admissions while lower pressure permits growth', async t => {
-  const { admission, reading } = fixture(t, {}, { cpus: 8, memoryMiB: 8192 });
-  for (let i = 0; i < 3; i++) await admission.acquire();
+  const { admission, reading } = fixture(t, { maxWorkers: 8 }, { cpus: 8, memoryMiB: 8192 });
+  for (let i = 0; i < 6; i++) await admission.acquire();
   reading.busyCpus = 6.4;
   reading.pressure = 0.199;
   for (let i = 0; i < 3; i++) admission.tick();
-  assert.equal(admission.limit, 4);
+  assert.equal(admission.limit, 7);
   await admission.acquire();
   reading.pressure = 0.20;
   admission.tick();
-  assert.equal(admission.limit, 3);
-  assert.equal(admission.active, 4);
+  assert.equal(admission.limit, 6);
+  assert.equal(admission.active, 7);
   for (let i = 0; i < 3; i++) admission.tick();
-  assert.equal(admission.limit, 3);
+  assert.equal(admission.limit, 6);
   admission.release();
   admission.tick();
-  assert.equal(admission.limit, 2);
+  assert.equal(admission.limit, 5);
   admission.release();
   reading.pressure = 0.199;
   for (let i = 0; i < 3; i++) admission.tick();
-  assert.equal(admission.limit, 3);
+  assert.equal(admission.limit, 6);
 });
 
 test('memory reservations and explicit suite caps bound automatic growth', async t => {
@@ -60,11 +60,11 @@ test('memory reservations and explicit suite caps bound automatic growth', async
     assert.equal(admission.limit, 1);
   }
   const { admission } = fixture(t, {}, { cpus: 8, memoryMiB: 8192 });
-  assert.equal(admission.limit, 3);
+  assert.equal(admission.limit, 4);
 });
 
-test('startup uses half the CPU budget, clamped by live free RAM and the reserve', t => {
-  for (const [availableMemoryMiB, expected] of [[8192, 3], [2560, 3], [1024, 1]]) {
+test('startup uses three quarters of available cores, clamped by live free RAM and the reserve', t => {
+  for (const [availableMemoryMiB, expected] of [[8192, 6], [2560, 3], [1024, 1]]) {
     const admission = new Admission({ reserveMemoryMiB: 1024, memoryMiBPerWorker: 512, maxWorkers: 16 }, 16, {
       host: { cpus: 8, memoryMiB: 8192 },
       sample: () => ({ availableMemoryMiB, busyCpus: 0, pressure: 0 }),
@@ -153,7 +153,7 @@ test('blocked admissions stop promptly on cancellation or fatal errors and time 
   assert.equal(second.active, 0);
 });
 
-test('missing CPU telemetry retains half-CPU startup and sampling reports live RAM', async t => {
+test('missing CPU telemetry retains three-quarter-core startup and sampling reports live RAM', async t => {
   const { admission, reading } = fixture(t);
   reading.busyCpus = NaN;
   reading.pressure = NaN;
@@ -210,11 +210,11 @@ test('CPU usage reaches 90% then backs off until below 85% without stopping acti
 });
 
 test('growth uses measured CPU usage rather than predicting the next worker cost', async t => {
-  const { admission, reading } = fixture(t, {}, { cpus: 8, memoryMiB: 8192 });
-  for (let i = 0; i < 3; i++) await admission.acquire();
-  reading.busyCpus = 6;
+  const { admission, reading } = fixture(t, { maxWorkers: 8 }, { cpus: 8, memoryMiB: 8192 });
+  for (let i = 0; i < 6; i++) await admission.acquire();
+  reading.busyCpus = 7;
   for (let i = 0; i < 3; i++) admission.tick();
-  assert.equal(admission.limit, 4);
+  assert.equal(admission.limit, 7);
 });
 
 test('fixed worker count bounds lookup capacity as well as execution', t => {

@@ -524,8 +524,8 @@ no inherited input default limits an explicitly larger scanner startup. The CLI
 execution admission independently of these settings.
 
 Admission targets at most `resources.cpuQuotaPercent` of detected host CPU capacity (default 90%), reserving roughly
-10% by default for other work even when `cpuPercent` is higher. Automatic runs start at half
-this budget (rounded down, minimum one), clamped by live free RAM and hard caps.
+10% by default for other work even when `cpuPercent` is higher. Automatic runs start at three quarters
+of available CPU cores (rounded down, minimum one), clamped by live free RAM and hard caps.
 Explicit worker caps set the initial count and still respond to CPU feedback.
 They automatically adjust the effective `cpusPerWorker`. Three consecutive one-second
 samples below the CPU ceiling with spare RAM permit one additional worker. Reaching

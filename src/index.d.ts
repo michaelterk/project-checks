@@ -55,7 +55,7 @@ export interface TestConfig {
   /** Exclusions relative to root. Replaces default .git/.test-cache/__pycache__ exclusions. */
   ignore?: string[];
   directoryIgnore?: { directories?: string[]; files?: string[] };
-  /** Worker cap; omitted starts at half the CPU budget and tunes within resource caps. */
+  /** Worker cap; omitted starts at three quarters of available CPU cores, within resource caps. */
   workers?: number;
   /** Initial adaptive input scanner concurrency; positive integer. Default: 32. */
   scanConcurrency?: number;

@@ -54,7 +54,7 @@ export class Admission {
     this.capacity = Math.max(1, Math.min(units, Math.floor(this.selected.memoryBudgetMiB / this.memory), policy.maxWorkers ?? Infinity));
     this.fixedWorkers = workers === undefined ? undefined : Math.min(this.capacity, integer(workers, 'workers'));
     if (this.fixedWorkers !== undefined) this.capacity = this.fixedWorkers;
-    const initial = this.fixedWorkers ?? Math.max(1, Math.min(this.capacity, Math.floor(this.selected.cpuBudget / 2),
+    const initial = this.fixedWorkers ?? Math.max(1, Math.min(this.capacity, Math.floor(this.host.cpus * 3 / 4),
       Number.isFinite(available) ? Math.floor((available - this.reserve) / this.memory) : Infinity));
     this.weight = this.selected.cpuBudget / (initial + 1e-6);
     this.active = 0;
