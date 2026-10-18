@@ -28,19 +28,27 @@ test('automatically lowers CPU weight one worker at a time after sustained spare
   assert.equal(admission.active, 3);
 });
 
-test('saturation holds; sustained pressure raises the weight without stopping active work', async t => {
-  const { admission, reading } = fixture(t);
+test('20% CPU pressure independently reduces admissions while lower pressure permits growth', async t => {
+  const { admission, reading } = fixture(t, {}, { cpus: 8, memoryMiB: 8192 });
+  for (let i = 0; i < 3; i++) await admission.acquire();
+  reading.busyCpus = 6.4;
+  reading.pressure = 0.199;
+  for (let i = 0; i < 3; i++) admission.tick();
+  assert.equal(admission.limit, 4);
   await admission.acquire();
-  for (let count = 0; count < 3; count++) admission.tick();
-  await admission.acquire();
-  reading.busyCpus = 1.8;
-  for (let count = 0; count < 6; count++) admission.tick();
+  reading.pressure = 0.20;
+  admission.tick();
+  assert.equal(admission.limit, 3);
+  assert.equal(admission.active, 4);
+  for (let i = 0; i < 3; i++) admission.tick();
+  assert.equal(admission.limit, 3);
+  admission.release();
+  admission.tick();
   assert.equal(admission.limit, 2);
-  reading.pressure = 0.2;
-  for (let count = 0; count < 3; count++) admission.tick();
-  assert.equal(admission.limit, 1);
-  assert.equal(admission.active, 2);
-  assert.ok(admission.weight > 1);
+  admission.release();
+  reading.pressure = 0.199;
+  for (let i = 0; i < 3; i++) admission.tick();
+  assert.equal(admission.limit, 3);
 });
 
 test('memory reservations and explicit suite caps bound automatic growth', async t => {
@@ -172,7 +180,7 @@ test('explicit worker caps remain resource-bounded under spare CPU', async t => 
   assert.ok(admission.capacity * admission.memory <= admission.selected.memoryBudgetMiB);
 });
 
-test('CPU ceiling reserves 10% and immediately lowers future admissions above it', async t => {
+test('CPU usage reaches 90% then backs off until below 85% without stopping active work', async t => {
   for (const workers of [undefined, 4]) for (const cpuPercent of [undefined, 200]) {
     const reading = { busyCpus: 0, pressure: 0, memoryPressure: 0, availableMemoryMiB: 8192 };
     const admission = new Admission({ cpuPercent, maxWorkers: 4 }, 8, {
@@ -183,27 +191,28 @@ test('CPU ceiling reserves 10% and immediately lowers future admissions above it
     const initial = admission.limit;
     for (let i = 0; i < initial; i++) await admission.acquire();
     reading.busyCpus = 7.2;
-    for (let i = 0; i < 3; i++) admission.tick();
-    assert.equal(admission.limit, initial);
-    reading.busyCpus = 7.7;
     admission.tick();
     assert.equal(admission.limit, initial - 1);
     assert.equal(admission.active, initial);
     for (let i = 0; i < 3; i++) admission.tick();
     assert.equal(admission.limit, initial - 1);
     admission.release();
+    reading.busyCpus = 6.8;
     admission.tick();
     assert.equal(admission.limit, initial - 2);
+    assert.equal(admission.cpuBackoff, true);
+    admission.release();
+    reading.busyCpus = 6.7;
+    for (let i = 0; i < 3; i++) admission.tick();
+    assert.equal(admission.cpuBackoff, false);
+    assert.equal(admission.limit, initial - 1);
   }
 });
 
-test('growth accounts for the next worker instead of filling the CPU reserve', async t => {
+test('growth uses measured CPU usage rather than predicting the next worker cost', async t => {
   const { admission, reading } = fixture(t, {}, { cpus: 8, memoryMiB: 8192 });
   for (let i = 0; i < 3; i++) await admission.acquire();
   reading.busyCpus = 6;
-  for (let i = 0; i < 6; i++) admission.tick();
-  assert.equal(admission.limit, 3);
-  reading.busyCpus = 5.4;
   for (let i = 0; i < 3; i++) admission.tick();
   assert.equal(admission.limit, 4);
 });

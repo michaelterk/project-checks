@@ -528,11 +528,12 @@ Admission targets at most `resources.cpuQuotaPercent` of detected host CPU capac
 this budget (rounded down, minimum one), clamped by live free RAM and hard caps.
 Explicit worker caps set the initial count and still respond to CPU feedback.
 They automatically adjust the effective `cpusPerWorker`. Three consecutive one-second
-samples of spare CPU and RAM permit one additional worker only when its estimated
-CPU cost fits the budget. The first over-budget sample reduces future admissions;
-sustained CPU or memory pressure also reduces them. Usage at the ceiling holds
-the count. This is sampled admission control, not an OS CPU quota: running
-commands finish normally, a single command can exceed the target, and short
+samples below the CPU ceiling with spare RAM permit one additional worker. Reaching
+the ceiling starts CPU backoff: future admissions decrease until usage falls below
+85/90 of that ceiling (85% of host CPU with the default 90% ceiling). CPU pressure
+at or above 20% independently blocks growth and reduces future admissions;
+sustained memory pressure also reduces them. This is sampled admission control,
+not an OS CPU quota: running commands finish normally, a single command can exceed the target, and short
 bursts or unrelated host processes can consume the reserve.
 `maxWorkers` and configured RAM reservations remain bounds, including a cap of one for suites requiring serial execution.
 

@@ -64,6 +64,7 @@ export class Admission {
     this.peak = 0;
     this.spare = 0;
     this.pressured = 0;
+    this.cpuBackoff = false;
     this.waiters = new Set();
     this.minimumMemory = Number.isFinite(available) ? available : Infinity;
     this.cpuSum = 0;
@@ -100,14 +101,16 @@ export class Admission {
       this.samples++;
       const budget = this.selected.cpuBudget;
       const memoryFits = !Number.isFinite(availableMemoryMiB) || availableMemoryMiB >= this.reserve + this.memory;
-      const nextWorkerCpu = busyCpus / this.active;
-      const spare = this.active >= this.limit && busyCpus + nextWorkerCpu <= budget && !(pressure > 0.05) && !(memoryPressure > 0.05) && memoryFits;
-      const pressured = !memoryFits || memoryPressure > 0.05 || busyCpus > budget || (pressure > 0.15 && busyCpus >= budget * 0.9);
+      if (busyCpus >= budget) this.cpuBackoff = true;
+      else if (busyCpus < budget * 85 / 90) this.cpuBackoff = false;
+      const cpuPressure = pressure >= 0.20;
+      const spare = this.active >= this.limit && !this.cpuBackoff && busyCpus < budget && !cpuPressure && !(memoryPressure > 0.05) && memoryFits;
+      const pressured = !memoryFits || memoryPressure > 0.05;
       this.spare = spare ? this.spare + 1 : 0;
       this.pressured = pressured ? this.pressured + 1 : 0;
       let next = this.limit;
       if (this.spare >= 3 && next < this.capacity) next++;
-      else if ((busyCpus > budget || this.pressured >= 3) && this.active <= next && next > 1) next--;
+      else if ((this.cpuBackoff || cpuPressure || this.pressured >= 3) && this.active <= next && next > 1) next--;
       if (next !== this.limit) {
         this.weight = budget / (next + 1e-6);
         this.spare = this.pressured = 0;
