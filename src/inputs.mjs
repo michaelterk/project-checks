@@ -12,6 +12,23 @@ const readdir = (...args) => profileFilesystemCall('readdir', args[0], () => fsR
 const readlink = (...args) => profileFilesystemCall('readlink', args[0], () => fsReadlink(...args));
 const realpath = (...args) => profileFilesystemCall('realpath', args[0], () => fsRealpath(...args));
 
+// Reject impossible matches before invoking the full glob parser. These are
+// necessary conditions only; Node still decides every possible glob match.
+function globRules(patterns) {
+  const rules = patterns.map(pattern => {
+    const simple = process.platform !== 'win32' && !/[\\{}[\]()!+@]/.test(pattern)
+      && !pattern.split('/').some(part => part === '.' || part === '..');
+    return { pattern,
+      required: simple ? pattern.split('/').filter(part => part && !/[*?]/.test(part)) : [],
+      suffix: simple ? /^\*\*\/\*(\.[a-zA-Z0-9_-]+)$/.exec(pattern)?.[1] : undefined };
+  });
+  return id => {
+    const segments = new Set(id.split('/'));
+    return rules.some(({ pattern, required, suffix }) => (!suffix || id.endsWith(suffix))
+      && required.every(part => segments.has(part)) && matchesGlob(id, pattern));
+  };
+}
+
 // Generic folder rules do not prune an explicitly selected dependency/output
 // subtree. Disposable file rules still apply within that explicit subtree.
 function directoryExclusions(config, root, cache) {
@@ -26,10 +43,11 @@ function directoryExclusions(config, root, cache) {
   const key = JSON.stringify([config.root, patterns]);
   let values = cache?.get(key);
   if (!values) { values = new Map(); cache?.set(key, values); }
+  const matches = globRules(patterns);
   return file => {
     if (values.has(file)) return values.get(file);
     const id = slash(relative(config.root, file));
-    const excluded = patterns.some(pattern => matchesGlob(id, pattern));
+    const excluded = matches(id);
     values.set(file, excluded);
     return excluded;
   };
@@ -52,14 +70,17 @@ export function createSnapshotContext({ signal, inputConcurrency,
     const rules = JSON.stringify([config.root, config.cacheDirectory, config.ignore]);
     let values = exclusions.get(rules);
     if (!values) exclusions.set(rules, values = new Map());
-    const patterns = config.ignore.map(pattern => ({
-      pattern,
-      literal: process.platform !== 'win32' && !/[*?{}()[\]\\!+@]/.test(pattern) && pattern === slash(relative(config.root, resolve(config.root, pattern))),
-    }));
+    const literals = new Set(), patterns = [];
+    for (const pattern of config.ignore) {
+      if (process.platform !== 'win32' && !/[*?{}()[\]\\!+@]/.test(pattern)
+        && pattern === slash(relative(config.root, resolve(config.root, pattern)))) literals.add(pattern);
+      else patterns.push(pattern);
+    }
+    const matches = globRules(patterns);
     return file => {
       if (values.has(file)) return values.get(file);
       const id = slash(relative(config.root, file));
-      const value = inside(config.cacheDirectory, file) || patterns.some(({ pattern, literal }) => literal ? id === pattern : matchesGlob(id, pattern));
+      const value = inside(config.cacheDirectory, file) || literals.has(id) || matches(id);
       values.set(file, value);
       return value;
     };

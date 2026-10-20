@@ -244,8 +244,9 @@ nested projects and suites with test dependencies. Each selected test has a plan
 that discovers dependencies, fingerprints inputs, compares its cache record, and
 validates retained artifacts. Plans run concurrently; their filesystem work uses
 one invocation-owned adaptive input scanner, initially `scanConcurrency` workers
-(default 32). A regular file is one work unit: its worker checks metadata, reads
-and hashes its bytes if needed, then verifies metadata before releasing its slot.
+(default 32). Waiting files travel in batches of at most 16 per worker message.
+Each worker processes one file at a time: it checks metadata, reads and hashes
+the bytes if needed, then verifies metadata before advancing to the next file.
 Directories enumerate children and release admission before aggregating child
 results. Large directories therefore spread file work across the scanner.
 Dependency identities, directory inventories and reads are shared during the
@@ -493,6 +494,8 @@ read. Threads start lazily and own one fixed 64 KiB buffer each; a 32 MiB allowa
 per thread bounds admission against the resource memory budget. Linux I/O pressure
 comes from `/proc/pressure/io`; missing CPU or free-memory telemetry prevents
 growth, and unavailable pressure telemetry falls back to the remaining checks.
+Reader growth also stops at the larger of the requested startup count and the
+rounded-up CPU budget, avoiding excess thread startup on I/O-heavy scans.
 
 Initial scans share inventories, entry inspection, directory child lists and
 serialized fingerprint records within one generation. Filtering and symlink/cycle

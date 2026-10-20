@@ -7,14 +7,14 @@ const serialize = error => ({ name: error.name, message: error.message, stack: e
   code: error.code, path: error.path, syscall: error.syscall,
   ...(error.cause instanceof Error ? { cause: serialize(error.cause) } : {}) });
 parentPort.on('message', ({ jobs }) => {
-  const [{ id, file, identity, inspect, cached }] = jobs;
-  const metrics = {};
-  let result;
-  try {
-    const cancelled = () => Atomics.load(cancellation, 0) !== 0;
-    const hash = inspect ? inspectInputSync(file, cached, buffer, cancelled, metrics)
-      : hashInputSync(file, identity, buffer, cancelled, metrics);
-    result = { id, hash, metrics };
-  } catch (error) { result = { id, error: serialize(error), metrics }; }
-  parentPort.postMessage({ results: [result], done: true });
+  const results = jobs.map(({ id, file, identity, inspect, cached }) => {
+    const metrics = {};
+    try {
+      const cancelled = () => Atomics.load(cancellation, 0) !== 0;
+      const hash = inspect ? inspectInputSync(file, cached, buffer, cancelled, metrics)
+        : hashInputSync(file, identity, buffer, cancelled, metrics);
+      return { id, hash, metrics };
+    } catch (error) { return { id, error: serialize(error), metrics }; }
+  });
+  parentPort.postMessage({ results, done: true });
 });

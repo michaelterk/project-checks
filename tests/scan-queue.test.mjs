@@ -15,8 +15,8 @@ function fixture(t, initial = 32, overrides = {}) {
   const reading = { ...telemetry(), ...overrides }, workers = [];
   class Fake extends EventEmitter {
     constructor() { super(); workers.push(this); }
-    postMessage(message) { assert.equal(this.job, undefined); [this.job] = message.jobs; }
-    complete() { const job = this.job; this.job = undefined; this.emit('message', { results: [{ id: job.id, hash: 'digest', metrics: {} }], done: true }); }
+    postMessage(message) { assert.equal(this.job, undefined); this.jobs = message.jobs; [this.job] = message.jobs; }
+    complete() { const jobs = this.jobs; this.job = this.jobs = undefined; this.emit('message', { results: jobs.map(({ id }) => ({ id, hash: 'digest', metrics: {} })), done: true }); }
     async terminate() { assert.equal(this.job, undefined); this.retired = true; this.emit('exit', 1); }
   }
   const pool = createHashPool({ workers: initial, host, sample: () => reading, createWorker: () => new Fake() });
@@ -30,13 +30,13 @@ function fixture(t, initial = 32, overrides = {}) {
   return { pool, workers, reading, active: () => workers.filter(worker => worker.job).length };
 }
 
-test('input scanner starts32 independently owned files and grows on spare capacity', async t => {
+test('input scanner starts32 readers and does not grow beyond startup above its CPU budget', async t => {
   const f = fixture(t);
   assert.equal(f.active(), 32);
   t.mock.timers.tick(1000);
-  assert.equal(f.active(), 40);
+  assert.equal(f.active(), 32);
   t.mock.timers.tick(1000);
-  assert.equal(f.active(), 48);
+  assert.equal(f.active(), 32);
   assert.ok(f.workers.every(worker => worker.job.id > 0));
 });
 
@@ -69,7 +69,7 @@ test('metadata tasks and file hashing consume the SAME scanner admission', async
   const metadata = f.pool.run(() => release.promise);
   // Earlier file work remains queued; no separate filesystem pool can bypass it.
   assert.equal(f.pool.state().active, 2);
-  assert.equal(f.pool.state().waiting, 77);
+  assert.equal(f.pool.state().waiting, 47);
   const closing = f.pool.close();
   const rejected = assert.rejects(metadata, /Input scanner pool closed/);
   f.workers.filter(worker => worker.job).forEach(worker => worker.complete());
@@ -137,5 +137,5 @@ test('a pool reduced to one recovers using a smaller safe growth increment', asy
   t.mock.timers.tick(1000);
   // CPU budget14.4 allows six extra files, but would reject an all-eight jump.
   assert.equal(f.pool.state().limit, 7);
-  assert.equal(f.active(), 7);
+  assert.equal(f.active(), 4, 'three batches cover the remaining 48 files');
 });

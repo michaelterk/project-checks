@@ -57,6 +57,74 @@ test('unexpected worker failure rejects queued and active jobs without retrying'
   assert.ok(fake.workers.every(worker => worker.terminated));
 });
 
+test('waiting leaf batches remain bounded and queued operations retain their position', async () => {
+  const fake = fakeWorkers(), pool = createHashPool({ workers: 1, createWorker: fake.createWorker });
+  const first = pool.hash('first', 'identity');
+  const leaves = Array.from({ length: 20 }, (_, index) => pool.inspect(`leaf-${index}`));
+  let operated = false;
+  const operation = pool.run(() => { operated = true; });
+  const last = pool.hash('last', 'identity');
+  const worker = fake.workers[0];
+  worker.complete(); await first;
+  assert.equal(worker.job.jobs.length, 16);
+  assert.equal(operated, false);
+  worker.complete();
+  assert.equal(worker.job.jobs.length, 4);
+  assert.equal(operated, false);
+  worker.complete(); await operation;
+  assert.equal(operated, true);
+  assert.equal(worker.job.jobs.length, 1);
+  worker.complete();
+  await Promise.all([...leaves, last]);
+  await pool.close();
+});
+
+test('cancellation rejects queued jobs and drains an entire active leaf batch', async () => {
+  const fake = fakeWorkers(), pool = createHashPool({ workers: 1, createWorker: fake.createWorker });
+  const first = pool.hash('first', 'identity');
+  const leaves = Array.from({ length: 20 }, (_, index) => pool.inspect(`leaf-${index}`));
+  const worker = fake.workers[0];
+  worker.complete(); await first;
+  const reason = new Error('cancel batch');
+  const rejected = leaves.map(job => assert.rejects(job, error => error === reason));
+  let closed = false;
+  const closing = pool.close(reason).then(() => { closed = true; });
+  await Promise.all(rejected.slice(16));
+  assert.equal(closed, false);
+  assert.equal(worker.terminated, false);
+  worker.complete();
+  await Promise.all([...rejected, closing]);
+  assert.equal(worker.terminated, true);
+});
+
+test('idle samples cannot grow reader threads past the CPU budget or requested startup count', async t => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const fake = fakeWorkers(), pool = createHashPool({ workers: 2, createWorker: fake.createWorker,
+    host: { cpus: 4, memoryMiB: 4096 },
+    sample: () => ({ availableMemoryMiB: 4096, busyCpus: 1, pressure: 0, memoryPressure: 0, ioPressure: 0 }) });
+  const jobs = Array.from({ length: 200 }, (_, index) => pool.inspect(`leaf-${index}`));
+  t.mock.timers.tick(1000);
+  assert.equal(fake.workers.length, 4);
+  t.mock.timers.tick(5000);
+  assert.equal(fake.workers.length, 4);
+  const reason = new Error('done');
+  const rejected = jobs.map(job => assert.rejects(job, error => error === reason));
+  const closing = pool.close(reason);
+  fake.workers.forEach(worker => worker.complete());
+  await Promise.all([...rejected, closing]);
+});
+
+test('a batched filesystem failure preserves sibling results and paths', async t => {
+  const root = await temporary(t), file = await put(root, 'present', 'contents');
+  const pool = createHashPool({ workers: 1 });
+  t.after(() => pool.close());
+  const results = await Promise.allSettled([pool.inspect(file), pool.inspect(join(root, 'missing')), pool.inspect(file)]);
+  assert.equal(results[0].value.hash, digest('contents'));
+  assert.equal(results[1].reason.code, 'ENOENT');
+  assert.equal(results[1].reason.path, join(root, 'missing'));
+  assert.deepEqual(results[2], results[0]);
+});
+
 test('worker hashes match the inline reader across sizes, Unicode paths, symlinks and missing sources', async t => {
   const root = await temporary(t), context = createSnapshotContext({ inputConcurrency: 3 });
   t.after(() => context.close());
@@ -196,13 +264,15 @@ test('worker leaf type changes after readdir fall back to symlink traversal and 
   await context.finishScanGeneration();
 });
 
-test('every input file is independently admitted and completed', async () => {
+test('every input file completes once across bounded worker batches', async () => {
   const fake = fakeWorkers(), pool = createHashPool({ workers: 1, createWorker: fake.createWorker });
   const jobs = Array.from({ length: 10 }, (_, index) => pool.inspect(`file-${index}`));
-  for (let index = 0; index < jobs.length; index++) {
-    assert.equal(fake.workers[0].job.jobs.length, 1);
+  for (let index = 0; index < jobs.length;) {
+    const count = fake.workers[0].job.jobs.length;
+    assert.ok(count > 0 && count <= 16);
     fake.workers[0].complete();
-    await jobs[index];
+    await Promise.all(jobs.slice(index, index + count));
+    index += count;
   }
   await pool.close();
   assert.equal(fake.workers[0].dispatched, 10);
