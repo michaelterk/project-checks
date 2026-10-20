@@ -14,6 +14,7 @@ import { createDurationHints } from './durations.mjs';
 import { withProgress } from './progress.mjs';
 import { excludedTests } from './test-exclusions.mjs';
 import { excludeFailures } from './failure-exclusions.mjs';
+import defaultConfig from '../project-checks.config.json' with { type: 'json' };
 
 function applyExclusions(config, excluded) {
   if (!excluded.size) return;
@@ -31,6 +32,7 @@ async function normalizeConfig(options) {
     suite: options.suite ?? 'tests',
     testDirectory: options.testDirectory ?? 'test',
     pattern: options.pattern ?? '**/*.test.{js,mjs,cjs}',
+    subprocessTimeoutMs: options.subprocessTimeoutMs ?? defaultConfig.subprocessTimeoutMs,
     inputs: options.inputs ?? ['.'],
     ignore: [...(options.ignore ?? defaultIgnore), '.project-checks', '.project-checks/**'],
     directoryIgnore: options.directoryIgnore ?? structuredClone(defaultDirectoryIgnore),
@@ -118,6 +120,7 @@ async function runTestsWithSignal(options, { retained, normalPhase, cacheScan, q
   try {
     const hints = await span('duration-hints', () => createDurationHints(config));
     const env = commandEnvironment(options.env);
+    env.PROJECT_CHECKS_SUBPROCESS_TIMEOUT_MS = String(config.subprocessTimeoutMs);
     if (config.normalizeNpmEnvironment) {
       for (const name of ['INIT_CWD', 'NODE', 'npm_execpath', 'npm_node_execpath', 'npm_config_local_prefix', 'npm_config_prefix', 'npm_config_user_agent']) delete env[name];
       env.PATH = [join(root, 'node_modules/.bin'), ...(env.PATH ?? '').split(delimiter).filter(directory => !directory.endsWith('/node_modules/.bin') && !directory.endsWith('/node-gyp-bin'))].join(delimiter);

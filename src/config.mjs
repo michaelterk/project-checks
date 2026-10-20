@@ -6,7 +6,7 @@ import { command, inputLimit, integer, keys, text } from './util.mjs';
 import { selectConcurrency } from './resources.mjs';
 import defaultConfig from '../project-checks.config.json' with { type: 'json' };
 
-const options = ['extends', 'root', 'testDirectory', 'pattern', 'files', 'command', 'inputs', 'testInputs', 'excludeTestsFromInputs', 'ignore', 'directoryIgnore', 'workers', 'scanConcurrency', 'inputConcurrency', 'verificationConcurrency', 'resources', 'cache', 'cacheDirectory', 'suite', 'env', 'testFixtureInputs', 'signal', 'logger', 'stdio', 'retryTimeouts', 'retryTimeoutMs', 'timeoutMs', 'admission', 'snapshotContext', 'diagnostics', 'progress', 'durationHints', 'initialDurations', 'select', 'setup', 'filters', 'engine', 'coverage', 'frameworkArgs', 'normalizeNpmEnvironment', 'failureExclusions'];
+const options = ['extends', 'root', 'testDirectory', 'pattern', 'files', 'command', 'inputs', 'testInputs', 'excludeTestsFromInputs', 'ignore', 'directoryIgnore', 'workers', 'scanConcurrency', 'inputConcurrency', 'verificationConcurrency', 'resources', 'cache', 'cacheDirectory', 'suite', 'env', 'testFixtureInputs', 'signal', 'logger', 'stdio', 'retryTimeouts', 'retryTimeoutMs', 'timeoutMs', 'subprocessTimeoutMs', 'admission', 'snapshotContext', 'diagnostics', 'progress', 'durationHints', 'initialDurations', 'select', 'setup', 'filters', 'engine', 'coverage', 'frameworkArgs', 'normalizeNpmEnvironment', 'failureExclusions'];
 export const defaultDirectoryIgnore = defaultConfig.directoryIgnore;
 export const defaultIgnore = defaultConfig.ignore;
 
@@ -66,7 +66,7 @@ export function defineConfig(config) {
   if (config.resources !== undefined) selectConcurrency(config.resources, { cpus: 1, memoryMiB: 1 });
   if (config.cache !== undefined && typeof config.cache !== 'boolean') throw new TypeError('cache must be a boolean');
   if (config.retryTimeouts !== undefined && typeof config.retryTimeouts !== 'boolean') throw new TypeError('retryTimeouts must be a boolean');
-  for (const name of ['retryTimeoutMs', 'timeoutMs']) {
+  for (const name of ['retryTimeoutMs', 'timeoutMs', 'subprocessTimeoutMs']) {
     if (config[name] !== undefined && integer(config[name], name) > 2147483647) throw new TypeError(`${name} must be <= 2147483647`);
   }
   if (config.env !== undefined) {

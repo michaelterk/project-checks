@@ -7,6 +7,7 @@
   "cache": true,
   "scanConcurrency": 32,
   "verificationConcurrency": 32,
+  "subprocessTimeoutMs": 60000,
   "compilation": {
     "executor": "local",
     "machineType": "t2d-standard-32"

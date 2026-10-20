@@ -74,6 +74,8 @@ export interface TestConfig {
   retryTimeoutMs?: number;
   /** Wall deadline per command attempt, in milliseconds. Omitted means no deadline. */
   timeoutMs?: number;
+  /** Fixture subprocess budget exposed as PROJECT_CHECKS_SUBPROCESS_TIMEOUT_MS. Default: 60000. */
+  subprocessTimeoutMs?: number;
   suite?: string;
   /** Overrides inherited environment; undefined removes a variable. */
   env?: Record<string, string | undefined>;

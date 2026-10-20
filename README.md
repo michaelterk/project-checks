@@ -421,6 +421,11 @@ Environment values configure execution but do not affect content validity.
 `NODE_TEST_CONTEXT` is removed from child environments so imported use also works
 inside Node's own test runner.
 
+`runTests` supplies `PROJECT_CHECKS_SUBPROCESS_TIMEOUT_MS` from the effective
+`subprocessTimeoutMs` setting, taking precedence over inherited and `env` values
+for that variable. Fixture code reads and enforces this budget for its own
+subprocesses; whole command deadlines use `timeoutMs`.
+
 ## Configuration
 
 | Option | Default | Purpose |
@@ -452,6 +457,7 @@ inside Node's own test runner.
 | `retryTimeouts` | `false` | Retry verified timeouts once after normal work drains |
 | `retryTimeoutMs` | `60000` | Node default test timeout on retry; explicit test timeouts still apply |
 | `timeoutMs` | None | Wall deadline per command attempt, including retries |
+| `subprocessTimeoutMs` | `60000` from packaged JSON | Fixture subprocess budget exposed as `PROJECT_CHECKS_SUBPROCESS_TIMEOUT_MS` |
 | `suite` | `tests` | Cache namespace |
 | `env` | Inherit environment | String overrides; undefined removes a variable |
 | `normalizeNpmEnvironment` | `false` | Remove npm launch metadata and use the owning project's executable search path |
