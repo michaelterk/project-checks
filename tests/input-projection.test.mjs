@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { writeFile, mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { writeFile, mkdir, mkdtemp, rm, symlink, cp } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import test from 'node:test';
@@ -61,4 +61,29 @@ test('projection receives cancellation and cannot complete after abort', async t
     }});
   t.after(()=>snapshot.close());
   await assert.rejects(snapshot.snapshot(),/cancelled projection/);
+});
+
+
+test('linked input trees use alias exclusions and preserve source changes', async t=>{
+  const root=await mkdtemp(join(tmpdir(),'alias-ignore-'));
+  t.after(()=>rm(root,{recursive:true,force:true}));
+  await mkdir(join(root,'test'));
+  await writeFile(join(root,'test/a.test.mjs'),'a');
+  const source=await mkdtemp(join(tmpdir(),'alias-external-')), copy=join(root,'copy');
+  t.after(()=>rm(source,{recursive:true,force:true}));
+  await mkdir(join(source,'__pycache__'),{recursive:true});
+  await writeFile(join(source,'module.py'),'original');
+  await writeFile(join(source,'__pycache__/module.pyc'),'first cache');
+  await cp(source,copy,{recursive:true});
+  await symlink(source,join(root,'linked'));
+  const config={root,testDirectory:'test',inputs:['copy'],ignore:['**/__pycache__','**/__pycache__/**']};
+  const snapshot=await createFileSnapshot(config);
+  const linked=await createFileSnapshot({...config,inputs:['linked']});
+  t.after(async()=>{await snapshot.close();await linked.close();});
+  const before=await snapshot.snapshot();
+  assert.deepEqual(await linked.snapshot(),before);
+  await writeFile(join(source,'__pycache__/module.pyc'),'changed irrelevant cache');
+  assert.deepEqual(await linked.snapshot(),before);
+  await writeFile(join(source,'module.py'),'changed source');
+  assert.notEqual((await linked.snapshot()).common,before.common);
 });

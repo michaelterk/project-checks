@@ -216,7 +216,7 @@ export function createSnapshotContext({ signal, inputConcurrency,
       const values = new Array(files.length);
       let remaining = 0;
       const failures = [];
-      function enqueue(file, ancestors, assign, directoryExcluded) {
+      function enqueue(file, ancestors, assign, directoryExcluded, logical = file) {
         remaining++;
         // A directory releases its scanner slot before it queues child jobs.
         // Aggregation stays on the coordinator and never waits inside admission.
@@ -242,7 +242,7 @@ export function createSnapshotContext({ signal, inputConcurrency,
             const identity = ['symlink', readlinkTarget, null];
             assign(identity);
             if (ancestors.has(target)) identity[2] = ['cycle', target];
-            else enqueue(target, ancestors, nested => { identity[2] = nested; }, directoryExcluded);
+            else enqueue(target, ancestors, nested => { identity[2] = nested; }, directoryExcluded, logical);
           } else if (value.kind === 'directory') {
             let discovery = scanDirectories?.get(file);
             if (!discovery) {
@@ -257,10 +257,10 @@ export function createSnapshotContext({ signal, inputConcurrency,
             }
             if (ancestors.has(canonical)) { assign(['cycle', canonical]); return; }
             const nested = new Set(ancestors).add(canonical);
-            const children = names.map(name => ({ file: join(file, name), value: [name, null] }))
-              .filter(entry => !exclude(entry.file) && !directoryExcluded(entry.file) && !excludedFiles.has(entry.file));
+            const children = names.map(name => ({ file: join(file, name), logical: join(logical, name), value: [name, null] }))
+              .filter(entry => !inside(config.cacheDirectory, entry.file) && !exclude(entry.logical) && !directoryExcluded(entry.logical) && !excludedFiles.has(entry.logical) && !excludedFiles.has(entry.file));
             assign(['directory', children.map(entry => entry.value)]);
-            for (const entry of children) enqueue(entry.file, nested, identity => { entry.value[1] = identity; }, directoryExcluded);
+            for (const entry of children) enqueue(entry.file, nested, identity => { entry.value[1] = identity; }, directoryExcluded, entry.logical);
           } else throw new Error(`Unsupported input type: ${file}`);
         })().catch(error => { if (!failures.length) failures.push(error); }).finally(() => {
           if (!--remaining) failures.length ? reject(failures[0]) : resolveIdentities(values);
