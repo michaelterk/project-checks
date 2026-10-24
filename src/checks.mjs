@@ -1,6 +1,7 @@
 import { resolve } from 'node:path';
 import { profileStage } from './scan-profile.mjs';
 import { createFileQueue } from './file-queue.mjs';
+import { createPermits } from './permits.mjs';
 import { Admission } from './admission.mjs';
 import { withProcessSignal } from './cancellation.mjs';
 import { defineConfig, loadConfig } from './config.mjs';
@@ -266,7 +267,21 @@ export async function runChecks(definitions, options = {}) {
       for (const handle of retained) if (handle.reconcile) Object.assign(completed.get(handle.id), await handle.reconcile());
       const results = definitions.map(({ id }) => completed.get(id));
       // Recheck all suites after dependents and aggregates have drained.
-      for (const handle of retained) await handle.verify();
+      const verification = createPermits(verificationConcurrency ?? defaultConfig.verificationConcurrency, signal);
+      let verificationFailed = false;
+      try {
+        const verified = await Promise.allSettled(retained.map(async handle => {
+          try {
+            const release = await verification.acquire();
+            try {
+              signal.throwIfAborted();
+              if (!verificationFailed) await handle.verify();
+            } finally { release(); }
+          } catch (error) { verificationFailed = true; throw error; }
+        }));
+        const failure = verified.find(result => result.status === 'rejected');
+        if (failure) throw failure.reason;
+      } finally { verification.close(); }
       for (const definition of definitions) await definition.verify?.();
       exitCode = results.find(result => result.exitCode)?.exitCode ?? 0;
       return { exitCode, results };

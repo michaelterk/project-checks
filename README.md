@@ -176,6 +176,8 @@ to prepare a suite cannot depend on test results; such graphs fail before execut
 Duplicate IDs,
 unknown dependencies and cycles fail. Final verification rechecks participating
 suite inputs and loaded JSON configurations before the invocation succeeds.
+Final suite input checks overlap up to `verificationConcurrency`, retain independent
+fresh snapshots, and drain before fixture cleanup; loaded-configuration callbacks stay sequential.
 
 The CLI equivalent is:
 
@@ -450,7 +452,7 @@ subprocesses; whole command deadlines use `timeoutMs`.
 | `workers` | Automatically tuned CPU/RAM-derived count | Positive integer worker cap |
 | `scanConcurrency` | `32` from packaged JSON | Initial adaptive input scanner concurrency; growth can exceed it and pressure can reduce it to one |
 | `inputConcurrency` | Unset; uses `scanConcurrency` | Compatibility startup setting for the same adaptive input scanner |
-| `verificationConcurrency` | `32` from packaged JSON | Positive integer cap on concurrent passing-file validation jobs |
+| `verificationConcurrency` | `32` from packaged JSON | Positive integer cap on concurrent passing-file validations and, in the final phase, suite input checks |
 | `resources` | See below | Resource policy |
 | `cache` | `true` | Read/write passing evidence |
 | `cacheDirectory` | `.test-cache/project-checks` | Evidence storage, relative to root or absolute |
