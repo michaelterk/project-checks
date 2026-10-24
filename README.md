@@ -940,3 +940,16 @@ outer runner instead.
 `batch` and provide command-line overrides. Adaptive process admission starts at
 three quarters of host cores and caps at twice host cores, subject to workload,
 RAM and any lower explicit `resources.maxWorkers` limit.
+
+### Canonical input projections
+
+An optional `inputProjection(entries, context)` replaces the ordinary content
+projection for an opted-in suite. Entries pair selected absolute path aliases
+with readonly file/directory/symlink/missing identity trees. Return deterministic,
+plain JSON data; return fresh data rather than mutating shared identity trees.
+`context.signal` propagates invocation cancellation. `context.kind` is `common` or `unit`; unit calls also provide `context.id`.
+`context.identify(paths)` hashes supplemental dependencies through the same
+scanner. `context.generation` is an opaque token for sharing work only within the
+current scan; later snapshots use a fresh token. Any metadata reread used for
+normalization must match its supplied leaf hash. Policy, semantic path validation
+and execution-setting identity belong to the consuming project.

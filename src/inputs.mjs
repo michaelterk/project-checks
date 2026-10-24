@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util';
 import { createHashPool } from './input-hash-pool.mjs';
 import { inputMetadata } from './input-hash-sync.mjs';
 import { glob, lstat as fsLstat, readdir as fsReaddir, readlink as fsReadlink, realpath as fsRealpath } from 'node:fs/promises';
@@ -414,6 +415,17 @@ export function createSnapshot(config, context = createSnapshotContext()) {
     const serialized = context.fingerprintRecords();
     const content = identities => fingerprint(identities, serialized);
     let common, fixtureProjection;
+    const project = async (paths, identities, kind, id) => {
+      if (!config.inputProjection) return content(identities);
+      const value = await config.inputProjection(paths.map((path, index) => ({ path, identity: identities[index] })), { kind, id, signal: config.signal, generation: serialized, identify: paths => {
+        const options = { ...inputOptions };
+        return identify(paths.map(path => resolve(path)), context.projectionMemo(options, new Set()), options);
+      } });
+      config.signal?.throwIfAborted();
+      const encoded = JSON.stringify(value);
+      if (encoded === undefined || !isDeepStrictEqual(JSON.parse(encoded), value)) throw new TypeError('inputProjection must return plain JSON data');
+      return digest(JSON.stringify(['project-checks-projection-v1', value]));
+    };
     const identify = async (paths, memo, options, excluded = new Set()) => {
       const settled = await Promise.allSettled(paths.map(file => {
         if (!memo.has(file)) memo.set(file, context.identify([file], options, excluded).then(([value]) => value));
@@ -452,7 +464,7 @@ export function createSnapshot(config, context = createSnapshotContext()) {
         }
         config.signal?.throwIfAborted();
         stage = 'input fingerprint';
-        common ??= identify(roots, values, inputOptions, excludedFiles).then(content);
+        common ??= identify(roots, values, inputOptions, excludedFiles).then(identities => project(roots, identities, 'common'));
         // Await together so all work drains before a failed unit releases its slot.
         const fingerprints = await Promise.allSettled([
           common,
@@ -474,7 +486,8 @@ export function createSnapshot(config, context = createSnapshotContext()) {
         const failure = fingerprints.find(result => result.status === 'rejected');
         if (failure) throw failure.reason;
         snapshot.common = fingerprints[0].value;
-        snapshot.units[id] = content([...fingerprints[1].value, ...fingerprints[2].value]);
+        snapshot.units[id] = await project([resolve(config.root, id), ...dependencies, ...fixtures],
+          [...fingerprints[1].value, ...fingerprints[2].value], 'unit', id);
         return fingerprints[1].value[0][1];
       } catch (error) {
         if (config.signal?.aborted) throw config.signal.reason;

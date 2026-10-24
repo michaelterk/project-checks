@@ -1,3 +1,5 @@
+export type InputIdentity = ['file', string] | ['missing'] | ['directory', [string, InputIdentity][]] | ['symlink', string, InputIdentity] | ['cycle', string];
+
 export interface ResourcePolicy {
   cpuPercent?: number;
   /** Aggregate OS CPU cap as a percentage of available CPUs. Default: 90; range (0, 100]. */
@@ -54,6 +56,12 @@ export interface TestConfig {
   testInputs?: Record<string, string[]> | ((id: string) => string[] | Promise<string[]>);
   /** Exclude runnable tests from dependency folders/globs, keeping each own test identity. */
   excludeTestsFromInputs?: boolean;
+  /** Optional canonical content projection; called again for fresh snapshots.
+   * Paths are selected aliases; identities contain actual content hashes and
+   * directory/symlink/missing structure. Return deterministic plain JSON data.
+   * Any reread used to normalize bytes must match the supplied leaf hash. */
+  inputProjection?: (entries: { path: string; identity: InputIdentity }[],
+    context: { kind: 'common' | 'unit'; id?: string; generation: object; signal?: AbortSignal; identify(paths: string[]): Promise<InputIdentity[]> }) => unknown | Promise<unknown>;
   /** Exclusions relative to root. Replaces default .git/.test-cache/__pycache__ exclusions. */
   ignore?: string[];
   directoryIgnore?: { directories?: string[]; files?: string[] };
