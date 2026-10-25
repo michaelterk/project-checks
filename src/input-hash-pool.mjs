@@ -148,7 +148,7 @@ export function createHashPool({ workers, resources = {}, host = detectResources
     if (pressured) limit = Math.max(1, limit - 8);
     else if (queue.length && active >= limit && Number.isFinite(reading.busyCpus) && Number.isFinite(reading.availableMemoryMiB)) {
       // A reduced pool can recover even when adding all eight would overshoot.
-      const increment = Math.min(8, Math.max(0, Math.floor(active * (cpuBudget / Math.max(reading.busyCpus, 1e-6) - 1))));
+      const increment = Math.min(8, Math.max(1, Math.floor(active * (cpuBudget / Math.max(reading.busyCpus, 1e-6) - 1))));
       limit = Math.min(maximum, limit + increment, Math.max(1, Math.floor((reading.availableMemoryMiB - reserve) / workerMemoryMiB)));
     }
     profile?.resize(limit); trim(); dispatch();

@@ -72,6 +72,14 @@ test('CPU pressure alone does not shrink validation while the CPU budget has hea
   assert.equal(f.pool.state().limit, 24, 'measured CPU saturation still reduces admission');
 });
 
+test('a reduced scanner recovers when positive CPU headroom rounds below one worker', async t => {
+  const f = fixture(t, 1, { busyCpus: 12 });
+  assert.equal(f.pool.state().limit, 1);
+  t.mock.timers.tick(1000);
+  assert.equal(f.pool.state().limit, 2);
+  assert.equal(f.active(), 2);
+});
+
 test('metadata tasks and file hashing consume the SAME scanner admission', async t => {
   const f = fixture(t, 2), release = Promise.withResolvers();
   f.workers.forEach(worker => worker.complete());
