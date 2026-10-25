@@ -2,6 +2,8 @@ import { isDeepStrictEqual } from 'node:util';
 import { createHashPool } from './input-hash-pool.mjs';
 import { inputMetadata } from './input-hash-sync.mjs';
 import { directoryExclusions, inputExclusions } from './input-exclusions.mjs';
+import { createLocalInputPool } from './input-local.mjs';
+import { inputProcess, createProcessSnapshot } from './input-task.mjs';
 import { glob, lstat as fsLstat, readdir as fsReaddir, readlink as fsReadlink, realpath as fsRealpath } from 'node:fs/promises';
 import { dirname, join, matchesGlob, relative, resolve } from 'node:path';
 import { digest, inside, inputLimit, slash, text } from './util.mjs';
@@ -16,14 +18,14 @@ const realpath = (...args) => profileFilesystemCall('realpath', args[0], () => f
 
 // One queue bounds leaf work. Visitors enqueue children without awaiting them.
 export function createSnapshotContext({ signal, inputConcurrency,
-  scanConcurrency = defaultConfig.scanConcurrency, resources } = {}) {
+  scanConcurrency = defaultConfig.scanConcurrency, resources, local = false, digestCache } = {}) {
   if (inputConcurrency !== undefined) inputLimit(inputConcurrency);
   if (scanConcurrency !== undefined) inputLimit(scanConcurrency);
-  const digests = new Map(), exclusions = new Map();
+  const digests = digestCache ?? new Map(), exclusions = new Map();
   const directoryRoots = new Map(), directoryDecisions = new Map();
   let closed = false, closeReason, closing;
   let sourceScan, scanProjections, scanRecords, scanInventories, scanLeaves, scanDirectories;
-  const pool = createHashPool({ workers: inputConcurrency ?? scanConcurrency, resources });
+  const pool = local ? createLocalInputPool() : createHashPool({ workers: inputConcurrency ?? scanConcurrency, resources });
   const acceptedSources = new Map();
   const run = operation => pool.run(operation);
   const excluded = config => inputExclusions(config, exclusions);
@@ -227,7 +229,7 @@ export function createSnapshotContext({ signal, inputConcurrency,
   const abort = () => { void close(signal.reason).catch(() => {}); };
   signal?.addEventListener('abort', abort, { once: true });
   if (signal?.aborted) abort();
-  return { run, scanState: pool.state, excluded, directoryExcluded, identify, discoverInventory, projectionMemo, fingerprintRecords: () => scanRecords ?? new WeakMap(), sourceHash, beginScanGeneration, acceptSourceProof, cancelScanGeneration, finishScanGeneration, digests, exclusions, close };
+  return { run, inputTask: pool.inputTask, scanState: pool.state, excluded, directoryExcluded, identify, discoverInventory, projectionMemo, fingerprintRecords: () => scanRecords ?? new WeakMap(), sourceHash, beginScanGeneration, acceptSourceProof, cancelScanGeneration, finishScanGeneration, digests, exclusions, close };
 }
 
 export async function discoverTests({ root, testDirectory, pattern, ignore }) {
@@ -297,6 +299,9 @@ export function contentFingerprint(identities) {
 
 // Every snapshot still discovers paths and rechecks metadata, including cache hits.
 export function createSnapshot(config, context = createSnapshotContext()) {
+  const remote = config[inputProcess];
+  if (remote && context.inputTask && remote.testInputs === config.testInputs && remote.inputProjection === config.inputProjection)
+    return createProcessSnapshot(config, context, selectTests);
   async function selectPaths(inputPatterns, excludedFiles) {
     const excluded = context.excluded(config);
     const selected = new Set();
@@ -349,17 +354,17 @@ export function createSnapshot(config, context = createSnapshotContext()) {
   }
   // A generation shares path identities only until its queued files finish.
   // Later snapshots rediscover every path and recheck metadata.
-  const prepare = async initialInventory => {
+  const prepare = async (initialInventory, { common: suppliedCommon } = {}) => {
     const inventory = initialInventory ?? await context.discoverInventory(config);
     const files = selectTests(config, inventory);
     if (!files.length) throw new Error(`No test files found in ${config.testDirectory}`);
     const excludedFiles = new Set(config.excludeTestsFromInputs ? inventory.map(id => resolve(config.root, id)) : []);
-    const roots = await selectPaths(config.inputs, excludedFiles);
+    const roots = suppliedCommon === undefined ? await selectPaths(config.inputs, excludedFiles) : [];
     const inputOptions = { ...config, allowMissing: true };
     const values = context.projectionMemo(inputOptions, excludedFiles);
     const serialized = context.fingerprintRecords();
     const content = identities => fingerprint(identities, serialized);
-    let common, fixtureProjection;
+    let common = suppliedCommon === undefined ? undefined : Promise.resolve(suppliedCommon), fixtureProjection;
     const project = async (paths, identities, kind, id) => {
       if (!config.inputProjection) return content(identities);
       const value = await config.inputProjection(paths.map((path, index) => ({ path, identity: identities[index] })), { kind, id, signal: config.signal, generation: serialized, identify: paths => {
@@ -381,6 +386,8 @@ export function createSnapshot(config, context = createSnapshotContext()) {
       return settled.map(result => result.value);
     };
     const snapshot = { common: '', units: {} };
+    const getCommon = () => common ??= identify(roots, values, inputOptions, excludedFiles)
+      .then(identities => project(roots, identities, 'common'));
     const unit = async id => {
       let stage = 'dependency discovery';
       try {
@@ -409,10 +416,9 @@ export function createSnapshot(config, context = createSnapshotContext()) {
         }
         config.signal?.throwIfAborted();
         stage = 'input fingerprint';
-        common ??= identify(roots, values, inputOptions, excludedFiles).then(identities => project(roots, identities, 'common'));
         // Await together so all work drains before a failed unit releases its slot.
         const fingerprints = await Promise.allSettled([
-          common,
+          getCommon(),
           identify([resolve(config.root, id), ...dependencies], values, inputOptions, excludedFiles),
           (async () => {
             if (!fixtures.length) return [];
@@ -439,7 +445,7 @@ export function createSnapshot(config, context = createSnapshotContext()) {
         throw new Error(`${config.suite ?? 'tests'}/${id}: ${stage}: ${error.message}`, { cause: error });
       }
     };
-    return { files, value: snapshot, unit };
+    return { files, value: snapshot, unit, common: getCommon };
   };
   const snapshot = async () => {
     const prepared = await prepare();

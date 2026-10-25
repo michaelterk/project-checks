@@ -179,6 +179,14 @@ suite inputs and loaded JSON configurations before the invocation succeeds.
 Final suite input checks overlap up to `verificationConcurrency`, retain independent
 fresh snapshots, and drain before fixture cleanup; loaded-configuration callbacks stay sequential.
 
+Fixture modules with pure, process-safe input callbacks can export
+`processInputs = true`. Project loading then moves dependency discovery, path
+selection, projection/normalization and fingerprint construction into the existing
+bounded input processes. Common inputs are computed once per snapshot; independent
+units run concurrently. Fixture runtime paths remain parent-owned, and later
+callback overrides retain their in-memory behavior. Setup and test execution stay
+with their existing owners.
+
 The CLI equivalent is:
 
 ```sh
@@ -499,9 +507,10 @@ predicts room within the CPU budget, free RAM covers worker estimates, and
 memory and I/O pressure each remain at or below 5%. CPU saturation or memory/I/O pressure reduces
 future admissions by eight, down to one, including below the configured startup.
 Active files finish normally when admission shrinks; surplus idle processes retire.
-Processes start lazily and own one fixed 64 KiB buffer each; a 64 MiB per-process
-estimate bounds admission against the resource memory budget. Cancellation terminates
-active processes and waits for their closure before returning. Linux I/O pressure
+Processes start lazily and own one fixed 64 KiB buffer each. The configured
+`resources.memoryMiBPerWorker` estimates each process's memory, including input
+callbacks and their parsed module indexes. Cancellation terminates each worker's
+process group and waits for descendants before returning. Linux I/O pressure
 comes from `/proc/pressure/io`; missing CPU or free-memory telemetry prevents
 growth, and unavailable pressure telemetry falls back to the remaining checks.
 Reader growth also stops at the larger of the requested startup count and the

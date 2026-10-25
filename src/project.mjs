@@ -3,6 +3,7 @@ import { dirname, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { loadConfig } from './config.mjs';
 import { keys } from './util.mjs';
+import { inputProcess } from './input-task.mjs';
 
 // A project selects named targets, expands nested owners and returns definitions
 // for one runChecks invocation. Loading never launches commands or test workers.
@@ -43,7 +44,10 @@ export async function loadChecks(filename, { target = 'default', files, filters,
           let config = await loadConfig(resolve(directory, definition.config), { sources });
           if (definition.fixture) {
             const fixture = await import(pathToFileURL(resolve(directory, definition.fixture)));
+            const base = fixture.processInputs ? structuredClone(config) : undefined;
             config = { ...config, ...await fixture.default(config, context) };
+            if (base) config[inputProcess] = { fixture: pathToFileURL(resolve(directory, definition.fixture)).href,
+              base, testInputs: config.testInputs, inputProjection: config.inputProjection };
           }
           if (files?.length) config.files = files;
           if (filters?.length) config.filters = filters;

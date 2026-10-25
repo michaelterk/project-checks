@@ -8,7 +8,6 @@ const deserialize = value => {
   const { cause, ...fields } = value;
   return Object.assign(new Error(value.message, cause ? { cause: deserialize(cause) } : undefined), fields);
 };
-const workerMemoryMiB = 64; // Admission estimate for a Node process, not a heap limit.
 const batchSize = 16;
 
 // Files, directory enumeration and other metadata work share this admission.
@@ -19,6 +18,7 @@ export function createHashPool({ workers, resources = {}, host = detectResources
   const selected = selectConcurrency(resources, host);
   const cpuBudget = Math.min(selected.cpuBudget, host.cpus * (resources.cpuQuotaPercent ?? defaultResources.cpuQuotaPercent) / 100);
   const reserve = resources.reserveMemoryMiB ?? defaultResources.reserveMemoryMiB;
+  const workerMemoryMiB = resources.memoryMiBPerWorker ?? defaultResources.memoryMiBPerWorker;
   // More processes than the requested startup count or CPU budget mostly add
   // startup and scheduling cost; batches amortize the waiting I/O.
   const maximum = Math.max(1, Math.min(Math.floor(selected.memoryBudgetMiB / workerMemoryMiB),
@@ -26,6 +26,7 @@ export function createHashPool({ workers, resources = {}, host = detectResources
   const queue = [], slots = new Set(), terminations = new Set();
   // Send immutable path policies once per process, rather than once per directory.
   const filterPolicies = new Map(), policyKeys = new Map(), policyObjects = new WeakMap();
+  const snapshotPolicies = new WeakMap();
   const ended = Promise.withResolvers(), profile = profileQueue('input-filesystem-queue', Math.min(workers, maximum));
   let reading = sample();
   const headroom = Number.isFinite(reading.availableMemoryMiB) ? Math.max(1, Math.floor((reading.availableMemoryMiB - reserve) / workerMemoryMiB)) : maximum;
@@ -55,7 +56,7 @@ export function createHashPool({ workers, resources = {}, host = detectResources
     if (message?.metrics?.postStat) profileFilesystemCall('lstat', job.file, () => {}, 'hash-post-read');
     if (closed) job.reject(reason);
     else if (error) job.reject(error);
-    else job.resolve(message ? (job.filter ? message.value : message.hash) : undefined);
+    else job.resolve(message ? (job.filter || job.task ? message.value : message.hash) : undefined);
   }
   function complete(slot, jobs, error, messages) {
     if (slot) { slot.jobs = undefined; slot.worker.unref?.(); }
@@ -102,18 +103,19 @@ export function createHashPool({ workers, resources = {}, host = detectResources
       // Batch only waiting leaf jobs; operations retain their queue position and
       // admission. Each worker still opens at most one file at a time.
       const jobs = [job];
-      while (jobs.length < batchSize && queue.length && !queue[0].operation) jobs.push(queue.shift());
+      while (!job.task && jobs.length < batchSize && queue.length && !queue[0].operation && !queue[0].task) jobs.push(queue.shift());
       let slot = [...slots].find(slot => !slot.jobs);
       try {
         slot ??= spawn(); slot.worker.ref?.(); slot.jobs = jobs;
         profileHashTransport('batches', jobs.length);
         const policies = [];
-        for (const { filter } of jobs) if (filter && !slot.policies.has(filter.policy)) {
-          slot.policies.add(filter.policy);
-          policies.push([filter.policy, filterPolicies.get(filter.policy)]);
+        for (const job of jobs) if ((job.filter || job.task) && !slot.policies.has((job.filter ?? job.task).policy)) {
+          const policy = (job.filter ?? job.task).policy;
+          slot.policies.add(policy);
+          policies.push([policy, filterPolicies.get(policy)]);
         }
         slot.worker.postMessage({ policies,
-          jobs: jobs.map(({ id, file, identity, inspect, cached, filter }) => ({ id, file, identity, inspect, cached, filter })) });
+          jobs: jobs.map(({ id, file, identity, inspect, cached, filter, task }) => ({ id, file, identity, inspect, cached, filter, task })) });
       } catch (error) {
         if (slot) fatal(slot, error);
         else { close(error); complete(undefined, jobs, error); }
@@ -171,6 +173,16 @@ export function createHashPool({ workers, resources = {}, host = detectResources
     finish(); return ended.promise;
   }
   return { hash: (file, identity) => request({ file, identity }), inspect: (file, cached) => request({ file, inspect: true, cached }),
+    inputTask: async (definition, task) => {
+      if (closed) throw reason;
+      let policy = snapshotPolicies.get(definition);
+      if (policy === undefined) {
+        policy = filterPolicies.size;
+        filterPolicies.set(policy, { snapshot: definition });
+        snapshotPolicies.set(definition, policy);
+      }
+      return request({ task: { ...task, policy } });
+    },
     filterDirectory: async filter => {
       if (closed) throw reason;
       let configurations = policyObjects.get(filter.config);

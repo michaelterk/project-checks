@@ -137,7 +137,7 @@ test('initial low memory clamps admission before any file worker starts', t => {
 });
 
 test('an explicit scanner startup above32 has no hidden lower hash or filesystem cap', t => {
-  const f = fixture(t, 64);
+  const f = fixture(t, 64, { availableMemoryMiB: 16384 });
   assert.equal(f.pool.state().limit, 64);
   assert.equal(f.active(), 64);
 });

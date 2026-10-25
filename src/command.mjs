@@ -17,7 +17,7 @@ export function commandEnvironment(overrides = {}) {
   return env;
 }
 
-async function groupRunning(pid) {
+export async function groupRunning(pid) {
   try { process.kill(-pid, 0); }
   catch (error) { if (error.code === 'ESRCH') return false; throw error; }
   if (process.platform !== 'linux') return true;
