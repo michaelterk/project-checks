@@ -27,7 +27,7 @@ export function createSnapshotContext({ signal, inputConcurrency,
   let sourceScan, scanProjections, scanRecords, scanInventories, scanLeaves, scanDirectories;
   const pool = local ? createLocalInputPool() : createHashPool({ workers: inputConcurrency ?? scanConcurrency, resources });
   const acceptedSources = new Map();
-  const run = operation => pool.run(operation);
+  const run = (operation, options) => pool.run(operation, options);
   const excluded = config => inputExclusions(config, exclusions);
   function directoryExcluded(config, root) {
     const key = JSON.stringify([config.root, config.directoryIgnore ?? defaultDirectoryIgnore]);
@@ -301,7 +301,7 @@ export function contentFingerprint(identities) {
 export function createSnapshot(config, context = createSnapshotContext()) {
   const remote = config[inputProcess];
   if (remote && context.inputTask && remote.testInputs === config.testInputs && remote.inputProjection === config.inputProjection)
-    return createProcessSnapshot(config, context, selectTests);
+    return createProcessSnapshot(config, context, selectTests, createSnapshot);
   async function selectPaths(inputPatterns, excludedFiles) {
     const excluded = context.excluded(config);
     const selected = new Set();

@@ -126,7 +126,7 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
     signal?.throwIfAborted();
     const entry = plan[index];
     let cached;
-    try { cached = await profileJsonRead(() => scanner.run(() => read(entry.filename, signal)), { file: units[index].id }); }
+    try { cached = await profileJsonRead(() => scanner.run(() => read(entry.filename, signal), { priority: true }), { file: units[index].id }); }
     catch (error) { if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error; }
     signal?.throwIfAborted();
     entry.cached = cached?.key === entry.expected && cached?.passed === true;

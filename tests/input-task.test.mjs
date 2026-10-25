@@ -23,7 +23,9 @@ import { relative, resolve } from 'node:path';
 export const processInputs = true;
 export default function(config, context) {
   if (!(context.signal instanceof AbortSignal)) throw Error('missing factory signal');
+  if (context.inputGeneration && !context.commonInputs?.includes('common.txt')) throw Error('missing coordinator common inputs');
   const record = kind => appendFileSync(resolve(config.root, 'pids.log'), JSON.stringify([kind, process.pid])+'\\n');
+  record('generation:' + context.inputGeneration);
   return {
     testInputs: async id => {
       if (config.env?.BLOCK_INPUTS) {
@@ -63,7 +65,7 @@ test('process snapshots preserve fingerprints, selection, fresh mutations and ru
   const events = (await readFile(join(root, 'pids.log'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
   assert.ok(events.every(([, pid]) => pid !== process.pid));
   assert.ok(new Set(events.map(([, pid]) => pid)).size >= 2);
-  assert.deepEqual(new Set(events.map(([kind]) => kind)), new Set(['discover', 'common', 'unit']));
+  assert.deepEqual(new Set(events.map(([kind]) => kind).filter(kind => !kind.startsWith('generation:'))), new Set(['discover', 'common', 'unit']));
   await writeFile(join(root, 'dependency.txt'), 'changed dependency');
   const changed = await remote.snapshot();
   assert.notEqual(changed.units['test/a.test.mjs'], before.units['test/a.test.mjs']);
@@ -112,4 +114,21 @@ test('overridden discovery callbacks retain their in-memory behavior', { timeout
   assert.ok(calls > 0);
   await writeFile(join(root, 'fixture.txt'), 'new fixture');
   assert.notDeepEqual(await snapshot.snapshot(), before);
+});
+
+test('sequential units share one explicit generation and later snapshots hydrate a fresh generation', { timeout: 10000 }, async t => {
+  const { root, config } = await fixture(t);
+  const snapshot = await createFileSnapshot({ ...config, inputConcurrency: 1 });
+  t.after(() => snapshot.close());
+  const generations = async () => {
+    await writeFile(join(root, 'pids.log'), '');
+    await snapshot.snapshot();
+    const events = (await readFile(join(root, 'pids.log'), 'utf8')).trim().split('\n').map(JSON.parse);
+    const values = events.filter(([kind]) => kind.startsWith('generation:')).map(([kind]) => kind);
+    assert.equal(values.length, 1, 'one worker builds observation state once for the round');
+    assert.match(values[0], /^generation:[a-f0-9-]{36}$/);
+    return values[0];
+  };
+  const first = await generations();
+  assert.notEqual(await generations(), first, 'a later freshness check cannot inherit the first observations');
 });

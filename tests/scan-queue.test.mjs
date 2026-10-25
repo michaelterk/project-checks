@@ -45,17 +45,19 @@ test('CPU and memory pressure shrink BELOW startup without interrupting owned fi
     const f = fixture(t);
     f.reading[pressure] = pressure === 'busyCpus' ? 16 : 0.2;
     t.mock.timers.tick(1000);
-    assert.equal(f.pool.state().limit, 24);
+    const firstLimit = pressure === 'busyCpus' ? 28 : 24;
+    const nextLimit = pressure === 'busyCpus' ? 25 : 16;
+    assert.equal(f.pool.state().limit, firstLimit);
     assert.equal(f.active(), 32, 'active files finish under their original ownership');
-    f.workers.slice(0, 8).forEach(worker => worker.complete());
+    f.workers.slice(0, 32 - firstLimit).forEach(worker => worker.complete());
     await flush();
-    assert.equal(f.active(), 24, 'the reduced pool admits no replacements at capacity');
-    assert.equal(f.workers.filter(worker => worker.retired).length, 8);
+    assert.equal(f.active(), firstLimit, 'the reduced pool admits no replacements at capacity');
+    assert.equal(f.workers.filter(worker => worker.retired).length, 32 - firstLimit);
     t.mock.timers.tick(1000);
-    assert.equal(f.pool.state().limit, 16);
-    f.workers.filter(worker => worker.job).slice(0, 8).forEach(worker => worker.complete());
+    assert.equal(f.pool.state().limit, nextLimit);
+    f.workers.filter(worker => worker.job).slice(0, firstLimit - nextLimit).forEach(worker => worker.complete());
     await flush();
-    assert.equal(f.active(), 16);
+    assert.equal(f.active(), nextLimit);
     // Close before the next iteration: mocks and every worker retain one owner.
     const closing = f.pool.close();
     f.workers.filter(worker => worker.job).forEach(worker => worker.complete());
@@ -69,7 +71,7 @@ test('CPU pressure alone does not shrink validation while the CPU budget has hea
   assert.equal(f.pool.state().limit, 32);
   f.reading.busyCpus = 16;
   t.mock.timers.tick(1000);
-  assert.equal(f.pool.state().limit, 24, 'measured CPU saturation still reduces admission');
+  assert.equal(f.pool.state().limit, 28, 'measured CPU saturation reduces admission proportionally');
 });
 
 test('a reduced scanner recovers when positive CPU headroom rounds below one worker', async t => {
@@ -144,12 +146,13 @@ test('an explicit scanner startup above32 has no hidden lower hash or filesystem
 
 test('a pool reduced to one recovers using a smaller safe growth increment', async t => {
   const f = fixture(t, 32);
-  f.reading.busyCpus = 16;
+  f.reading.memoryPressure = 0.2;
   t.mock.timers.tick(4000);
   assert.equal(f.pool.state().limit, 1);
   f.workers.slice(0, 31).forEach(worker => worker.complete());
   await flush();
   assert.equal(f.active(), 1);
+  f.reading.memoryPressure = 0;
   f.reading.busyCpus = 2;
   t.mock.timers.tick(1000);
   // CPU budget14.4 allows six extra files, but would reject an all-eight jump.

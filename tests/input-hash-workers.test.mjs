@@ -336,3 +336,36 @@ test('borrowed worker failure releases the outer file admission without retry', 
   assert.equal(fake.workers[0].dispatched, 1);
   assert.equal(fake.workers[0].terminated, true);
 });
+
+test('CPU backoff waits for long tasks to shed load instead of collapsing parallel scans to one', async t => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const fake = fakeWorkers();
+  let busyCpus = 16;
+  const pool = createHashPool({ workers: 16, createWorker: fake.createWorker,
+    host: { cpus: 16, memoryMiB: 32768 }, resources: { cpuQuotaPercent: 95 },
+    sample: () => ({ availableMemoryMiB: 32768, busyCpus, memoryPressure: 0, ioPressure: 0 }) });
+  const definition = {};
+  const jobs = Array.from({ length: 64 }, (_, id) => pool.inputTask(definition, { mode: 'unit', id }));
+  assert.equal(pool.state().active, 16);
+  t.mock.timers.tick(1000);
+  assert.equal(pool.state().limit, 15, '5% CPU overshoot needs one fewer worker');
+  t.mock.timers.tick(5000);
+  assert.equal(pool.state().limit, 15, 'active work has not yet shed the requested load');
+  fake.workers[0].complete();
+  await jobs[0];
+  assert.equal(pool.state().active, 15);
+  assert.equal(fake.workers.filter(worker => worker.terminated).length, 1);
+  t.mock.timers.tick(1000);
+  assert.equal(pool.state().limit, 14);
+  t.mock.timers.tick(5000);
+  assert.equal(pool.state().limit, 14);
+  busyCpus = 8;
+  t.mock.timers.tick(1000);
+  assert.equal(pool.state().limit, 16);
+  assert.equal(pool.state().active, 16);
+  const reason = new Error('done');
+  const rejected = jobs.slice(1).map(job => assert.rejects(job, error => error === reason));
+  const closing = pool.close(reason);
+  fake.workers.filter(worker => worker.job).forEach(worker => worker.complete());
+  await Promise.all([...rejected, closing]);
+});

@@ -182,8 +182,12 @@ fresh snapshots, and drain before fixture cleanup; loaded-configuration callback
 Fixture modules with pure, process-safe input callbacks can export
 `processInputs = true`. Project loading then moves dependency discovery, path
 selection, projection/normalization and fingerprint construction into the existing
-bounded input processes. Common inputs are computed once per snapshot; independent
-units run concurrently. Fixture runtime paths remain parent-owned, and later
+bounded input processes. Common trees use the shared parallel scanner; their
+projection runs in an input process. Common inputs are computed once per snapshot;
+independent units run concurrently. Process-side factories also receive
+`inputGeneration` and `commonInputs`: the fresh snapshot identifier and the
+coordinator's declared shared inputs. Factories may reuse observations within
+that generation; later snapshots rebuild them. Fixture runtime paths remain parent-owned, and later
 callback overrides retain their in-memory behavior. Setup and test execution stay
 with their existing owners.
 

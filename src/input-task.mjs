@@ -1,4 +1,7 @@
 import { text } from './util.mjs';
+import { resolve } from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
+import { randomUUID } from 'node:crypto';
 
 export const inputProcess = Symbol('project-checks.input-process');
 const runtimeFields = ['root', 'suite', 'testDirectory', 'pattern', 'inputs', 'ignore',
@@ -6,27 +9,34 @@ const runtimeFields = ['root', 'suite', 'testDirectory', 'pattern', 'inputs', 'i
 const configurations = new Map(), digests = new Map();
 const signal = new AbortController().signal; // Parent cancellation stops the worker's entire process group.
 
-export function createProcessSnapshot(config, context, selectTests) {
+export function createProcessSnapshot(config, context, selectTests, createSnapshot) {
   const descriptor = config[inputProcess];
   const prepare = async initialInventory => {
     const inventory = initialInventory ?? await context.discoverInventory(config);
     const files = selectTests(config, inventory);
     if (!files.length) throw new Error(`No test files found in ${config.testDirectory}`);
-    const definition = { fixture: descriptor.fixture, base: descriptor.base, inventory,
+    const definition = { generation: randomUUID(), fixture: descriptor.fixture, base: descriptor.base, inventory,
       runtime: structuredClone({ ...Object.fromEntries(runtimeFields.map(key => [key, config[key]])), files }) };
     const value = { common: '', units: {} };
+    // Walk shared trees through the invocation's parallel scanner. Only the
+    // CPU-heavy projection owns one process slot, rather than the entire tree.
+    const commonSnapshot = createSnapshot({ ...config, [inputProcess]: undefined,
+      inputProjection: config.inputProjection
+        ? entries => context.inputTask(definition, { mode: 'projection', entries }) : undefined,
+    }, context);
     let common;
+    const getCommon = () => common ??= commonSnapshot.prepare(inventory).then(plan => plan.common());
     const unit = async id => {
       config.signal?.throwIfAborted();
       // Fixture-owned runtime paths stay with their original owner.
       const declared = config.testFixtureInputs ? await config.testFixtureInputs(id) : [];
       if (!Array.isArray(declared)) throw new TypeError('testFixtureInputs must return an array of literal paths');
       const fixtures = declared.map(path => text(path, 'fixture input path'));
-      common ??= Promise.resolve().then(() => context.inputTask(definition, { mode: 'common' }));
+      const shared = getCommon();
       const operation = () => context.inputTask(definition, { mode: 'unit', id, fixtures });
       const task = Promise.resolve().then(() => config.diagnostics
         ? config.diagnostics.span(config.suite, 'process-input-unit', operation, { file: id }) : operation());
-      const settled = await Promise.allSettled([common, task]);
+      const settled = await Promise.allSettled([shared, task]);
       const failure = settled.find(result => result.status === 'rejected');
       if (failure) throw failure.reason;
       const result = settled[1].value;
@@ -40,7 +50,7 @@ export function createProcessSnapshot(config, context, selectTests) {
       });
       return result.proof;
     };
-    return { files, value, unit };
+    return { files, value, unit, common: getCommon };
   };
   const snapshot = async () => {
     const prepared = await prepare();
@@ -57,12 +67,17 @@ export function createProcessSnapshot(config, context, selectTests) {
 // Only explicitly process-safe fixture factories are hydrated here. No setup runs.
 export async function runInputTask(definition, task) {
   const key = JSON.stringify([definition.fixture, definition.base]);
-  if (!configurations.has(key)) configurations.set(key, (async () => {
+  let configuration = configurations.get(key);
+  if (!configuration || configuration.generation !== definition.generation) {
+    configuration = { generation: definition.generation, hydrated: (async () => {
     const { default: fixture } = await import(definition.fixture);
     const base = structuredClone(definition.base);
-    return { ...base, ...await fixture(base, { signal }) };
-  })());
-  const hydrated = await configurations.get(key);
+    return { ...base, ...await fixture(base, { signal, inputGeneration: definition.generation,
+      commonInputs: Object.freeze([...definition.runtime.inputs]) }) };
+    })() };
+    configurations.set(key, configuration);
+  }
+  const hydrated = await configuration.hydrated;
   const { createSnapshot, createSnapshotContext } = await import('./inputs.mjs');
   const context = createSnapshotContext({ local: true, digestCache: digests, signal });
   let seconds = 0, inputCount = 0;
@@ -78,9 +93,16 @@ export async function runInputTask(definition, task) {
     },
   };
   try {
+    if (task.mode === 'projection') {
+      const value = await hydrated.inputProjection(task.entries, { kind: 'common', signal,
+        generation: {}, identify: paths => context.identify(paths.map(path => resolve(path)), { ...config, allowMissing: true }) });
+      const encoded = JSON.stringify(value);
+      if (encoded === undefined || !isDeepStrictEqual(JSON.parse(encoded), value))
+        throw new TypeError('inputProjection must return plain JSON data');
+      return value;
+    }
     const plan = await createSnapshot(config, context).prepare(definition.inventory,
-      task.mode === 'unit' ? { common: '' } : undefined);
-    if (task.mode === 'common') return await plan.common();
+      { common: '' });
     const proof = await plan.unit(task.id);
     return { value: plan.value.units[task.id], proof, seconds, inputCount };
   } finally { await context.close(); }

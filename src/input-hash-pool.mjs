@@ -145,10 +145,15 @@ export function createHashPool({ workers, resources = {}, host = detectResources
   function tick() {
     reading = sample();
     const memoryFits = !Number.isFinite(reading.availableMemoryMiB) || reading.availableMemoryMiB >= reserve + workerMemoryMiB;
-    const pressured = !memoryFits || reading.memoryPressure > 0.05 || reading.ioPressure > 0.05
-      || Number.isFinite(reading.busyCpus) && reading.busyCpus >= cpuBudget;
-    if (pressured) limit = Math.max(1, limit - 8);
-    else if (queue.length && active >= limit && Number.isFinite(reading.busyCpus) && Number.isFinite(reading.availableMemoryMiB)) {
+    const resourcePressure = !memoryFits || reading.memoryPressure > 0.05 || reading.ioPressure > 0.05;
+    const cpuPressure = Number.isFinite(reading.busyCpus) && reading.busyCpus >= cpuBudget;
+    if (resourcePressure) limit = Math.max(1, limit - 8);
+    else if (cpuPressure) {
+      // Long tasks cannot shed load until they settle. Do not repeatedly lower
+      // admission against the same still-running work and rolling CPU window.
+      if (active <= limit) limit = Math.max(1, limit - Math.max(1,
+        Math.ceil(limit * (1 - cpuBudget / reading.busyCpus))));
+    } else if (queue.length && active >= limit && Number.isFinite(reading.busyCpus) && Number.isFinite(reading.availableMemoryMiB)) {
       // A reduced pool can recover even when adding all eight would overshoot.
       const increment = Math.min(8, Math.max(1, Math.floor(active * (cpuBudget / Math.max(reading.busyCpus, 1e-6) - 1))));
       limit = Math.min(maximum, limit + increment, Math.max(1, Math.floor((reading.availableMemoryMiB - reserve) / workerMemoryMiB)));
@@ -159,7 +164,12 @@ export function createHashPool({ workers, resources = {}, host = detectResources
     if (closed) return Promise.reject(reason);
     return new Promise((resolve, reject) => {
       const queuedAt = profile?.state(active, queue.length + 1);
-      queue.push({ ...fields, id: ++sequence, resolve, reject, queuedAt });
+      const job = { ...fields, id: ++sequence, resolve, reject, queuedAt };
+      // Ready cache comparisons stay bounded by this pool but must not wait
+      // behind every unrelated dependency task already queued for discovery.
+      const before = fields.priority ? queue.findIndex(waiting => !waiting.priority) : -1;
+      if (before < 0) queue.push(job);
+      else queue.splice(before, 0, job);
       if (!timer) { reading = sample(); timer = setInterval(tick, 1000); }
       dispatch();
     });
@@ -206,5 +216,5 @@ export function createHashPool({ workers, resources = {}, host = detectResources
         && index < filter.names.length && (previous = index) >= 0)) throw new Error('Invalid input directory filter response');
       return indices.map(index => filter.names[index]);
     },
-    run: operation => request({ operation }), runWithWorker: operation => request({ operation: () => operation(ownedHash) }), state: () => ({ active, waiting: queue.length, limit }), close };
+    run: (operation, { priority = false } = {}) => request({ operation, priority }), runWithWorker: operation => request({ operation: () => operation(ownedHash) }), state: () => ({ active, waiting: queue.length, limit }), close };
 }
