@@ -1,5 +1,5 @@
 import { integer } from './util.mjs';
-import { Worker } from 'node:worker_threads';
+import { createInputProcess } from './input-process.mjs';
 import { resourceSampler } from './admission.mjs';
 import { defaultResources, detectResources, selectConcurrency } from './resources.mjs';
 import { profileContentRead, profileFilesystemCall, profileHashTransport, profileQueue } from './scan-profile.mjs';
@@ -8,23 +8,24 @@ const deserialize = value => {
   const { cause, ...fields } = value;
   return Object.assign(new Error(value.message, cause ? { cause: deserialize(cause) } : undefined), fields);
 };
-const workerMemoryMiB = 32;
+const workerMemoryMiB = 64; // Admission estimate for a Node process, not a heap limit.
 const batchSize = 16;
 
 // Files, directory enumeration and other metadata work share this admission.
 // One worker owns one entry through stat/read/hash; aggregation owns no slot.
 export function createHashPool({ workers, resources = {}, host = detectResources(), sample = resourceSampler(),
-  createWorker = options => new Worker(new URL('./input-hash-worker.mjs', import.meta.url), options) }) {
+  createWorker = createInputProcess }) {
   integer(workers, 'Input scanner workers');
   const selected = selectConcurrency(resources, host);
   const cpuBudget = Math.min(selected.cpuBudget, host.cpus * (resources.cpuQuotaPercent ?? defaultResources.cpuQuotaPercent) / 100);
   const reserve = resources.reserveMemoryMiB ?? defaultResources.reserveMemoryMiB;
-  // More reader threads than the requested startup count or CPU budget mostly
-  // add isolate startup and scheduling cost; batches amortize the waiting I/O.
+  // More processes than the requested startup count or CPU budget mostly add
+  // startup and scheduling cost; batches amortize the waiting I/O.
   const maximum = Math.max(1, Math.min(Math.floor(selected.memoryBudgetMiB / workerMemoryMiB),
     Math.max(workers, Math.ceil(cpuBudget))));
-  const cancellation = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT);
-  const flag = new Int32Array(cancellation), queue = [], slots = new Set(), terminations = new Set();
+  const queue = [], slots = new Set(), terminations = new Set();
+  // Send immutable path policies once per process, rather than once per directory.
+  const filterPolicies = new Map(), policyKeys = new Map(), policyObjects = new WeakMap();
   const ended = Promise.withResolvers(), profile = profileQueue('input-filesystem-queue', Math.min(workers, maximum));
   let reading = sample();
   const headroom = Number.isFinite(reading.availableMemoryMiB) ? Math.max(1, Math.floor((reading.availableMemoryMiB - reserve) / workerMemoryMiB)) : maximum;
@@ -54,7 +55,7 @@ export function createHashPool({ workers, resources = {}, host = detectResources
     if (message?.metrics?.postStat) profileFilesystemCall('lstat', job.file, () => {}, 'hash-post-read');
     if (closed) job.reject(reason);
     else if (error) job.reject(error);
-    else job.resolve(message ? message.hash : undefined);
+    else job.resolve(message ? (job.filter ? message.value : message.hash) : undefined);
   }
   function complete(slot, jobs, error, messages) {
     if (slot) { slot.jobs = undefined; slot.worker.unref?.(); }
@@ -72,8 +73,8 @@ export function createHashPool({ workers, resources = {}, host = detectResources
     else { retire(slot); finish(); }
   }
   function spawn() {
-    const worker = createWorker({ workerData: { cancellation }, execArgv: [], name: 'project-checks-input-scanner' });
-    const slot = { worker, jobs: undefined, retiring: false };
+    const worker = createWorker();
+    const slot = { worker, jobs: undefined, retiring: false, policies: new Set() };
     slots.add(slot);
     worker.on('message', message => {
       if (!slot.jobs || !Array.isArray(message.results) || message.results.length !== slot.jobs.length || message.done !== true
@@ -106,7 +107,13 @@ export function createHashPool({ workers, resources = {}, host = detectResources
       try {
         slot ??= spawn(); slot.worker.ref?.(); slot.jobs = jobs;
         profileHashTransport('batches', jobs.length);
-        slot.worker.postMessage({ jobs: jobs.map(({ id, file, identity, inspect, cached }) => ({ id, file, identity, inspect, cached })) });
+        const policies = [];
+        for (const { filter } of jobs) if (filter && !slot.policies.has(filter.policy)) {
+          slot.policies.add(filter.policy);
+          policies.push([filter.policy, filterPolicies.get(filter.policy)]);
+        }
+        slot.worker.postMessage({ policies,
+          jobs: jobs.map(({ id, file, identity, inspect, cached, filter }) => ({ id, file, identity, inspect, cached, filter })) });
       } catch (error) {
         if (slot) fatal(slot, error);
         else { close(error); complete(undefined, jobs, error); }
@@ -136,7 +143,7 @@ export function createHashPool({ workers, resources = {}, host = detectResources
   function tick() {
     reading = sample();
     const memoryFits = !Number.isFinite(reading.availableMemoryMiB) || reading.availableMemoryMiB >= reserve + workerMemoryMiB;
-    const pressured = !memoryFits || reading.memoryPressure > 0.05 || reading.pressure > 0.05 || reading.ioPressure > 0.05
+    const pressured = !memoryFits || reading.memoryPressure > 0.05 || reading.ioPressure > 0.05
       || Number.isFinite(reading.busyCpus) && reading.busyCpus >= cpuBudget;
     if (pressured) limit = Math.max(1, limit - 8);
     else if (queue.length && active >= limit && Number.isFinite(reading.busyCpus) && Number.isFinite(reading.availableMemoryMiB)) {
@@ -158,11 +165,34 @@ export function createHashPool({ workers, resources = {}, host = detectResources
   function close(error = new Error('Input scanner pool closed')) {
     if (!closed) {
       closed = true; reason = error; clearInterval(timer); timer = undefined;
-      Atomics.store(flag, 0, 1);
       queue.splice(0).forEach(job => job.reject(reason)); report();
+      for (const slot of slots) if (slot.jobs) slot.worker.cancel?.();
     }
     finish(); return ended.promise;
   }
   return { hash: (file, identity) => request({ file, identity }), inspect: (file, cached) => request({ file, inspect: true, cached }),
+    filterDirectory: async filter => {
+      if (closed) throw reason;
+      let configurations = policyObjects.get(filter.config);
+      if (!configurations) policyObjects.set(filter.config, configurations = new WeakMap());
+      let policy = configurations.get(filter.excludedFiles);
+      if (policy === undefined) {
+        const definition = { config: filter.config, excludedFiles: filter.excludedFiles };
+        const key = JSON.stringify(definition);
+        policy = policyKeys.get(key);
+        if (policy === undefined) {
+          policy = filterPolicies.size;
+          filterPolicies.set(policy, definition);
+          policyKeys.set(key, policy);
+        }
+        configurations.set(filter.excludedFiles, policy);
+      }
+      const { file, logical, names, root } = filter;
+      const indices = await request({ filter: { file, logical, names, root, policy } });
+      let previous = -1;
+      if (!Array.isArray(indices) || !indices.every(index => Number.isInteger(index) && index > previous
+        && index < filter.names.length && (previous = index) >= 0)) throw new Error('Invalid input directory filter response');
+      return indices.map(index => filter.names[index]);
+    },
     run: operation => request({ operation }), runWithWorker: operation => request({ operation: () => operation(ownedHash) }), state: () => ({ active, waiting: queue.length, limit }), close };
 }

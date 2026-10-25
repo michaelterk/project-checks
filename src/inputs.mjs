@@ -1,6 +1,7 @@
 import { isDeepStrictEqual } from 'node:util';
 import { createHashPool } from './input-hash-pool.mjs';
 import { inputMetadata } from './input-hash-sync.mjs';
+import { directoryExclusions, inputExclusions } from './input-exclusions.mjs';
 import { glob, lstat as fsLstat, readdir as fsReaddir, readlink as fsReadlink, realpath as fsRealpath } from 'node:fs/promises';
 import { dirname, join, matchesGlob, relative, resolve } from 'node:path';
 import { digest, inside, inputLimit, slash, text } from './util.mjs';
@@ -12,47 +13,6 @@ const lstat = (file, options, site = 'other') => profileFilesystemCall('lstat', 
 const readdir = (...args) => profileFilesystemCall('readdir', args[0], () => fsReaddir(...args));
 const readlink = (...args) => profileFilesystemCall('readlink', args[0], () => fsReadlink(...args));
 const realpath = (...args) => profileFilesystemCall('realpath', args[0], () => fsRealpath(...args));
-
-// Reject impossible matches before invoking the full glob parser. These are
-// necessary conditions only; Node still decides every possible glob match.
-function globRules(patterns) {
-  const rules = patterns.map(pattern => {
-    const simple = process.platform !== 'win32' && !/[\\{}[\]()!+@]/.test(pattern)
-      && !pattern.split('/').some(part => part === '.' || part === '..');
-    return { pattern,
-      required: simple ? pattern.split('/').filter(part => part && !/[*?]/.test(part)) : [],
-      suffix: simple ? /^\*\*\/\*(\.[a-zA-Z0-9_-]+)$/.exec(pattern)?.[1] : undefined };
-  });
-  return id => {
-    const segments = new Set(id.split('/'));
-    return rules.some(({ pattern, required, suffix }) => (!suffix || id.endsWith(suffix))
-      && required.every(part => segments.has(part)) && matchesGlob(id, pattern));
-  };
-}
-
-// Generic folder rules do not prune an explicitly selected dependency/output
-// subtree. Disposable file rules still apply within that explicit subtree.
-function directoryExclusions(config, root, cache) {
-  const { directories = [], files = [] } = config.directoryIgnore ?? defaultDirectoryIgnore;
-  const ancestors = [];
-  for (let file = root; inside(config.root, file); file = dirname(file)) {
-    ancestors.push(slash(relative(config.root, file)));
-    if (file === config.root) break;
-  }
-  const explicit = ancestors.some(id => directories.some(pattern => matchesGlob(id, pattern)));
-  const patterns = explicit ? [...files] : [...directories, ...files];
-  const key = JSON.stringify([config.root, patterns]);
-  let values = cache?.get(key);
-  if (!values) { values = new Map(); cache?.set(key, values); }
-  const matches = globRules(patterns);
-  return file => {
-    if (values.has(file)) return values.get(file);
-    const id = slash(relative(config.root, file));
-    const excluded = matches(id);
-    values.set(file, excluded);
-    return excluded;
-  };
-}
 
 // One queue bounds leaf work. Visitors enqueue children without awaiting them.
 export function createSnapshotContext({ signal, inputConcurrency,
@@ -66,26 +26,7 @@ export function createSnapshotContext({ signal, inputConcurrency,
   const pool = createHashPool({ workers: inputConcurrency ?? scanConcurrency, resources });
   const acceptedSources = new Map();
   const run = operation => pool.run(operation);
-  function excluded(config) {
-    // These decisions depend on paths and rules only, never filesystem state.
-    const rules = JSON.stringify([config.root, config.cacheDirectory, config.ignore]);
-    let values = exclusions.get(rules);
-    if (!values) exclusions.set(rules, values = new Map());
-    const literals = new Set(), patterns = [];
-    for (const pattern of config.ignore) {
-      if (process.platform !== 'win32' && !/[*?{}()[\]\\!+@]/.test(pattern)
-        && pattern === slash(relative(config.root, resolve(config.root, pattern)))) literals.add(pattern);
-      else patterns.push(pattern);
-    }
-    const matches = globRules(patterns);
-    return file => {
-      if (values.has(file)) return values.get(file);
-      const id = slash(relative(config.root, file));
-      const value = inside(config.cacheDirectory, file) || literals.has(id) || matches(id);
-      values.set(file, value);
-      return value;
-    };
-  }
+  const excluded = config => inputExclusions(config, exclusions);
   function directoryExcluded(config, root) {
     const key = JSON.stringify([config.root, config.directoryIgnore ?? defaultDirectoryIgnore]);
     let roots = directoryRoots.get(key);
@@ -211,12 +152,15 @@ export function createSnapshotContext({ signal, inputConcurrency,
     if (failure) throw failure.reason;
   }
   function identify(files, config, excludedFiles = new Set()) {
-    const exclude = excluded(config);
+    const filterConfig = { root: config.root, cacheDirectory: config.cacheDirectory,
+      ignore: [...config.ignore], directoryIgnore: config.directoryIgnore
+        ? { directories: [...(config.directoryIgnore.directories ?? [])], files: [...(config.directoryIgnore.files ?? [])] } : undefined };
+    const excludedPaths = [...excludedFiles];
     return new Promise((resolveIdentities, reject) => {
       const values = new Array(files.length);
       let remaining = 0;
       const failures = [];
-      function enqueue(file, ancestors, assign, directoryExcluded, logical = file) {
+      function enqueue(file, ancestors, assign, directoryRoot, logical = file) {
         remaining++;
         // A directory releases its scanner slot before it queues child jobs.
         // Aggregation stays on the coordinator and never waits inside admission.
@@ -242,7 +186,7 @@ export function createSnapshotContext({ signal, inputConcurrency,
             const identity = ['symlink', readlinkTarget, null];
             assign(identity);
             if (ancestors.has(target)) identity[2] = ['cycle', target];
-            else enqueue(target, ancestors, nested => { identity[2] = nested; }, directoryExcluded, logical);
+            else enqueue(target, ancestors, nested => { identity[2] = nested; }, directoryRoot, logical);
           } else if (value.kind === 'directory') {
             let discovery = scanDirectories?.get(file);
             if (!discovery) {
@@ -257,16 +201,17 @@ export function createSnapshotContext({ signal, inputConcurrency,
             }
             if (ancestors.has(canonical)) { assign(['cycle', canonical]); return; }
             const nested = new Set(ancestors).add(canonical);
-            const children = names.map(name => ({ file: join(file, name), logical: join(logical, name), value: [name, null] }))
-              .filter(entry => !inside(config.cacheDirectory, entry.file) && !exclude(entry.logical) && !directoryExcluded(entry.logical) && !excludedFiles.has(entry.logical) && !excludedFiles.has(entry.file));
+            const kept = await pool.filterDirectory({ file, logical, names, root: directoryRoot,
+              config: filterConfig, excludedFiles: excludedPaths });
+            const children = kept.map(name => ({ file: join(file, name), logical: join(logical, name), value: [name, null] }));
             assign(['directory', children.map(entry => entry.value)]);
-            for (const entry of children) enqueue(entry.file, nested, identity => { entry.value[1] = identity; }, directoryExcluded, entry.logical);
+            for (const entry of children) enqueue(entry.file, nested, identity => { entry.value[1] = identity; }, directoryRoot, entry.logical);
           } else throw new Error(`Unsupported input type: ${file}`);
         })().catch(error => { if (!failures.length) failures.push(error); }).finally(() => {
           if (!--remaining) failures.length ? reject(failures[0]) : resolveIdentities(values);
         });
       }
-      files.forEach((file, index) => enqueue(file, new Set(), identity => { values[index] = identity; }, directoryExcluded(config, file)));
+      files.forEach((file, index) => enqueue(file, new Set(), identity => { values[index] = identity; }, file));
       if (!remaining) resolveIdentities(values);
     });
   }

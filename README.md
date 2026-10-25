@@ -492,18 +492,20 @@ The caller closes that pool after all calls settle. Explicit `workers` on
 worker caps. Input fingerprinting, directory metadata, coverage source checks,
 artifact proofs and passing-record reads use one adaptive scanner. It starts at
 `scanConcurrency` (default 32); `inputConcurrency` remains a compatibility startup
-setting for that same scanner. There is no separate filesystem or hash-thread cap.
+setting for that same scanner. Child processes perform directory path/glob filtering
+and file inspection/hashing through this shared admission; there is no second worker pool.
 Once per second, a queued backlog can add up to eight admissions when measured CPU use
-predicts room within the CPU budget, free RAM covers worker estimates, and CPU,
-memory and I/O pressure each remain at or below 5%. Saturation or pressure reduces
+predicts room within the CPU budget, free RAM covers worker estimates, and
+memory and I/O pressure each remain at or below 5%. CPU saturation or memory/I/O pressure reduces
 future admissions by eight, down to one, including below the configured startup.
-Active files finish normally; surplus idle threads retire without interrupting a
-read. Threads start lazily and own one fixed 64 KiB buffer each; a 32 MiB allowance
-per thread bounds admission against the resource memory budget. Linux I/O pressure
+Active files finish normally when admission shrinks; surplus idle processes retire.
+Processes start lazily and own one fixed 64 KiB buffer each; a 64 MiB per-process
+estimate bounds admission against the resource memory budget. Cancellation terminates
+active processes and waits for their closure before returning. Linux I/O pressure
 comes from `/proc/pressure/io`; missing CPU or free-memory telemetry prevents
 growth, and unavailable pressure telemetry falls back to the remaining checks.
 Reader growth also stops at the larger of the requested startup count and the
-rounded-up CPU budget, avoiding excess thread startup on I/O-heavy scans.
+rounded-up CPU budget, avoiding excess process startup on I/O-heavy scans.
 
 Initial scans share inventories, entry inspection, directory child lists and
 serialized fingerprint records within one generation. Filtering and symlink/cycle

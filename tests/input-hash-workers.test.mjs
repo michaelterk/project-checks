@@ -15,7 +15,7 @@ import { put, temporary } from './helpers.mjs';
 function fakeWorkers() {
   const workers = [];
   class Fake extends EventEmitter {
-    constructor(options) { super(); this.flag = new Int32Array(options.workerData.cancellation); this.dispatched = 0; this.terminated = false; workers.push(this); }
+    constructor() { super(); this.dispatched = 0; this.terminated = false; workers.push(this); }
     postMessage(job) { assert.equal(this.job, undefined); this.job = job; this.dispatched += job.jobs.length; }
     complete() { const { jobs } = this.job; this.job = undefined; this.emit('message', { results: jobs.map(({ id }) => ({ id, hash: 'digest', metrics: {} })), done: true }); }
     async terminate() { assert.equal(this.job, undefined); this.terminated = true; this.emit('exit', 1); return 1; }
@@ -37,7 +37,7 @@ test('pool starts lazily, caps jobs, rejects queued cancellation and drains acti
   await pending;
   assert.equal(activeSettled, false);
   assert.equal(closed, false);
-  fake.workers.forEach(worker => { assert.equal(Atomics.load(worker.flag, 0), 1); assert.equal(worker.terminated, false); worker.complete(); });
+  fake.workers.forEach(worker => { assert.equal(worker.terminated, false); worker.complete(); });
   await Promise.all([active, closing]);
   assert.ok(fake.workers.every(worker => worker.terminated));
   await assert.rejects(pool.hash('after-close', 'identity'), error => error === reason);

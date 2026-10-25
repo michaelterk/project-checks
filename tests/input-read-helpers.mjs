@@ -1,20 +1,26 @@
 import fs from 'node:fs/promises';
-import workers from 'node:worker_threads';
+import children from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { syncBuiltinESMExports } from 'node:module';
 import { createHash } from 'node:crypto';
 import { inputMetadata } from '../src/input-hash-sync.mjs';
+import { filterInputDirectory } from '../src/input-exclusions.mjs';
 
 // Worker-protocol double for deterministic interleavings. Real worker byte
 // ownership, reads and cancellation are exercised in input-hash-workers tests.
 export function interceptReads(t, intercept) {
-  const Original = workers.Worker;
-  class ControlledWorker extends EventEmitter {
-    constructor(filename, options) { super(); this.flag = new Int32Array(options.workerData.cancellation); }
-    postMessage({ jobs }) {
-      this.pending = Promise.all(jobs.map(async ({ id, file, cached, inspect, identity }) => {
+  const original = children.fork;
+  class ControlledProcess extends EventEmitter {
+    constructor() { super(); this.exitCode = this.signalCode = null; this.caches = { exclusions: new Map(), directories: new Map() }; this.policies = new Map(); }
+    ref() {}
+    unref() {}
+    send({ jobs, policies = [] }, callback) {
+      callback?.();
+      for (const [id, policy] of policies) this.policies.set(id, policy);
+      this.pending = Promise.all(jobs.map(async ({ id, file, cached, inspect, identity, filter }) => {
         const metrics = {};
         try {
+          if (filter) return { id, value: filterInputDirectory({ ...filter, ...this.policies.get(filter.policy) }, this.caches), metrics };
           const info = await fs.lstat(file, { bigint: true });
           const actual = inputMetadata(info);
           if (inspect && !info.isFile()) return { id, hash: { kind: info.isDirectory() ? 'directory' : info.isSymbolicLink() ? 'symlink' : 'other' }, metrics };
@@ -38,9 +44,19 @@ export function interceptReads(t, intercept) {
         } catch (error) { return { id, error: { name: error.name, message: error.message, code: error.code, path: error.path }, metrics }; }
       })).then(results => this.emit('message', { results, done: true }));
     }
-    async terminate() { await this.pending; this.emit('exit', 1); }
+    kill(signal) {
+      if (!this.stopping) {
+        this.stopping = true;
+        Promise.resolve(this.pending).then(() => {
+          this.signalCode = signal;
+          this.emit('exit', null, signal);
+          this.emit('close', null, signal);
+        });
+      }
+      return true;
+    }
   }
-  workers.Worker = ControlledWorker;
+  children.fork = () => new ControlledProcess();
   syncBuiltinESMExports();
-  t.after(() => { workers.Worker = Original; syncBuiltinESMExports(); });
+  t.after(() => { children.fork = original; syncBuiltinESMExports(); });
 }

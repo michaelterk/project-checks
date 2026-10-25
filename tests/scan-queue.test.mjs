@@ -41,7 +41,7 @@ test('input scanner starts32 readers and does not grow beyond startup above its 
 });
 
 test('CPU and memory pressure shrink BELOW startup without interrupting owned files', async t => {
-  for (const pressure of ['busyCpus', 'memoryPressure']) await t.test(pressure, async t => {
+  for (const pressure of ['busyCpus', 'memoryPressure', 'ioPressure']) await t.test(pressure, async t => {
     const f = fixture(t);
     f.reading[pressure] = pressure === 'busyCpus' ? 16 : 0.2;
     t.mock.timers.tick(1000);
@@ -61,6 +61,15 @@ test('CPU and memory pressure shrink BELOW startup without interrupting owned fi
     f.workers.filter(worker => worker.job).forEach(worker => worker.complete());
     await closing;
   });
+});
+
+test('CPU pressure alone does not shrink validation while the CPU budget has headroom', async t => {
+  const f = fixture(t, 32, { pressure: 0.75 });
+  t.mock.timers.tick(1000);
+  assert.equal(f.pool.state().limit, 32);
+  f.reading.busyCpus = 16;
+  t.mock.timers.tick(1000);
+  assert.equal(f.pool.state().limit, 24, 'measured CPU saturation still reduces admission');
 });
 
 test('metadata tasks and file hashing consume the SAME scanner admission', async t => {
@@ -115,8 +124,8 @@ test('I/O telemetry measures stall fractions and tolerates unsupported pressure 
 
 test('initial low memory clamps admission before any file worker starts', t => {
   const f = fixture(t, 32, { availableMemoryMiB: 96 });
-  assert.equal(f.pool.state().limit, 3);
-  assert.equal(f.active(), 3);
+  assert.equal(f.pool.state().limit, 1);
+  assert.equal(f.active(), 1);
 });
 
 test('an explicit scanner startup above32 has no hidden lower hash or filesystem cap', t => {
