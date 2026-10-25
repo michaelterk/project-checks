@@ -72,7 +72,7 @@ export class Admission {
     this.selected.cpuBudget = Math.min(this.selected.cpuBudget, this.host.cpus * (policy.cpuQuotaPercent ?? defaultResources.cpuQuotaPercent) / 100);
     this.memory = policy.memoryMiBPerWorker ?? defaultResources.memoryMiBPerWorker;
     this.reserve = policy.reserveMemoryMiB ?? defaultResources.reserveMemoryMiB;
-    this.capacity = Math.max(1, Math.min(units, this.host.cpus * 2, Math.floor(this.selected.memoryBudgetMiB / this.memory), policy.maxWorkers ?? Infinity));
+    this.capacity = Math.max(1, Math.min(units, this.host.cpus * 4, Math.floor(this.selected.memoryBudgetMiB / this.memory), policy.maxWorkers ?? Infinity));
     this.fixedWorkers = workers === undefined ? undefined : Math.min(this.capacity, integer(workers, 'workers'));
     if (this.fixedWorkers !== undefined) this.capacity = this.fixedWorkers;
     const initial = this.fixedWorkers ?? Math.max(1, Math.min(this.capacity, Math.floor(this.host.cpus * 3 / 4),

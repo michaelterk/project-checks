@@ -951,7 +951,7 @@ outer runner instead.
 
 `compilation.executor` defaults to `local`; a repository release adapter may use
 `batch` and provide command-line overrides. Adaptive process admission starts at
-three quarters of host cores and caps at twice host cores, subject to workload,
+three quarters of host cores and caps at four times host cores, subject to workload,
 RAM and any lower explicit `resources.maxWorkers` limit.
 
 ### Canonical input projections

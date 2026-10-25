@@ -241,10 +241,10 @@ test('configured quota percent defines admission CPU headroom', t => {
 });
 
 
-test('adaptive capacity is twice host cores, with lower workload, RAM and explicit caps', t => {
+test('adaptive capacity is four times host cores, with lower workload, RAM and explicit caps', t => {
   for (const [cores, policy, units, capacity, initial] of [
-    [32, {}, 1000, 64, 24], [64, {}, 1000, 128, 48],
-    [32, { maxWorkers: 10 }, 1000, 10, 10], [32, { maxWorkers: 100 }, 1000, 64, 24],
+    [32, {}, 1000, 128, 24], [64, {}, 1000, 256, 48],
+    [32, { maxWorkers: 10 }, 1000, 10, 10], [32, { maxWorkers: 100 }, 1000, 100, 24],
     [32, {}, 5, 5, 5], [32, { memoryMiBPerWorker: 16384 }, 1000, 8, 8],
   ]) {
     const admission = new Admission(policy, units, { host: { cpus: cores, memoryMiB: 131072 },
@@ -253,4 +253,24 @@ test('adaptive capacity is twice host cores, with lower workload, RAM and explic
     assert.equal(admission.capacity, capacity);
     assert.equal(admission.limit, initial);
   }
+});
+
+
+test('adaptive growth can reach four times host cores and still backs off under CPU pressure', async t => {
+  const { admission, reading } = fixture(t, { maxWorkers: 20 });
+  assert.equal(admission.capacity, 8);
+  assert.equal(admission.limit, 1);
+  await admission.acquire();
+  for (let expected = 2; expected <= 8; expected++) {
+    for (let tick = 0; tick < 3; tick++) admission.tick();
+    assert.equal(admission.limit, expected);
+    await admission.acquire();
+  }
+  for (let tick = 0; tick < 3; tick++) admission.tick();
+  assert.equal(admission.limit, 8);
+  reading.pressure = 0.20;
+  admission.tick();
+  assert.equal(admission.limit, 7);
+  assert.equal(admission.active, 8);
+  for (let worker = 0; worker < 8; worker++) admission.release();
 });
