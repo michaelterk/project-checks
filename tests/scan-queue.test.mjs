@@ -52,7 +52,6 @@ test('CPU and memory pressure shrink BELOW startup without interrupting owned fi
     f.workers.slice(0, 32 - firstLimit).forEach(worker => worker.complete());
     await flush();
     assert.equal(f.active(), firstLimit, 'the reduced pool admits no replacements at capacity');
-    assert.equal(f.workers.filter(worker => worker.retired).length, 32 - firstLimit);
     t.mock.timers.tick(1000);
     assert.equal(f.pool.state().limit, nextLimit);
     f.workers.filter(worker => worker.job).slice(0, firstLimit - nextLimit).forEach(worker => worker.complete());

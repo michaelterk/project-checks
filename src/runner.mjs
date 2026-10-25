@@ -1,3 +1,4 @@
+import { batchValidationSnapshots } from './validation-snapshots.mjs';
 import { isDeepStrictEqual } from 'node:util';
 import { createCoverage } from './coverage.mjs';
 import { Admission } from './admission.mjs';
@@ -55,7 +56,17 @@ function fileSnapshot(config) {
     result.then(() => pending.delete(result), () => pending.delete(result));
     return result;
   };
+  const unitSnapshot = batchValidationSnapshots(async () => {
+    config.signal?.throwIfAborted();
+    const prepared = await snapshot.prepare();
+    return async id => {
+      if (!prepared.files.includes(id)) throw new Error('Current test-unit discovery changed before validation');
+      await prepared.unit(id);
+      return { common: prepared.value.common, units: { [id]: prepared.value.units[id] }, files: prepared.files };
+    };
+  });
   return {
+    unitSnapshot: id => track(() => unitSnapshot(id)),
     prepare: inventory => track(async () => {
       const prepared = await snapshot.prepare(inventory);
       return { ...prepared, unit: id => track(() => prepared.unit(id)) };
@@ -77,7 +88,7 @@ export async function runTests(options = {}, lifecycle = {}) {
   return withProgress(options, progress => withProcessSignal(options.signal, signal => runTestsWithSignal({ ...options, progress, signal }, lifecycle)));
 }
 
-async function runTestsWithSignal(options, { retained, normalPhase, cacheScan, queueScan, executeFiles }) {
+async function runTestsWithSignal(options, { retained, normalPhase, cacheScan, queueScan, executeFiles, deferFinalVerification }) {
   const config = await normalizeConfig(options);
   const { root } = config;
   if (config.coverage?.report) config.ignore = [...config.ignore, config.coverage.report, `${config.coverage.report}.*.tmp`];
@@ -171,6 +182,8 @@ async function runTestsWithSignal(options, { retained, normalPhase, cacheScan, q
     const retryTimeouts = options.retryTimeouts ?? false;
     const retryTimeoutMs = options.retryTimeoutMs ?? 60000;
     inputs = fileSnapshot(config);
+    // Leaves publish their final verdict only after invocation-wide verification.
+    const deferFinal = Boolean(retained && deferFinalVerification && !artifacts);
     if (!options.snapshotContext) context.beginScanGeneration();
     const initialSnapshot = await inputs.prepare(inventory);
     before = initialSnapshot.value;
@@ -236,12 +249,14 @@ async function runTestsWithSignal(options, { retained, normalPhase, cacheScan, q
         return status;
       },
     }, { queueScan, cacheScan, prepareExecution, executeFiles, artifactContext: context, initialSnapshot,
+      unitSnapshot: id => span('unit-input-validation', () => inputs.unitSnapshot(id), { file: id }),
+      deferFinalVerification: deferFinal,
       afterScan: async () => {
         if (!options.snapshotContext) await context.finishScanGeneration();
         diagnostics?.event('file-estimates', { suite: config.suite, files: files.map(file => ({ file, seconds: hints.priority(file) })) });
       }, orderFiles: (a, b) => hints.priority(b) - hints.priority(a) });
     diagnostics?.event('snapshot-final', { suite: config.suite, call: snapshotCalls, seconds: lastSnapshotSeconds });
-    if (!result.inputsChanged) await hints.save();
+    if (!result.inputsChanged && !deferFinal) await hints.save();
     const verify = async () => {
       if (!isDeepStrictEqual(before, await inputs.snapshot())) throw new Error('Check inputs changed during invocation');
       await artifacts?.verifySources();
@@ -261,7 +276,7 @@ async function runTestsWithSignal(options, { retained, normalPhase, cacheScan, q
         }
         aggregated = true;
       }
-      if (!result.exitCode) {
+      if (!result.exitCode && !deferFinal) {
         await verify();
         if (artifacts && complete && !result.excluded) await artifacts.saveSummary(before);
       }
@@ -270,7 +285,8 @@ async function runTestsWithSignal(options, { retained, normalPhase, cacheScan, q
     if (!retained) await options.failureExclusions?.close();
     await reconcile();
     if (retained) {
-      retained.push({ verify, close, reconcile: options.failureExclusions ? reconcile : undefined });
+      retained.push({ verify, close, reconcile: options.failureExclusions ? reconcile : undefined,
+        complete: deferFinal && !result.inputsChanged ? () => hints.save() : undefined });
       deferred = true;
     }
     return result;

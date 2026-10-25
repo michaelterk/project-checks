@@ -44,10 +44,12 @@ export async function loadChecks(filename, { target = 'default', files, filters,
           let config = await loadConfig(resolve(directory, definition.config), { sources });
           if (definition.fixture) {
             const fixture = await import(pathToFileURL(resolve(directory, definition.fixture)));
+            if (fixture.processInputs && fixture.prepareInputs !== undefined && typeof fixture.prepareInputs !== 'function')
+              throw new TypeError('prepareInputs must be a function');
             const base = fixture.processInputs ? structuredClone(config) : undefined;
             config = { ...config, ...await fixture.default(config, context) };
             if (base) config[inputProcess] = { fixture: pathToFileURL(resolve(directory, definition.fixture)).href,
-              base, testInputs: config.testInputs, inputProjection: config.inputProjection };
+              base, prepareInputs: fixture.prepareInputs, testInputs: config.testInputs, inputProjection: config.inputProjection };
           }
           if (files?.length) config.files = files;
           if (filters?.length) config.filters = filters;

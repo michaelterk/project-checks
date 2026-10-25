@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
+import filesystem from 'node:fs';
+import os from 'node:os';
 import { readFile, realpath } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { setTimeout as delay } from 'node:timers/promises';
 import test from 'node:test';
 import { defineConfig, loadConfig, loadChecks, runCachedUnits, runChecks, runTests } from '../src/index.mjs';
 import { put, temporary } from './helpers.mjs';
@@ -37,6 +38,14 @@ test('invalid scan concurrency fails before execution in configuration and runne
 });
 
 test('JSON overrides control actual shared scan reads and invocation options take precedence', async t => {
+  // Test configuration propagation independently of live host CPU/I/O load.
+  const processors = os.cpus(), readSync = filesystem.readFileSync;
+  t.mock.method(os, 'cpus', () => processors);
+  t.mock.method(filesystem, 'readFileSync', (file, ...args) =>
+    /^\/proc\/pressure\/(?:cpu|memory|io)$/.test(String(file))
+      ? 'some avg10=0.00 avg60=0.00 avg300=0.00 total=0' : readSync(file, ...args));
+  syncBuiltinESMExports();
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
   const root = await realpath(await temporary(t));
   const cacheDirectory = join(root, '.test-cache/project-checks');
   for (let index = 0; index < 40; index++) await put(root, `test/${index}.test.mjs`, '');
@@ -52,14 +61,22 @@ test('JSON overrides control actual shared scan reads and invocation options tak
     definition.config = async context => ({ ...await factory(context), setup: () => ({ execute: () => 0 }) });
   }
   assert.equal((await runChecks(definitions, { workers: 1, logger: false })).exitCode, 0);
-  let active = 0, peak = 0, reads = 0;
+  let active = 0, peak = 0, reads = 0, expected = 2;
+  const nextBarrier = () => {
+    const value = Promise.withResolvers();
+    const timer = setTimeout(() => value.reject(new Error('Configured scan concurrency never admitted the waiting reads')), 5000);
+    value.promise.then(() => clearTimeout(timer), () => clearTimeout(timer));
+    return value;
+  };
+  let barrier = nextBarrier();
   const original = fs.readFile;
   t.mock.method(fs, 'readFile', async (file, ...args) => {
     if (!(typeof file === 'string' && file.startsWith(`${cacheDirectory}/`) && file.endsWith('.json'))) return original(file, ...args);
     active++;
     reads++;
     peak = Math.max(peak, active);
-    try { await delay(2); return await original(file, ...args); }
+    if (active === expected) barrier.resolve();
+    try { await barrier.promise; return await original(file, ...args); }
     finally { active--; }
   });
   syncBuiltinESMExports();
@@ -73,13 +90,13 @@ test('JSON overrides control actual shared scan reads and invocation options tak
   assert.ok(lines.some(line => /Queued: 80 test files \| Concurrency: 2/.test(line)));
   assert.ok(lines.some(line => /CACHE_SCAN_PROGRESS: checks \| 0 out of 80 scanned \| Plans: 80/.test(line)));
   assert.ok(lines.some(line => /CACHE_SCAN_PROGRESS: checks \| 80 out of 80 scanned \| Plans: 0/.test(line)));
-  peak = reads = 0;
+  peak = reads = 0; expected = 5; barrier = nextBarrier();
   lines.length = 0;
   assert.equal((await runChecks(definitions, { workers: 1, scanConcurrency: 5, logger })).exitCode, 0);
   assert.equal(peak, 5);
   assert.equal(reads, 80);
   assert.ok(lines.some(line => /Queued: 80 test files \| Concurrency: 5/.test(line)));
-  peak = reads = 0;
+  peak = reads = 0; expected = 2; barrier = nextBarrier();
   lines.length = 0;
   assert.equal((await runTests({ ...await loadConfig(join(root, 'one.json')), logger })).cached, 40);
   assert.equal(peak, 2);
@@ -92,7 +109,7 @@ test('JSON overrides control actual shared scan reads and invocation options tak
   lines.length = 0;
   await runChecks(definitions, { workers: 1, logger, progress: false });
   assert.equal(lines.some(line => line.startsWith('CACHE_SCAN_PROGRESS:')), false);
-  peak = reads = 0;
+  peak = reads = 0; expected = 3; barrier = nextBarrier();
   const ids = Array.from({ length: 40 }, (_, index) => `adapter-${index}`);
   assert.equal((await runCachedUnits({
     suite: 'adapter', scanConcurrency: 3, cacheDirectory, workers: 1, logger: null,

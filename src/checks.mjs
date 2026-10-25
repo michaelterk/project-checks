@@ -33,6 +33,7 @@ export async function runChecks(definitions, options = {}) {
     if (definition.dependsOn !== undefined && (!Array.isArray(definition.dependsOn) || definition.dependsOn.some(id => typeof id !== 'string'))) throw new Error('dependsOn must be an array of check IDs');
     byId.set(definition.id, definition);
   }
+  const dependents = new Set(definitions.flatMap(definition => definition.dependsOn ?? []));
   const visited = new Set(), visiting = new Set();
   function visit(id) {
     if (visiting.has(id)) throw new Error(`Check dependency cycle: ${id}`);
@@ -209,6 +210,7 @@ export async function runChecks(definitions, options = {}) {
               files: () => options.failureExclusions.files(id) } : undefined;
             return { id, ...await runTests({ ...config, diagnostics: suiteDiagnostics, failureExclusions, inputConcurrency: options.inputConcurrency ?? config.inputConcurrency, signal, admission, snapshotContext, logger: logger ?? false, progress: suiteProgress }, {
               retained: { push: handle => retained.push({ ...handle, id }) }, normalPhase: phases.get(id),
+              deferFinalVerification: !dependents.has(id),
               executeFiles: () => fileQueue.run(id),
               queueScan: (jobs, scanConcurrency) => { queued.resolve({ jobs, scanConcurrency }); return scanned.promise; },
               cacheScan: plan => { ready.resolve(plan); return permission.promise; },
@@ -282,8 +284,18 @@ export async function runChecks(definitions, options = {}) {
         const failure = verified.find(result => result.status === 'rejected');
         if (failure) throw failure.reason;
       } finally { verification.close(); }
-      for (const definition of definitions) await definition.verify?.();
-      exitCode = results.find(result => result.exitCode)?.exitCode ?? 0;
+      for (const definition of definitions) {
+        signal.throwIfAborted();
+        await definition.verify?.();
+      }
+      signal.throwIfAborted();
+      const resultExitCode = results.find(result => result.exitCode)?.exitCode ?? 0;
+      if (!resultExitCode) for (const handle of retained) {
+        signal.throwIfAborted();
+        await handle.complete?.();
+      }
+      signal.throwIfAborted();
+      exitCode = resultExitCode;
       return { exitCode, results };
     } catch (error) {
       if (processSignal.aborted || error.name === 'AbortError') exitCode = 130;

@@ -185,11 +185,21 @@ selection, projection/normalization and fingerprint construction into the existi
 bounded input processes. Common trees use the shared parallel scanner; their
 projection runs in an input process. Common inputs are computed once per snapshot;
 independent units run concurrently. Process-side factories also receive
-`inputGeneration` and `commonInputs`: the fresh snapshot identifier and the
+`inputGeneration` and `commonInputs`: the observation-round identifier and the
 coordinator's declared shared inputs. Factories may reuse observations within
-that generation; later snapshots rebuild them. Fixture runtime paths remain parent-owned, and later
+that generation. The initial scan shares its identifier across suites; later
+snapshots rebuild their observations. Hydration also binds the declared shared
+inputs, so overrides cannot inherit another coordinator's exclusions.
+Fixture runtime paths remain parent-owned, and later
 callback overrides retain their in-memory behavior. Setup and test execution stay
 with their existing owners.
+
+Process-safe fixtures can export `prepareInputs(base, { signal, inputGeneration })`
+to prepare shared data during the initial scan. Loading configurations never calls
+it. The hook returns plain JSON, bounded to 16 MiB; workers receive private copies
+as `context.inputData`. Preparation owns and drains its subprocesses on cancellation.
+Factories validate prepared data against current inputs and retain fresh discovery
+for later snapshots, which do not invoke the hook.
 
 The CLI equivalent is:
 
@@ -283,8 +293,9 @@ release their execution slot after command cleanup, then verify inputs and publi
 their cache record in a separate pool capped by `verificationConcurrency` (default
 32 active jobs). Each invocation bounds executing and finalizing files to its
 execution capacity plus that verification limit, reserving
-space before command admission. Concurrent input checks within a suite still share
-an in-progress snapshot. Coverage collection retains execution admission because
+space before command admission. Completed files validate their own dependencies;
+callers ready before collection begins share a batch's common inputs. Later arrivals
+start a fresh observation. Coverage collection retains execution admission because
 it can start processes and use substantial memory. Suite completion, dependencies,
 exclusive retries, and cleanup wait for finalization. Missing or corrupt records
 and incompatible artifacts rerun. Standalone `runTests` and `runCachedUnits` use
@@ -308,8 +319,12 @@ cancelled plans do not count as scanned. `progress: false` suppresses these live
 Only zero-exit tests with unchanged inputs receive passing evidence. Evidence
 is written atomically per file, so completed passes survive a later test failure
 or interruption. A failed test reruns on the next invocation. Corrupt evidence
-also reruns. Input snapshots are checked after successful commands and again
-before reporting suite success, including when all tests were cached.
+also reruns. Input snapshots are checked after successful commands and before
+invocation success, including when all tests were cached. In `runChecks`, suites
+with neither dependents nor coverage artifacts defer duplicate terminal scans to that
+final check. Prerequisites, coverage suites, and standalone `runTests` retain their
+suite checks. Deferred duration hints are saved after all final input and
+configuration checks succeed.
 If inputs change during a run, only their consuming tests lose eligibility to
 save passing evidence; independent tests retain their passes. Shared input
 changes fence every consumer. The whole invocation still fails its final input
@@ -508,9 +523,12 @@ setting for that same scanner. Child processes perform directory path/glob filte
 and file inspection/hashing through this shared admission; there is no second worker pool.
 Once per second, a queued backlog can add up to eight admissions when measured CPU use
 predicts room within the CPU budget, free RAM covers worker estimates, and
-memory and I/O pressure each remain at or below 5%. CPU saturation or memory/I/O pressure reduces
-future admissions by eight, down to one, including below the configured startup.
-Active files finish normally when admission shrinks; surplus idle processes retire.
+memory and I/O pressure each remain at or below 5%. CPU saturation reduces admission
+in proportion to the excess load; memory or I/O pressure reduces it by eight, down
+to one. Active files finish normally. CPU/I/O backoff retains warm idle processes
+within the pool's memory ceiling; memory pressure retires surplus processes.
+Extra retained workers remain monitored during idle pauses and all workers close
+at invocation end.
 Processes start lazily and own one fixed 64 KiB buffer each. The configured
 `resources.memoryMiBPerWorker` estimates each process's memory, including input
 callbacks and their parsed module indexes. Cancellation terminates each worker's
@@ -520,13 +538,13 @@ growth, and unavailable pressure telemetry falls back to the remaining checks.
 Reader growth also stops at the larger of the requested startup count and the
 rounded-up CPU budget, avoiding excess process startup on I/O-heavy scans.
 
-Initial scans share inventories, entry inspection, directory child lists and
-serialized fingerprint records within one generation. Filtering and symlink/cycle
+Initial scans share inventories, entry inspection, directory child lists, factory
+observation identifiers, and serialized fingerprint records within one generation. Filtering and symlink/cycle
 contexts remain specific to each projection. Later snapshots discover paths and
 check fresh metadata. Coverage source proofs are independently rechecked before
 accepting cached hits and after aggregation and dependent checks. Content digests
 remain reusable only while fresh metadata matches. Cancellation drains active
-file handles before thread termination; the invocation closes its scanner.
+file handles before worker termination; the invocation closes its scanner.
 
 Setting `PROJECT_CHECKS_SCAN_PROFILE=1` emits a final `SCAN_PROFILE` JSON record
 from CLI `run` and `checks` invocations with detailed scan and verification metrics.

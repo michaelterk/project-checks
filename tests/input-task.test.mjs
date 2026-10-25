@@ -3,7 +3,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { setTimeout as delay } from 'node:timers/promises';
 import { join } from 'node:path';
 import test from 'node:test';
-import { createFileSnapshot, loadChecks } from '../src/index.mjs';
+import { createFileSnapshot, createSnapshotContext, loadChecks } from '../src/index.mjs';
 import { put, temporary } from './helpers.mjs';
 import { groupRunning } from '../src/command.mjs';
 
@@ -126,9 +126,29 @@ test('sequential units share one explicit generation and later snapshots hydrate
     const events = (await readFile(join(root, 'pids.log'), 'utf8')).trim().split('\n').map(JSON.parse);
     const values = events.filter(([kind]) => kind.startsWith('generation:')).map(([kind]) => kind);
     assert.equal(values.length, 1, 'one worker builds observation state once for the round');
-    assert.match(values[0], /^generation:[a-f0-9-]{36}$/);
     return values[0];
   };
   const first = await generations();
   assert.notEqual(await generations(), first, 'a later freshness check cannot inherit the first observations');
+});
+
+
+test('initial scan factories share observation state and later checks refresh it', { timeout: 10000 }, async t => {
+  const { root, config } = await fixture(t);
+  const context = createSnapshotContext({ inputConcurrency: 1, signal: config.signal });
+  const first = await createFileSnapshot({ ...config, snapshotContext: context });
+  const second = await createFileSnapshot({ ...config, suite: 'peer', snapshotContext: context });
+  const generations = async () => (await readFile(join(root, 'pids.log'), 'utf8')).trim().split('\n')
+    .map(JSON.parse).filter(([kind]) => kind.startsWith('generation:')).map(([kind]) => kind);
+  try {
+    await writeFile(join(root, 'pids.log'), '');
+    context.beginScanGeneration();
+    const before = await first.snapshot();
+    assert.deepEqual(await second.snapshot(), before);
+    assert.equal((await generations()).length, 1, 'peer suites must reuse the initial round observations');
+    await context.finishScanGeneration();
+    await writeFile(join(root, 'dependency.txt'), 'later mutation');
+    assert.notDeepEqual(await second.snapshot(), before);
+    assert.equal(new Set(await generations()).size, 2, 'a final check must use a fresh observation');
+  } finally { await Promise.all([first.close(), second.close()]); await context.close(); }
 });

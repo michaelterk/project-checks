@@ -1,3 +1,4 @@
+import { batchValidationSnapshots } from './validation-snapshots.mjs';
 import { withProcessSignal } from './cancellation.mjs';
 import { profileJsonRead, profileScanUnit, profileStage } from './scan-profile.mjs';
 import { randomUUID } from 'node:crypto';
@@ -46,11 +47,11 @@ export function cacheKey(snapshot, unitId) {
   return digest(JSON.stringify([snapshot.common, snapshot.units[unitId]]));
 }
 
-export async function runCachedUnits(options, { queueScan, cacheScan, prepareExecution, executeFiles, artifactContext, initialSnapshot, orderFiles, afterScan } = {}) {
-  return withProgress(options, progress => withProcessSignal(options.signal, signal => runUnits({ ...options, progress, signal }, { queueScan, cacheScan, prepareExecution, executeFiles, artifactContext, initialSnapshot, orderFiles, afterScan })));
+export async function runCachedUnits(options, { queueScan, cacheScan, prepareExecution, executeFiles, artifactContext, initialSnapshot, orderFiles, afterScan, unitSnapshot, deferFinalVerification } = {}) {
+  return withProgress(options, progress => withProcessSignal(options.signal, signal => runUnits({ ...options, progress, signal }, { queueScan, cacheScan, prepareExecution, executeFiles, artifactContext, initialSnapshot, orderFiles, afterScan, unitSnapshot, deferFinalVerification })));
 }
 
-async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, workers, scanConcurrency = defaultScanConcurrency, inputConcurrency, verificationConcurrency = defaultVerificationConcurrency, resources, execute, cache = true, signal, logger = console, admission: sharedAdmission, retryTimeouts = false, restoreEvidence, saveEvidence, diagnostics, normalPhase, progress }, { queueScan, cacheScan, prepareExecution, executeFiles, artifactContext, initialSnapshot, orderFiles, afterScan }) {
+async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, workers, scanConcurrency = defaultScanConcurrency, inputConcurrency, verificationConcurrency = defaultVerificationConcurrency, resources, execute, cache = true, signal, logger = console, admission: sharedAdmission, retryTimeouts = false, restoreEvidence, saveEvidence, diagnostics, normalPhase, progress }, { queueScan, cacheScan, prepareExecution, executeFiles, artifactContext, initialSnapshot, orderFiles, afterScan, unitSnapshot, deferFinalVerification }) {
   if (workers !== undefined) integer(workers, 'workers');
   integer(scanConcurrency, 'scanConcurrency');
   if (inputConcurrency !== undefined) inputLimit(inputConcurrency);
@@ -107,7 +108,6 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
   let stopped = false;
   let inputsChanged = false;
   const changedUnits = new Set();
-  let checking;
   const retries = [];
   const startedFiles = new Set();
   const observeSnapshot = value => {
@@ -117,7 +117,22 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
     }
     return value;
   };
-  const check = () => checking ??= takeSnapshot().then(observeSnapshot).finally(() => { checking = undefined; });
+  const fullCheck = batchValidationSnapshots(async () => {
+    signal.throwIfAborted();
+    const value = observeSnapshot(await takeSnapshot());
+    return () => value;
+  });
+  const check = async id => {
+    if (!unitSnapshot || id === undefined) return fullCheck(id);
+    const value = await unitSnapshot(id);
+    if (!isDeepStrictEqual([...value.files].sort(), ids)) inputsChanged = true;
+    if (before.common !== value.common || before.units[id] !== value.units[id]) {
+      inputsChanged = true;
+      if (before.common !== value.common) for (const unitId of ids) changedUnits.add(unitId);
+      else changedUnits.add(id);
+    }
+    return value;
+  };
   const plan = units.map(unit => ({
     filename: cache ? join(cacheDirectory, cacheRecordName(suite, unit.id)) : undefined,
     expected: initialSnapshot ? undefined : cacheKey(before, unit.id), cached: false,
@@ -205,7 +220,7 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
       if (status !== 0) { finished = true; return; }
       const finalize = async () => {
         signal?.throwIfAborted();
-        await check();
+        await check(unit.id);
         if (changedUnits.has(unit.id)) {
           logger?.error(`Inputs changed during ${suite}/${unit.id}; no passing evidence saved.`);
           inputsChanged = true;
@@ -217,7 +232,7 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
           const declaration = await saveEvidence(unit);
           signal?.throwIfAborted();
           evidence = await bindEvidence(declaration);
-          observeSnapshot(await takeSnapshot());
+          await check(unit.id);
           if (changedUnits.has(unit.id)) {
             logger?.error(`Inputs changed while saving ${suite}/${unit.id}; no passing evidence saved.`);
             inputsChanged = true;
@@ -238,8 +253,8 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
         finished = true;
       };
       // Evidence collection can launch processes and retains command admission.
-      if (scheduling && !saveEvidence) {
-        scheduling.releaseExecution();
+      if (scheduling) {
+        if (!saveEvidence) scheduling.releaseExecution();
         await scheduling.verify(finalize);
       } else await finalize();
     } finally {
@@ -329,7 +344,7 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
   }
   if (stopped) throw fatal;
   signal?.throwIfAborted();
-  if (!isDeepStrictEqual(before, observeSnapshot(await takeSnapshot()))) {
+  if (!deferFinalVerification && !isDeepStrictEqual(before, observeSnapshot(await takeSnapshot()))) {
     logger?.error(`Inputs changed during ${suite}; suite has not passed.`);
     inputsChanged = true;
   }

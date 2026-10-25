@@ -1,4 +1,5 @@
 import { isDeepStrictEqual } from 'node:util';
+import { randomUUID } from 'node:crypto';
 import { createHashPool } from './input-hash-pool.mjs';
 import { inputMetadata } from './input-hash-sync.mjs';
 import { directoryExclusions, inputExclusions } from './input-exclusions.mjs';
@@ -24,7 +25,7 @@ export function createSnapshotContext({ signal, inputConcurrency,
   const digests = digestCache ?? new Map(), exclusions = new Map();
   const directoryRoots = new Map(), directoryDecisions = new Map();
   let closed = false, closeReason, closing;
-  let sourceScan, scanProjections, scanRecords, scanInventories, scanLeaves, scanDirectories;
+  let sourceScan, scanProjections, scanRecords, scanInventories, scanLeaves, scanDirectories, inputGeneration;
   const pool = local ? createLocalInputPool() : createHashPool({ workers: inputConcurrency ?? scanConcurrency, resources });
   const acceptedSources = new Map();
   const run = (operation, options) => pool.run(operation, options);
@@ -100,6 +101,7 @@ export function createSnapshotContext({ signal, inputConcurrency,
   };
   function beginScanGeneration() {
     if (sourceScan) throw new Error('Input scan generation already active');
+    inputGeneration = randomUUID();
     sourceScan = new Map();
     scanProjections = new Map();
     scanRecords = new WeakMap();
@@ -136,14 +138,14 @@ export function createSnapshotContext({ signal, inputConcurrency,
     return scanProjections.get(key);
   }
   function cancelScanGeneration(reason) {
-    sourceScan = scanProjections = scanRecords = scanInventories = scanLeaves = scanDirectories = undefined;
+    sourceScan = scanProjections = scanRecords = scanInventories = scanLeaves = scanDirectories = inputGeneration = undefined;
     acceptedSources.clear();
     return pool.close(reason);
   }
   async function finishScanGeneration() {
     // Disable memoization before the independent freshness gate; every accepted
     // path is checked, including synthetic missing sources and symlink targets.
-    sourceScan = scanProjections = scanRecords = scanInventories = scanLeaves = scanDirectories = undefined;
+    sourceScan = scanProjections = scanRecords = scanInventories = scanLeaves = scanDirectories = inputGeneration = undefined;
     const proofs = [...acceptedSources];
     acceptedSources.clear();
 
@@ -229,7 +231,7 @@ export function createSnapshotContext({ signal, inputConcurrency,
   const abort = () => { void close(signal.reason).catch(() => {}); };
   signal?.addEventListener('abort', abort, { once: true });
   if (signal?.aborted) abort();
-  return { run, inputTask: pool.inputTask, scanState: pool.state, excluded, directoryExcluded, identify, discoverInventory, projectionMemo, fingerprintRecords: () => scanRecords ?? new WeakMap(), sourceHash, beginScanGeneration, acceptSourceProof, cancelScanGeneration, finishScanGeneration, digests, exclusions, close };
+  return { run, inputGeneration: () => inputGeneration, inputTask: pool.inputTask, scanState: pool.state, excluded, directoryExcluded, identify, discoverInventory, projectionMemo, fingerprintRecords: () => scanRecords ?? new WeakMap(), sourceHash, beginScanGeneration, acceptSourceProof, cancelScanGeneration, finishScanGeneration, digests, exclusions, close };
 }
 
 export async function discoverTests({ root, testDirectory, pattern, ignore }) {

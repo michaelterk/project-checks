@@ -42,7 +42,11 @@ export function createHashPool({ workers, resources = {}, host = detectResources
     return stopping;
   }
   function trim() {
-    for (const slot of slots) if (!slot.jobs && (closed || slots.size > limit)) retire(slot);
+    // CPU/I/O backoff pauses work without discarding parsed dependency graphs.
+    const memoryPressure = !Number.isFinite(reading.availableMemoryMiB)
+      || reading.availableMemoryMiB < reserve + workerMemoryMiB || reading.memoryPressure > 0.05;
+    const retained = memoryPressure ? limit : maximum;
+    for (const slot of slots) if (!slot.jobs && (closed || slots.size > retained)) retire(slot);
   }
   function finish() {
     if (!closed || active) return;
@@ -121,7 +125,10 @@ export function createHashPool({ workers, resources = {}, host = detectResources
         else { close(error); complete(undefined, jobs, error); }
       }
     }
-    if (!active && !queue.length) { clearInterval(timer); timer = undefined; }
+    if (!active && !queue.length) {
+      if (slots.size <= limit) { clearInterval(timer); timer = undefined; }
+      else timer?.unref?.(); // Extra warm workers still respond to memory pressure.
+    }
     report();
   }
   // A leaf that already owns admission can hand its byte read to a worker
@@ -171,6 +178,7 @@ export function createHashPool({ workers, resources = {}, host = detectResources
       if (before < 0) queue.push(job);
       else queue.splice(before, 0, job);
       if (!timer) { reading = sample(); timer = setInterval(tick, 1000); }
+      timer.ref?.();
       dispatch();
     });
   }

@@ -354,7 +354,6 @@ test('CPU backoff waits for long tasks to shed load instead of collapsing parall
   fake.workers[0].complete();
   await jobs[0];
   assert.equal(pool.state().active, 15);
-  assert.equal(fake.workers.filter(worker => worker.terminated).length, 1);
   t.mock.timers.tick(1000);
   assert.equal(pool.state().limit, 14);
   t.mock.timers.tick(5000);
