@@ -73,6 +73,8 @@ export interface TestConfig {
   inputConcurrency?: number;
   /** Maximum concurrent passing-file verification jobs; positive integer. Default: 32. */
   verificationConcurrency?: number;
+  /** Per-file RAM reservation, in MiB; omitted uses the shared pool default. */
+  memoryMiB?: number | ((id: string) => number);
   resources?: ResourcePolicy;
   cache?: boolean;
   cacheDirectory?: string;
@@ -130,6 +132,8 @@ export interface RunResult {
 }
 
 export interface TestUnit {
+  /** Per-command RAM reservation, in MiB; omitted uses the shared pool default. */
+  memoryMiB?: number;
   id: string;
   command?: string[];
   identity?: string;
@@ -164,8 +168,9 @@ export class Admission {
   readonly limit: number;
   active: number;
   peak: number;
-  acquire(options?: { exclusive?: boolean; signal?: AbortSignal }): Promise<void>;
-  release(): void;
+  acquire(options?: { exclusive?: boolean; signal?: AbortSignal; memoryMiB?: number }): Promise<void>;
+  /** Release the same estimate supplied to acquire. */
+  release(options?: { memoryMiB?: number }): void;
   close(): void;
   report(logger: Logger | null, suite: string): void;
   inspect(): Record<string, unknown>;

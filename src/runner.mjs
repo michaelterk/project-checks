@@ -10,7 +10,7 @@ import { runCachedUnits, scanConcurrency as defaultScanConcurrency } from './cac
 import { verificationConcurrency as defaultVerificationConcurrency } from './verification-pool.mjs';
 import { commandEnvironment, runCommand } from './command.mjs';
 import { createSnapshot, createSnapshotContext, discoverTests, selectTests } from './inputs.mjs';
-import { inside } from './util.mjs';
+import { inside, integer } from './util.mjs';
 import { createDurationHints } from './durations.mjs';
 import { withProgress } from './progress.mjs';
 import { excludedTests } from './test-exclusions.mjs';
@@ -139,7 +139,10 @@ async function runTestsWithSignal(options, { retained, normalPhase, cacheScan, q
     const logger = options.logger === false ? null : (options.logger ?? console);
     const template = options.command ?? [process.execPath, '--test', '--test-concurrency=1', '{file}'];
     const fileArgument = id => options.engine === 'playwright' ? `${resolve(root, id).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$` : id;
-    const units = files.map(id => ({ id, command: typeof template === 'function' ? template(id) : template.map(argument => argument.replaceAll('{file}', fileArgument(id))) }));
+    const units = files.map(id => {
+      const memoryMiB = typeof config.memoryMiB === 'function' ? integer(config.memoryMiB(id), 'memoryMiB') : config.memoryMiB;
+      return { id, memoryMiB, command: typeof template === 'function' ? template(id) : template.map(argument => argument.replaceAll('{file}', fileArgument(id))) };
+    });
     const nodeTest = options.engine === 'node' || (!options.engine && units.every(unit => unit.command.includes('--test') && /^node(?:\.exe)?$/.test(basename(unit.command[0]))));
     const pythonTest = !options.engine && units.every(unit => /^python[0-9.]*(?:\.exe)?$/.test(basename(unit.command[0])));
     const filters = options.filters ?? [];
@@ -164,7 +167,7 @@ async function runTestsWithSignal(options, { retained, normalPhase, cacheScan, q
     } : undefined;
     if (options.engine === 'playwright' && options.frameworkArgs?.length) {
       if (typeof template === 'function') throw new Error('Playwright actions require a command template');
-      const action = { id: 'framework-action', command: [...template.flatMap(argument => argument.includes('{file}')
+      const action = { id: 'framework-action', memoryMiB: typeof config.memoryMiB === 'function' ? Math.max(...units.map(unit => unit.memoryMiB)) : config.memoryMiB, command: [...template.flatMap(argument => argument.includes('{file}')
         ? (options.files?.length || excluded.size ? files.map(id => argument.replaceAll('{file}', fileArgument(id))) : []) : [argument]), ...options.frameworkArgs] };
       return await runCachedUnits({
         suite: `${config.suite}/action`, cache: false, scanConcurrency: config.scanConcurrency, verificationConcurrency: config.verificationConcurrency, resources: {}, admission, signal: config.signal, logger,

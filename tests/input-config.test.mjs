@@ -148,7 +148,7 @@ test('loaded startup settings above32 control one scanner without a default alia
   const root = await temporary(t);
   for (const [name, settings] of Object.entries({ scan: { scanConcurrency: 64 }, alias: { inputConcurrency: 64 } })) {
     const path = await put(root, `${name}.json`, JSON.stringify(settings));
-    const config = await loadConfig(path), context = createSnapshotContext(config);
+    const config = await loadConfig(path), context = createSnapshotContext({ ...config, resources: { memoryMiBPerWorker: 1 } });
     const release = Promise.withResolvers(), reached = Promise.withResolvers();
     let active = 0, peak = 0;
     const work = Promise.all(Array.from({ length: 65 }, () => context.run(async () => {

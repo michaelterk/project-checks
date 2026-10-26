@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { readFile, realpath, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import test from 'node:test';
+import { Admission } from '../src/admission.mjs';
+import { createFileQueue } from '../src/file-queue.mjs';
 import { runChecks, cacheRecordName } from '../src/index.mjs';
 import { put, temporary } from './helpers.mjs';
 
@@ -175,4 +177,65 @@ test('a newly ready earlier dependency runs while a later fixture is still prepa
   release.resolve();
   assert.equal((await running).exitCode, 0);
   assert.deepEqual(order, ['prerequisite', 'dependent', 'later']);
+});
+
+
+test('file queue preserves estimates when a dependency reorders work during admission', async t => {
+  const admission = new Admission({ memoryMiBPerWorker: 128, reserveMemoryMiB: 1024 }, 8, {
+    host: { cpus: 8, memoryMiB: 1664 }, workers: 5,
+    sample: () => ({ availableMemoryMiB: 1664 }),
+  });
+  t.after(() => admission.close());
+  await admission.acquire({ memoryMiB: 512 });
+  const observed = [];
+  const job = (name, memoryMiB) => Object.assign(async () => {
+    observed.push([name, admission.inspect().reservedMemoryMiB]);
+  }, { memoryMiB });
+  const queue = createFileQueue([
+    { id: 'earlier', jobs: [job('ordinary', 128)] },
+    { id: 'later', jobs: [job('browser', 512)] },
+  ], admission, new AbortController().signal);
+  t.after(() => queue.close());
+  queue.enable('later');
+  const later = queue.run('later');
+  await new Promise(resolve => setImmediate(resolve));
+  queue.enable('earlier');
+  const earlier = queue.run('earlier');
+  admission.release({ memoryMiB: 512 });
+  await Promise.all([earlier, later]);
+  assert.equal(observed[0][0], 'ordinary');
+  assert.ok(observed[0][1] === 128 || observed[0][1] === 640);
+  assert.ok(observed[1][1] === 512 || observed[1][1] === 640);
+  assert.equal(admission.inspect().reservedMemoryMiB, 0);
+  assert.equal(admission.active, 0);
+});
+
+test('runChecks applies per-file memory callbacks to the shared queue and timeout retry', async t => {
+  const base = await fixture(t, 2);
+  const observed = [];
+  let admission;
+  const diagnostics = {
+    event() {}, files() {}, file() {}, span: (_suite, _stage, operation) => operation(),
+    observeAdmission: value => { admission = value; },
+  };
+  const result = await runChecks([{ id: 'mixed', config: { ...base, cache: false,
+    memoryMiB: id => id === 'test/0.test.mjs' ? 512 : 128,
+    retryTimeouts: true,
+    setup: () => ({ execute: (command, { retry, onTimeout }) => {
+      const file = command.at(-1);
+      observed.push([file, retry, admission.inspect().reservedMemoryMiB]);
+      if (file === 'test/0.test.mjs' && !retry) {
+        onTimeout({ ordinaryFailure: false });
+        return 1;
+      }
+      return 0;
+    } }),
+  } }], { ...options, diagnostics, resources: { memoryMiBPerWorker: 128, reserveMemoryMiB: 1024 } });
+  assert.equal(result.exitCode, 0);
+  assert.deepEqual(observed, [
+    ['test/0.test.mjs', false, 512],
+    ['test/1.test.mjs', false, 128],
+    ['test/0.test.mjs', true, 512],
+  ]);
+  assert.equal(admission.inspect().reservedMemoryMiB, 0);
 });

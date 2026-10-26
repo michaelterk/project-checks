@@ -274,3 +274,56 @@ test('adaptive growth can reach four times host cores and still backs off under 
   assert.equal(admission.active, 8);
   for (let worker = 0; worker < 8; worker++) admission.release();
 });
+
+
+test('mixed worker reservations share one total budget and release their own estimates', async t => {
+  const admission = new Admission({ memoryMiBPerWorker: 128, reserveMemoryMiB: 1024 }, 20, {
+    host: { cpus: 8, memoryMiB: 1792 }, workers: 6,
+    sample: () => ({ availableMemoryMiB: 1792 }),
+  });
+  t.after(() => admission.close());
+  await admission.acquire({ memoryMiB: 512 });
+  await admission.acquire();
+  await admission.acquire();
+  assert.equal(admission.inspect().reservedMemoryMiB, 768);
+  let started = false;
+  const waiting = admission.acquire({ memoryMiB: 512 }).then(() => { started = true; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(started, false, 'CPU slots and free-RAM telemetry cannot exceed the total reservation budget');
+  admission.release();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(started, false, 'releasing 128 MiB cannot make room for 512 MiB');
+  admission.release({ memoryMiB: 512 });
+  await waiting;
+  assert.equal(admission.inspect().reservedMemoryMiB, 640);
+  admission.release({ memoryMiB: 512 });
+  admission.release();
+  assert.equal(admission.inspect().reservedMemoryMiB, 0);
+  assert.equal(admission.active, 0);
+});
+
+test('per-worker live headroom, cancellation and exclusive admission preserve reservations', async t => {
+  const reading = { availableMemoryMiB: 1408 };
+  const admission = new Admission({ memoryMiBPerWorker: 128, reserveMemoryMiB: 1024 }, 8, {
+    host: { cpus: 8, memoryMiB: 8192 }, workers: 4, sample: () => ({ ...reading }),
+  });
+  t.after(() => admission.close());
+  const controller = new AbortController();
+  const cancelled = admission.acquire({ memoryMiB: 512, signal: controller.signal });
+  controller.abort();
+  await assert.rejects(cancelled, { name: 'AbortError' });
+  assert.equal(admission.inspect().reservedMemoryMiB, 0);
+  await admission.acquire();
+  reading.availableMemoryMiB = 1536;
+  admission.tick();
+  let started = false;
+  const exclusive = admission.acquire({ memoryMiB: 512, exclusive: true }).then(() => { started = true; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(started, false);
+  admission.release();
+  await exclusive;
+  assert.equal(admission.inspect().reservedMemoryMiB, 512);
+  admission.release({ memoryMiB: 512 });
+  assert.equal(admission.inspect().reservedMemoryMiB, 0);
+  for (const memoryMiB of [0, -1, 1.5, NaN]) await assert.rejects(admission.acquire({ memoryMiB }), /memoryMiB/);
+});

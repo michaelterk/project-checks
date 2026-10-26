@@ -480,6 +480,7 @@ subprocesses; whole command deadlines use `timeoutMs`.
 | `scanConcurrency` | `32` from packaged JSON | Initial adaptive input scanner concurrency; growth can exceed it and pressure can reduce it to one |
 | `inputConcurrency` | Unset; uses `scanConcurrency` | Compatibility startup setting for the same adaptive input scanner |
 | `verificationConcurrency` | `32` from packaged JSON | Positive integer cap on concurrent passing-file validations and, in the final phase, suite input checks |
+| `memoryMiB` | Shared pool default | Per-file RAM estimate: positive integer or `(id) => integer` |
 | `resources` | See below | Resource policy |
 | `cache` | `true` | Read/write passing evidence |
 | `cacheDirectory` | `.test-cache/project-checks` | Evidence storage, relative to root or absolute |
@@ -590,8 +591,18 @@ not an OS CPU quota: running commands finish normally, a single command can exce
 bursts or unrelated host processes can consume the reserve.
 `maxWorkers` and configured RAM reservations remain bounds, including a cap of one for suites requiring serial execution.
 
-The total RAM budget limits reservations; a live headroom check pauses admission
-below `reserveMemoryMiB` plus one worker's RAM estimate, or during memory pressure.
+The total RAM budget limits the sum of active command reservations. A suite's
+`memoryMiB` (positive integer or callback receiving a file ID) overrides the shared
+pool's default estimate for that file, including timeout retries. For example,
+use `resources: { memoryMiBPerWorker: 128, reserveMemoryMiB: 1024 }` on `runChecks`
+and `memoryMiB: 512` on browser suite configs. `runCachedUnits` accepts the same
+per-command estimate as `unit.memoryMiB`. Direct `Admission` callers pass
+`{ memoryMiB }` to both `acquire` and its matching `release`. Omitted values retain
+the pool default; CPU policy and exclusive retries remain shared. Pool diagnostics
+expose `reservedMemoryMiB`. Estimates do not change cache validity.
+A live headroom check also pauses admission below `reserveMemoryMiB` plus the
+next command's estimate, or during memory pressure; it does not subtract active
+reservations from live free RAM a second time.
 Active commands finish normally. If admission stays blocked with no active
 worker for 30 seconds, the run fails rather than forcing
 one through. This is conservative admission, not protection against every memory

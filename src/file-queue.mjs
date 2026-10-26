@@ -45,21 +45,22 @@ export function createFileQueue(plans, admission, signal, { workers = 1, verific
         // pump so a newly ready earlier dependency can take its original place.
         if (!next().group.ready) return;
         dispatchSignal.throwIfAborted();
+        const candidate = next();
         const releaseCredit = await verification.reserve();
         let releaseCommand;
         try {
           if (admission) {
-            await admission.acquire({ signal: dispatchSignal });
+            await admission.acquire({ signal: dispatchSignal, memoryMiB: candidate.run.memoryMiB });
             let released = false;
             releaseCommand = () => {
               if (released) return;
               released = true;
-              admission.release();
+              admission.release({ memoryMiB: candidate.run.memoryMiB });
             };
           } else releaseCommand = await commands.acquire();
         } catch (error) { releaseCredit(); throw error; }
         const job = next();
-        if (!job || !job.group.ready || dispatchSignal.aborted) {
+        if (!job || job !== candidate || !job.group.ready || dispatchSignal.aborted) {
           releaseCommand();
           releaseCredit();
           dispatchSignal.throwIfAborted();

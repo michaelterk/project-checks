@@ -392,3 +392,29 @@ test('local JSON settings override packaged defaults without dropping omitted re
   assert.equal(javascript.resources.cpuQuotaPercent, 90);
   assert.equal(javascript.resources.maxWorkers, 3);
 });
+
+
+test('standalone file estimates and framework actions retain custom admission compatibility', async t => {
+  const root = await temporary(t);
+  await put(root, 'test/a.test.mjs', '');
+  await put(root, 'test/b.test.mjs', '');
+  const acquired = [], released = [];
+  const admission = {
+    capacity: 1, beginNormal: () => () => {},
+    acquire: async ({ memoryMiB } = {}) => { acquired.push(memoryMiB); },
+    release: ({ memoryMiB } = {}) => { released.push(memoryMiB); },
+  };
+  const base = { root, inputs: [], cache: false, coverage: false, logger: false, admission,
+    setup: () => ({ execute: () => 0 }),
+  };
+  assert.equal((await runTests({ ...base, memoryMiB: id => id.endsWith('a.test.mjs') ? 128 : 512 })).exitCode, 0);
+  assert.deepEqual(acquired, [128, 512]);
+  assert.deepEqual(released, acquired);
+  for (const memoryMiB of [undefined, 512, id => id.endsWith('a.test.mjs') ? 128 : 512]) {
+    acquired.length = released.length = 0;
+    assert.equal((await runTests({ ...base, engine: 'playwright', frameworkArgs: ['--list'], memoryMiB })).exitCode, 0);
+    assert.deepEqual(acquired, [memoryMiB === undefined ? undefined : 512]);
+    assert.deepEqual(released, acquired);
+  }
+  await assert.rejects(runTests({ ...base, memoryMiB: () => 0 }), /memoryMiB/);
+});

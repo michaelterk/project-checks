@@ -79,6 +79,7 @@ export class Admission {
       Number.isFinite(available) ? Math.floor((available - this.reserve) / this.memory) : Infinity));
     this.weight = this.selected.cpuBudget / (initial + 1e-6);
     this.active = 0;
+    this.reservedMemoryMiB = 0;
     this.pendingExclusive = 0;
     this.normalProducers = 0;
     this.exclusive = false;
@@ -140,7 +141,8 @@ export class Admission {
     this.wake();
   }
 
-  async acquire({ exclusive = false, signal } = {}) {
+  async acquire({ exclusive = false, signal, memoryMiB = this.memory } = {}) {
+    integer(memoryMiB, 'memoryMiB');
     this.timer ??= setInterval(() => this.tick(), 1000);
     const abort = () => this.wake();
     signal?.addEventListener('abort', abort, { once: true });
@@ -150,11 +152,13 @@ export class Admission {
       signal?.throwIfAborted();
       if (this.closed) throw new Error('Resource admission stopped');
       const available = this.reading.availableMemoryMiB;
-      const fits = this.selected.memoryBudgetMiB >= this.memory && (!Number.isFinite(available) || available >= this.reserve + this.memory);
+      const fits = this.reservedMemoryMiB + memoryMiB <= this.selected.memoryBudgetMiB
+        && (!Number.isFinite(available) || available >= this.reserve + memoryMiB);
       const pressured = this.reading.memoryPressure > 0.05;
       const room = exclusive ? this.active === 0 && this.normalProducers === 0 : !this.exclusive && (this.pendingExclusive === 0 || this.normalProducers > 0) && this.active < this.limit;
       if (room && fits && !pressured) {
         this.active++;
+        this.reservedMemoryMiB += memoryMiB;
         this.exclusive = exclusive;
         this.peak = Math.max(this.peak, this.active);
         this.blockedSince = undefined;
@@ -162,7 +166,7 @@ export class Admission {
       }
       if (!this.active && (!fits || pressured)) {
         this.blockedSince ??= performance.now();
-        if (performance.now() - this.blockedSince >= 30000) throw new Error(`Insufficient memory headroom or sustained memory pressure for a ${this.memory} MiB test worker after 30 seconds`);
+        if (performance.now() - this.blockedSince >= 30000) throw new Error(`Insufficient memory headroom or sustained memory pressure for a ${memoryMiB} MiB test worker after 30 seconds`);
       }
       await new Promise(resolve => {
         const wake = () => { this.waiters.delete(wake); resolve(); };
@@ -175,8 +179,10 @@ export class Admission {
     }
   }
 
-  release() {
+  release({ memoryMiB = this.memory } = {}) {
+    integer(memoryMiB, 'memoryMiB');
     this.active--;
+    this.reservedMemoryMiB -= memoryMiB;
     this.exclusive = false;
     this.wake();
   }
@@ -195,7 +201,7 @@ export class Admission {
       active: this.active, limit: this.limit, capacity: this.capacity, weight: this.weight,
       spareTicks: this.spare, pressuredTicks: this.pressured, reading: { ...this.reading },
       cpuBudget: this.selected.cpuBudget, reserveMemoryMiB: this.reserve,
-      memoryMiBPerWorker: this.memory, closed: Boolean(this.closed),
+      memoryMiBPerWorker: this.memory, reservedMemoryMiB: this.reservedMemoryMiB, closed: Boolean(this.closed),
     };
   }
 

@@ -69,7 +69,7 @@ test('all independent and dependent suites are queued before input scanner cache
     } },
     { id: 'unrelated', cwd: root, command: [process.execPath, '-e', ''], verify: assertScanned },
     ...definitions,
-  ], { logger, workers: 1 });
+  ], { logger, workers: 1, resources: { memoryMiBPerWorker: 1 } });
   assert.equal(result.exitCode, 0);
   assert.ok(peak >= 32, 'the adaptive scanner can grow while mixed input work drains');
   assert.ok([...reads.values()].every(count => count === 1));
@@ -96,7 +96,7 @@ test('global scan failure drains siblings and never starts builds or setup', asy
     ...['one', 'two'].map(id => ({ id, config: {
       ...config(root, id), setup: () => { setup++; return { execute: () => 0 }; },
     } })),
-  ], { logger: false, workers: 1 }), error => error.cause === failure && /cache comparison/.test(error.message));
+  ], { logger: false, workers: 1, resources: { memoryMiBPerWorker: 1 } }), error => error.cause === failure && /cache comparison/.test(error.message));
   assert.ok(entered >= 32 && entered < 80, 'fatal scan failure cancels pending input work while admitted reads drain');
   assert.equal(active, 0);
   assert.equal(setup, 0);

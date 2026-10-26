@@ -62,6 +62,7 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
   if (!Array.isArray(units) || !units.length || new Set(units.map(unit => unit.id)).size !== units.length) throw new TypeError('Unique nonempty test units required');
   for (const unit of units) {
     text(unit.id, 'unit id');
+    if (unit.memoryMiB !== undefined) integer(unit.memoryMiB, 'memoryMiB');
     if (unit.identity === undefined) command(unit.command);
     else text(unit.identity, 'unit identity');
   }
@@ -192,7 +193,7 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
   async function runUnit(index, retry = false, originalFailure = 0, admitted = false, scheduling) {
     const unit = units[index];
     const { filename, expected } = plan[index];
-    if (!admitted) await admission?.acquire({ exclusive: retry, signal });
+    if (!admitted) await admission?.acquire({ exclusive: retry, signal, memoryMiB: unit.memoryMiB });
     if (retry) normalPhase?.(true);
     let status;
     let timedOut = false;
@@ -259,7 +260,7 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
       } else await finalize();
     } finally {
       if (executing) progress && progress.file(suite, unit.id, 'file-end', finished ? { status, timedOut } : { status: 'interrupted' });
-      if (!admitted) admission?.release();
+      if (!admitted) admission?.release({ memoryMiB: unit.memoryMiB });
     }
   }
   const runnable = [];
@@ -313,7 +314,7 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
       await cacheScan({
         total: units.length, cached: units.length - runnable.length,
         verificationConcurrency,
-        jobs: runnable.map(index => scheduling => runUnit(index, false, 0, true, scheduling)),
+        jobs: runnable.map(index => Object.assign(scheduling => runUnit(index, false, 0, true, scheduling), { memoryMiB: units[index].memoryMiB })),
       });
       signal?.throwIfAborted();
       await prepareExecution?.();
@@ -324,7 +325,7 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
     else {
       const releaseNormal = admission?.beginNormal();
       const queue = createFileQueue([{ id: suite, jobs: runnable.map(index =>
-        scheduling => runUnit(index, false, 0, true, scheduling)) }], admission, signal, { workers, verificationConcurrency });
+        Object.assign(scheduling => runUnit(index, false, 0, true, scheduling), { memoryMiB: units[index].memoryMiB })) }], admission, signal, { workers, verificationConcurrency });
       try { queue.enable(suite); await queue.run(suite); }
       finally { try { await queue.close(); } finally { releaseNormal?.(); } }
     }

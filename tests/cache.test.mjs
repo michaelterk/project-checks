@@ -34,7 +34,8 @@ test('upfront plans share 32 concurrent reads and never reread records during ex
   const directory = await temporary(t);
   const ids = Array.from({ length: 40 }, (_, index) => `file-${index}`);
   const inputs = { common: 'shared', units: Object.fromEntries(ids.map(id => [id, 'v1'])) };
-  const context = createSnapshotContext();
+  // These mocked reads do not start scanner subprocesses or need worker RAM.
+  const context = createSnapshotContext({ resources: { memoryMiBPerWorker: 1 } });
   t.after(() => context.close());
   const options = suite => ({
     suite, cacheDirectory: directory, workers: 1, logger: null,
