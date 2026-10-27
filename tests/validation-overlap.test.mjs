@@ -3,8 +3,8 @@ import { readdir, readFile, writeFile } from 'node:fs/promises';
 import { writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
-import { runCachedUnits, runTests, cacheRecordName } from '../src/index.mjs';
-import { put, temporary } from './helpers.mjs';
+import { runCachedUnits, runTests } from '../src/index.mjs';
+import { cachedRecord, put, temporary } from './helpers.mjs';
 
 const deferred = () => Promise.withResolvers();
 const tick = () => new Promise(resolve => setImmediate(resolve));
@@ -35,8 +35,7 @@ test('same-suite validation completes a fast unit while another dependency disco
       new Promise((_, reject) => { const timer = setTimeout(() => reject(new Error('Independent fast validator blocked behind slow dependency')), 1000); timer.unref(); })]);
     assert.deepEqual(calls, { slow: 2, fast: 2 }, 'each validator discovers only its own dependencies');
     assert.equal(commonCalls, 2, 'one common projection per batch, including initial scan');
-    const record = join(root, '.test-cache/project-checks', cacheRecordName('tests', 'test/fast.test.mjs'));
-    assert.equal(JSON.parse(await readFile(record, 'utf8')).passed, true);
+    assert.equal((await cachedRecord(join(root, '.test-cache/project-checks'), 'tests', 'test/fast.test.mjs')).passed, true);
   } finally { release.resolve(); await running; }
 });
 
@@ -69,7 +68,7 @@ test('a command finishing after an in-flight full scan starts gets a new freshne
   } finally { releaseScan.resolve(); await running; }
   const result = await running;
   assert.equal(result.inputsChanged, true);
-  assert.equal((await readdir(cacheDirectory)).includes(cacheRecordName('tests', 'second')), false);
+  await assert.rejects(cachedRecord(cacheDirectory, 'tests', 'second'), /Missing passing record/);
 });
 
 for (const target of ['dependency', 'common']) {
@@ -94,8 +93,7 @@ for (const target of ['dependency', 'common']) {
     } finally { release.resolve(); await running; }
     const result = await running;
     assert.equal(result.inputsChanged, true);
-    const records = await readdir(join(root, '.test-cache/project-checks'));
-    for (const name of ['a', 'b']) assert.equal(records.includes(cacheRecordName('tests', `test/${name}.test.mjs`)), false);
+    assert.deepEqual(await readdir(join(root, '.test-cache/project-checks')), []);
   });
 }
 

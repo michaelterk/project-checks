@@ -353,7 +353,7 @@ test('empty fixture directory presence remains an input with independent-test ex
   assert.equal(removedChild.cached, 0);
   assert.equal(removedChild.failed, 1);
   await mkdir(join(root, 'fixtures/empty'));
-  assert.equal((await runTests(options)).passed, 1);
+  assert.equal((await runTests(options)).cached, 1);
   await rm(join(root, 'fixtures'), { recursive: true });
   const removedRoot = await runTests(options);
   assert.equal(removedRoot.cached, 0);

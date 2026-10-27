@@ -3,10 +3,10 @@ import fsPromises, { readdir } from 'node:fs/promises';
 import { syncBuiltinESMExports } from 'node:module';
 import { join } from 'node:path';
 import test from 'node:test';
-import { cacheRecordName, runCachedUnits, runChecks } from '../src/index.mjs';
+import { runCachedUnits, runChecks } from '../src/index.mjs';
 import { createFileQueue } from '../src/file-queue.mjs';
 import { createVerificationPool } from '../src/verification-pool.mjs';
-import { put, temporary } from './helpers.mjs';
+import { cachedRecord, put, temporary } from './helpers.mjs';
 
 const deferred = () => Promise.withResolvers();
 
@@ -246,7 +246,7 @@ test('a queued verifier checks fresh inputs before publishing its pass', { timeo
   const result = await running;
   assert.equal(result.inputsChanged, true);
   assert.equal(result.exitCode, 1);
-  assert.equal((await readdir(cacheDirectory)).includes(cacheRecordName('fresh', ids[32])), false);
+  await assert.rejects(cachedRecord(cacheDirectory, 'fresh', ids[32]), /Missing passing record/);
 });
 
 test('verification credits bound finished commands awaiting validation', { timeout: 5000 }, async t => {

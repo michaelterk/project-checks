@@ -35,9 +35,10 @@ export async function scanCacheJobs(operations, resources, concurrency = default
   } finally { clearInterval(timer); await complete; }
 }
 
-// Record routing is independent of validity; neither identifier enters the key.
-export function cacheRecordName(suite, unitId) {
-  return `${digest(`${suite}\0${unitId}`)}.json`;
+// Routing retains validity variants; neither identifier enters the validity key.
+export function cacheRecordName(suite, unitId, fingerprint) {
+  if (fingerprint !== undefined) text(fingerprint, 'cache fingerprint');
+  return `${digest(`${suite}\0${unitId}${fingerprint === undefined ? '' : `\0${fingerprint}`}`)}.json`;
 }
 
 // Snapshots contain only digests of file existence and content.
@@ -135,17 +136,34 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
     return value;
   };
   const plan = units.map(unit => ({
-    filename: cache ? join(cacheDirectory, cacheRecordName(suite, unit.id)) : undefined,
+    filename: undefined,
     expected: initialSnapshot ? undefined : cacheKey(before, unit.id), cached: false,
   }));
+  async function saveRecord(filename, value, publish = () => true) {
+    const temporary = `${filename}.${process.pid}.${randomUUID()}.tmp`;
+    try {
+      await writeFile(temporary, JSON.stringify(value), { mode: 0o600, flag: 'wx' });
+      signal?.throwIfAborted();
+      if (publish()) await rename(temporary, filename);
+    } finally { await rm(temporary, { force: true }); }
+  }
   async function scanUnit(index, read = filename => readFile(filename, 'utf8')) {
     signal?.throwIfAborted();
     const entry = plan[index];
-    let cached;
-    try { cached = await profileJsonRead(() => scanner.run(() => read(entry.filename, signal), { priority: true }), { file: units[index].id }); }
-    catch (error) { if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error; }
+    let cached, legacy = false;
+    const readRecord = filename => profileJsonRead(() => scanner.run(() => read(filename, signal), { priority: true }), { file: units[index].id });
+    try { cached = await readRecord(entry.filename); }
+    catch (error) {
+      if (error.code === 'ENOENT') {
+        try {
+          cached = await readRecord(join(cacheDirectory, cacheRecordName(suite, units[index].id)));
+          legacy = true;
+        } catch (failure) { if (failure.code !== 'ENOENT' && !(failure instanceof SyntaxError)) throw failure; }
+      } else if (!(error instanceof SyntaxError)) throw error;
+    }
     signal?.throwIfAborted();
     entry.cached = cached?.key === entry.expected && cached?.passed === true;
+    if (entry.cached && legacy) await saveRecord(entry.filename, cached);
     if (entry.cached && restoreEvidence) entry.evidence = cached.evidence;
     if (!entry.cached) await rm(entry.filename, { force: true });
   }
@@ -243,13 +261,7 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
           signal?.throwIfAborted();
         }
         if (cache) {
-          const temporary = `${filename}.${process.pid}.${randomUUID()}.tmp`;
-          try {
-            await writeFile(temporary, JSON.stringify({ key: expected, passed: true, ...(saveEvidence ? { evidence } : {}) }), { mode: 0o600, flag: 'wx' });
-            signal?.throwIfAborted();
-            if (changedUnits.has(unit.id)) { finished = true; return; }
-            await rename(temporary, filename);
-          } finally { await rm(temporary, { force: true }); }
+          await saveRecord(filename, { key: expected, passed: true, ...(saveEvidence ? { evidence } : {}) }, () => !changedUnits.has(unit.id));
         }
         finished = true;
       };
@@ -276,6 +288,7 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
           plan[index].expected = cacheKey(before, unit.id);
         }
         if (!cache) return;
+        plan[index].filename = join(cacheDirectory, cacheRecordName(suite, unit.id, plan[index].expected));
         stage = 'cache comparison';
         await scanUnit(index);
         if (restoreEvidence) {

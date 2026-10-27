@@ -5,8 +5,8 @@ import { syncBuiltinESMExports } from 'node:module';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import test from 'node:test';
-import { cacheRecordName, runChecks, runTests, loadChecks } from '../src/index.mjs';
-import { put, temporary } from './helpers.mjs';
+import { runChecks, runTests, loadChecks } from '../src/index.mjs';
+import { cachedRecord, put, temporary } from './helpers.mjs';
 
 function observeRecords(t, directory, observe) {
   const original = fs.readFile;
@@ -49,7 +49,7 @@ test('all independent and dependent suites are queued before input scanner cache
     lines.push(line);
   }, error: line => lines.push(line) };
   const assertScanned = () => {
-    assert.equal(reads.size, 80);
+    assert.equal(reads.size, 120);
     assert.equal(active, 0);
     assert.ok(lines.some(line => /CACHE_SCAN: checks \| Will run: 40 \| Will skip: 40 \| Total: 80/.test(line)));
   };
@@ -205,7 +205,7 @@ test('global totals include artifact validation and missing-artifact fallbacks b
     coverage: { include: ['source.mjs'] }, stdio: 'ignore',
   } }));
   for (const definition of definitions) assert.equal((await runTests({ ...definition.config, logger: false })).exitCode, 0);
-  const record = JSON.parse(await readFile(join(root, '.test-cache/project-checks', cacheRecordName('two', 'test/b.test.mjs')), 'utf8'));
+  const record = await cachedRecord(join(root, '.test-cache/project-checks'), 'two', 'test/b.test.mjs');
   await rm(record.evidence.files[0]);
   const lines = [];
   for (const definition of definitions) definition.config.setup = () => {

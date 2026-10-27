@@ -118,7 +118,7 @@ test('JSON overrides control actual shared scan reads and invocation options tak
     execute: () => 0,
   })).exitCode, 0);
   assert.equal(peak, 3);
-  assert.equal(reads, 40);
+  assert.equal(reads, 80); // New variants also check their legacy address.
 });
 
 test('CLI run and checks use project JSON scan settings', async t => {

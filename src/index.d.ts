@@ -235,7 +235,7 @@ export function createFileSnapshot(config?: TestConfig): Promise<FileSnapshot>;
 export function runCachedUnits<T extends TestUnit>(options: CachedUnitsOptions<T>): Promise<RunResult>;
 export function runCommand(command: string[], options?: CommandOptions): Promise<number>;
 export function cacheKey(snapshot: InputSnapshot, unitId: string): string;
-export function cacheRecordName(suite: string, unitId: string): string;
+export function cacheRecordName(suite: string, unitId: string, fingerprint?: string): string;
 export function detectResources(): HostResources;
 export function selectConcurrency(policy?: ResourcePolicy, resources?: HostResources): Concurrency;
 

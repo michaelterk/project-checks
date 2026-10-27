@@ -340,7 +340,10 @@ directory is always excluded. Validity uses only existence and SHA-256 content
 hashes. File/directory names, root paths, attributes, commands, environment,
 runtime identities and retry settings do not enter the validity key. Directory
 presence has no byte content and is represented by existence with a null hash.
-Suite and test IDs select the cache record; they are not part of its validity.
+Suite and test IDs plus the validity fingerprint select the cache record. Passed
+source and runtime variants coexist, so restoring an older shared snapshot cannot
+replace a different variant. Legacy records migrate only when their saved key
+matches the current fingerprint exactly. IDs are not part of content validity.
 Broad source folders can still be expensive; use the smallest complete input set.
 
 For per-file reuse after editing a test, explicitly select shared source,
@@ -919,7 +922,8 @@ for an exclusive slot; pair each successful acquire with `release()`.
 The other exports are `defineConfig`, `loadConfig`, `runCommand`,
 `cacheKey`, `cacheRecordName`, `detectResources` and `selectConcurrency`.
 `cacheKey(snapshot, unitId)` is the single validity function used by the runner
-and migration tools; `cacheRecordName(suite, unitId)` only locates records.
+and migration tools; `cacheRecordName(suite, unitId, fingerprint)` locates a
+variant. Omitting the fingerprint locates its legacy record for migration.
 
 ## Development
 

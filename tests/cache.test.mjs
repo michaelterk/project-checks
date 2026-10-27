@@ -44,8 +44,8 @@ test('upfront plans share 32 concurrent reads and never reread records during ex
   for (const suite of ['one', 'two']) await runCachedUnits({ ...options(suite), execute: () => 0 }, { artifactContext: context });
   const changed = ids.filter((_, index) => index % 2);
   for (const id of changed) inputs.units[id] = 'v2';
-  const owners = new Map(['one', 'two'].flatMap(suite => ids.map(id =>
-    [join(directory, cacheRecordName(suite, id)), suite])));
+  const owners = new Map(['one', 'two'].flatMap(suite => ids.flatMap(id =>
+    [undefined, cacheKey(inputs, id)].map(key => [join(directory, cacheRecordName(suite, id, key)), suite]))));
   const reads = new Map();
   const active = { one: 0, two: 0 };
   let peak = 0;
@@ -62,7 +62,7 @@ test('upfront plans share 32 concurrent reads and never reread records during ex
   const results = await Promise.all(['one', 'two'].map(suite => runCachedUnits({
     ...options(suite), logger: { log: line => lines[suite].push(line) },
     execute: unit => {
-      assert.equal(ids.every(id => reads.has(join(directory, cacheRecordName(suite, id)))), true);
+      assert.equal(ids.every(id => reads.has(join(directory, cacheRecordName(suite, id, cacheKey(inputs, id))))), true);
       assert.equal(active[suite], 0);
       assert.ok(lines[suite].some(line => /Will run: 20 \| Will skip: 20/.test(line)));
       calls[suite].push(unit.id);
@@ -70,7 +70,7 @@ test('upfront plans share 32 concurrent reads and never reread records during ex
     },
   }, { artifactContext: context })));
   assert.equal(peak, 32);
-  assert.equal(reads.size, 80);
+  assert.equal(reads.size, 120); // Changed variants also check their legacy address once.
   assert.ok([...reads.values()].every(count => count === 1));
   for (let index = 0; index < results.length; index++) {
     assert.deepEqual([results[index].passed, results[index].cached], [20, 20]);
@@ -86,14 +86,14 @@ test('cache scan errors drain concurrent reads before rejection and start no com
   observeRecordReads(t, f.directory, async (file, read) => {
     active++;
     try {
-      await delay(file.endsWith(cacheRecordName('fixture', 'first')) ? 5 : 20);
-      if (file.endsWith(cacheRecordName('fixture', 'first'))) throw new Error('cache scan failed');
+      await delay(file.endsWith(cacheRecordName('fixture', 'first', cacheKey(f.inputs, 'first'))) ? 5 : 20);
+      if (file.endsWith(cacheRecordName('fixture', 'first', cacheKey(f.inputs, 'first')))) throw new Error('cache scan failed');
       return await read();
     } finally { active--; completed++; }
   });
   await assert.rejects(runCachedUnits(f.options), /cache scan failed/);
   assert.equal(active, 0);
-  assert.equal(completed, 2);
+  assert.equal(completed, 3);
   assert.deepEqual(f.calls, []);
 });
 
@@ -183,7 +183,7 @@ test('a mid-run unit input change preserves other units passing evidence', async
   const result = await runCachedUnits(f.options);
   assert.equal(result.exitCode, 1);
   assert.equal(result.inputsChanged, true);
-  assert.deepEqual(await readdir(f.directory), [cacheRecordName('fixture', 'second')]);
+  assert.deepEqual(await readdir(f.directory), [cacheRecordName('fixture', 'second', cacheKey(f.inputs, 'second'))]);
   f.options.execute = async unit => { f.calls.push(unit.id); return 0; };
   assert.equal((await runCachedUnits(f.options)).exitCode, 0);
   assert.deepEqual(f.calls, ['first']);
@@ -206,7 +206,7 @@ test('parallel validation fences only the unit whose inputs changed', async t =>
     return 0;
   };
   assert.equal((await runCachedUnits(f.options)).inputsChanged, true);
-  assert.deepEqual(await readdir(f.directory), [cacheRecordName('fixture', 'second')]);
+  assert.deepEqual(await readdir(f.directory), [cacheRecordName('fixture', 'second', cacheKey(f.inputs, 'second'))]);
 });
 
 test('observed changes stay fenced for their owner after the bytes are restored', async t => {
@@ -226,7 +226,7 @@ test('observed changes stay fenced for their owner after the bytes are restored'
     return 0;
   };
   assert.equal((await runCachedUnits(f.options)).inputsChanged, true);
-  assert.deepEqual(await readdir(f.directory), [cacheRecordName('fixture', 'first')]);
+  assert.deepEqual(await readdir(f.directory), [cacheRecordName('fixture', 'first', cacheKey(f.inputs, 'first'))]);
   f.options.execute = async unit => { f.calls.push(unit.id); return 0; };
   await runCachedUnits(f.options);
   assert.deepEqual(f.calls, ['second']);
@@ -243,7 +243,7 @@ test('changes during evidence collection fence their owner without blocking othe
     return { files: [artifact], metadata: { owner: unit.id } };
   };
   assert.equal((await runCachedUnits(f.options)).inputsChanged, true);
-  assert.deepEqual(await readdir(f.directory), [cacheRecordName('fixture', 'second')]);
+  assert.deepEqual(await readdir(f.directory), [cacheRecordName('fixture', 'second', cacheKey(f.inputs, 'second'))]);
 });
 
 test('corrupt evidence reruns and cache stores only hashes, without environment secrets', async t => {
@@ -345,9 +345,10 @@ test('resource admission preserves cache evidence, input fencing and fixed worke
   assert.equal(peak, 2);
   delete f.options.workers;
   f.inputs.common = 'new';
+  const previousRecords = await readdir(f.directory);
   f.options.execute = async () => { f.inputs.common = 'mutated'; return 0; };
   assert.equal((await runCachedUnits(f.options)).inputsChanged, true);
-  assert.deepEqual(await readdir(f.directory), []);
+  assert.deepEqual(await readdir(f.directory), previousRecords);
 });
 
 

@@ -4,8 +4,8 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { Admission } from '../src/admission.mjs';
 import { createFileQueue } from '../src/file-queue.mjs';
-import { runChecks, cacheRecordName } from '../src/index.mjs';
-import { put, temporary } from './helpers.mjs';
+import { runChecks } from '../src/index.mjs';
+import { cachedRecord, put, temporary } from './helpers.mjs';
 
 async function fixture(t, count = 3) {
   const root = await realpath(await temporary(t));
@@ -117,7 +117,7 @@ test('each suite retains its own coverage evidence and aggregate gate in the sha
   const result = await runChecks(definitions, options);
   assert.equal(result.results[0].exitCode, 0);
   assert.notEqual(result.results[1].exitCode, 0);
-  const records = await Promise.all(['complete', 'incomplete'].map(suite => readFile(join(root, '.test-cache/project-checks', cacheRecordName(suite, 'test/a.test.mjs')), 'utf8').then(JSON.parse)));
+  const records = await Promise.all(['complete', 'incomplete'].map(suite => cachedRecord(join(root, '.test-cache/project-checks'), suite, 'test/a.test.mjs')));
   assert.notDeepEqual(records[0].evidence.files, records[1].evidence.files);
   const repeat = await runChecks(definitions, options);
   assert.deepEqual(repeat.results.map(result => result.cached), [2, 1]);
