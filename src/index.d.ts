@@ -72,7 +72,7 @@ export interface TestConfig {
   /** Compatibility startup setting for the same adaptive input scanner; positive integer. Default: scanConcurrency. */
   inputConcurrency?: number;
   /** Maximum concurrent passing-file verification jobs; positive integer. Default: 32. */
-  verificationConcurrency?: number;
+  verificationConcurrency?: number | `${number}N`;
   /** Per-file RAM reservation, in MiB; omitted uses the shared pool default. */
   memoryMiB?: number | ((id: string) => number);
   resources?: ResourcePolicy;
@@ -182,7 +182,7 @@ export interface CachedUnitsOptions<T extends TestUnit = TestUnit> {
   /** Compatibility startup setting for the same adaptive artifact/input scanner; positive integer. Default: scanConcurrency. */
   inputConcurrency?: number;
   /** Maximum concurrent passing-file verification jobs; positive integer. Default: 32. */
-  verificationConcurrency?: number;
+  verificationConcurrency?: number | `${number}N`;
   progress?: TestProgress | false;
   cacheDirectory?: string;
   suite?: string;
@@ -316,7 +316,7 @@ export function runChecks(definitions: CheckDefinition[], options?: {
   /** Overrides the initial size of the shared adaptive input scanner. */
   inputConcurrency?: number;
   /** Overrides suite verification settings for the shared validation pool. */
-  verificationConcurrency?: number;
+  verificationConcurrency?: number | `${number}N`;
   progress?: TestProgress | false;
 }): Promise<{ exitCode: number; results: Array<{ id: string; exitCode: number; skipped?: boolean }> }>;
 export function reportCoverage(config: TestConfig): Promise<null | {

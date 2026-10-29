@@ -2,7 +2,7 @@ import { validateCoverage } from './coverage.mjs';
 import { readFile, stat } from 'node:fs/promises';
 import { dirname, isAbsolute, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { command, inputLimit, integer, keys, text } from './util.mjs';
+import { command, inputLimit, integer, workerLimit, keys, text } from './util.mjs';
 import { selectConcurrency } from './resources.mjs';
 import defaultConfig from '../project-checks.config.json' with { type: 'json' };
 
@@ -62,7 +62,7 @@ export function defineConfig(config) {
   if (config.workers !== undefined) integer(config.workers, 'workers');
   if (config.scanConcurrency !== undefined) integer(config.scanConcurrency, 'scanConcurrency');
   if (config.inputConcurrency !== undefined) inputLimit(config.inputConcurrency);
-  if (config.verificationConcurrency !== undefined) integer(config.verificationConcurrency, 'verificationConcurrency');
+  if (config.verificationConcurrency !== undefined) workerLimit(config.verificationConcurrency, 'verificationConcurrency');
   if (config.memoryMiB !== undefined && typeof config.memoryMiB !== 'function') integer(config.memoryMiB, 'memoryMiB');
   if (config.resources !== undefined) selectConcurrency(config.resources, { cpus: 1, memoryMiB: 1 });
   if (config.cache !== undefined && typeof config.cache !== 'boolean') throw new TypeError('cache must be a boolean');

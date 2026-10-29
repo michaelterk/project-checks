@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { isAbsolute, join, resolve } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
-import { command, digest, inputLimit, integer, keys, object, text } from './util.mjs';
+import { command, digest, inputLimit, integer, workerLimit, keys, object, text } from './util.mjs';
 import { Admission } from './admission.mjs';
 import { createSnapshotContext } from './inputs.mjs';
 import { withProgress } from './progress.mjs';
@@ -56,7 +56,7 @@ async function runUnits({ cacheDirectory, suite = 'tests', units, snapshot, work
   if (workers !== undefined) integer(workers, 'workers');
   integer(scanConcurrency, 'scanConcurrency');
   if (inputConcurrency !== undefined) inputLimit(inputConcurrency);
-  integer(verificationConcurrency, 'verificationConcurrency');
+  verificationConcurrency = workerLimit(verificationConcurrency, 'verificationConcurrency');
   if (typeof retryTimeouts !== 'boolean') throw new TypeError('retryTimeouts must be a boolean');
   text(suite, 'suite');
   if (cache) text(cacheDirectory, 'cacheDirectory');

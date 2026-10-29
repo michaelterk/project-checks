@@ -1,3 +1,4 @@
+import { cpuCapacity } from './cpu-limits.mjs';
 import { createHash } from 'node:crypto';
 import { isAbsolute, relative, sep } from 'node:path';
 
@@ -11,6 +12,12 @@ export const inside = (root, file) => {
 export function integer(value, label, minimum = 1) {
   if (!Number.isSafeInteger(value) || value < minimum) throw new TypeError(`${label} must be an integer >= ${minimum}`);
   return value;
+}
+
+// JSON may express a worker limit as a multiple of the available CPU cores.
+export function workerLimit(value, label) {
+  const multiplier = typeof value === 'string' && /^([1-9][0-9]*)N$/.exec(value);
+  return integer(multiplier ? Number(multiplier[1]) * cpuCapacity() : value, label);
 }
 
 export function inputLimit(value) {

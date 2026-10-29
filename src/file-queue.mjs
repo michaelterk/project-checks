@@ -6,7 +6,7 @@ export function createFileQueue(plans, admission, signal, { workers = 1, verific
   const dispatch = new AbortController();
   const dispatchSignal = AbortSignal.any([signal, dispatch.signal]);
   const commands = admission ? null : createPermits(workers, dispatchSignal);
-  const verification = createVerificationPool(admission?.capacity ?? workers, signal, verificationConcurrency);
+  const verification = createVerificationPool(signal, verificationConcurrency);
   const groups = new Map(plans.map(({ id, jobs }) => [id, {
     enabled: false, done: Promise.withResolvers(),
     remaining: jobs.length, active: 0, stopped: false,

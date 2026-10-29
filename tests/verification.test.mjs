@@ -1,3 +1,4 @@
+import { cpuCapacity } from '../src/cpu-limits.mjs';
 import assert from 'node:assert/strict';
 import fsPromises, { readdir } from 'node:fs/promises';
 import { syncBuiltinESMExports } from 'node:module';
@@ -183,12 +184,13 @@ test('a failed job drains a dispatcher blocked on admission', { timeout: 5000 },
   assert.equal(otherStarted, false);
 });
 
-test('a full verification backlog blocks the thirty-fourth command', { timeout: 5000 }, async t => {
-  const release = deferred(), thirtyThirdStarted = deferred();
+test('a full core-based verification backlog blocks the next command', { timeout: 5000 }, async t => {
+  const limit = cpuCapacity() * 16;
+  const release = deferred(), full = deferred();
   t.after(() => release.resolve());
   let started = 0, active = 0, peak = 0;
-  const jobs = Array.from({ length: 34 }, () => async ({ releaseExecution, verify }) => {
-    if (++started === 33) thirtyThirdStarted.resolve();
+  const jobs = Array.from({ length: limit + 1 }, () => async ({ releaseExecution, verify }) => {
+    if (++started === limit) full.resolve();
     releaseExecution();
     await verify(async () => {
       peak = Math.max(peak, ++active);
@@ -199,14 +201,14 @@ test('a full verification backlog blocks the thirty-fourth command', { timeout: 
   const queue = createFileQueue([{ id: 'suite', jobs }], null, new AbortController().signal);
   queue.enable('suite');
   const finished = queue.run('suite');
-  await thirtyThirdStarted.promise;
+  await full.promise;
   await new Promise(resolve => setImmediate(resolve));
-  assert.equal(started, 33);
+  assert.equal(started, limit);
   assert.equal(active, 32);
   release.resolve();
   await finished;
   await queue.close();
-  assert.equal(started, 34);
+  assert.equal(started, limit + 1);
   assert.equal(active, 0);
   assert.equal(peak, 32);
 });
@@ -250,9 +252,9 @@ test('a queued verifier checks fresh inputs before publishing its pass', { timeo
 });
 
 test('verification credits bound finished commands awaiting validation', { timeout: 5000 }, async t => {
-  const pool = createVerificationPool(1, new AbortController().signal);
+  const pool = createVerificationPool(new AbortController().signal);
   t.after(() => pool.close());
-  const release = await Promise.all(Array.from({ length: 33 }, () => pool.reserve()));
+  const release = await Promise.all(Array.from({ length: cpuCapacity() * 16 }, () => pool.reserve()));
   let nextReserved = false;
   const next = pool.reserve().then(releaseCredit => {
     nextReserved = true;
@@ -268,7 +270,7 @@ test('verification credits bound finished commands awaiting validation', { timeo
 });
 
 test('at most thirty-two verification operations run at once', { timeout: 5000 }, async t => {
-  const pool = createVerificationPool(1, new AbortController().signal);
+  const pool = createVerificationPool(new AbortController().signal);
   t.after(() => pool.close());
   const full = deferred(), release = deferred();
   let active = 0, peak = 0, started = 0;
@@ -289,9 +291,9 @@ test('at most thirty-two verification operations run at once', { timeout: 5000 }
 
 test('abort releases queued credits and validation slots after active work drains', { timeout: 5000 }, async t => {
   const controller = new AbortController();
-  const pool = createVerificationPool(1, controller.signal);
+  const pool = createVerificationPool(controller.signal);
   t.after(() => pool.close());
-  const releaseCredits = await Promise.all(Array.from({ length: 33 }, () => pool.reserve()));
+  const releaseCredits = await Promise.all(Array.from({ length: cpuCapacity() * 16 }, () => pool.reserve()));
   const pendingCredit = assert.rejects(pool.reserve(), { name: 'AbortError' });
   const full = deferred(), release = deferred();
   t.after(() => release.resolve());
@@ -310,7 +312,7 @@ test('abort releases queued credits and validation slots after active work drain
 });
 
 test('a failed validation releases its slot for the next file', { timeout: 5000 }, async t => {
-  const pool = createVerificationPool(1, new AbortController().signal);
+  const pool = createVerificationPool(new AbortController().signal);
   t.after(() => pool.close());
   const failure = new Error('validation failed');
   await assert.rejects(pool.run(() => { throw failure; }), error => error === failure);
@@ -319,9 +321,9 @@ test('a failed validation releases its slot for the next file', { timeout: 5000 
 
 test('configured verification limits bound both active jobs and outstanding credits', { timeout: 5000 }, async t => {
   for (const concurrency of [1, 4]) {
-    const pool = createVerificationPool(1, new AbortController().signal, concurrency);
+    const pool = createVerificationPool(new AbortController().signal, concurrency);
     t.after(() => pool.close());
-    const credits = await Promise.all(Array.from({ length: concurrency + 1 }, () => pool.reserve()));
+    const credits = await Promise.all(Array.from({ length: cpuCapacity() * 16 }, () => pool.reserve()));
     let reserved = false;
     const next = pool.reserve().then(release => { reserved = true; return release; });
     const release = deferred(), full = deferred();
@@ -335,7 +337,7 @@ test('configured verification limits bound both active jobs and outstanding cred
     await full.promise;
     await new Promise(resolve => setImmediate(resolve));
     assert.equal(active, concurrency);
-    assert.equal(reserved, false, 'backlog admission uses the configured validation cap');
+    assert.equal(reserved, false, 'backlog admission uses the independent core-based in-flight cap');
     credits[0]();
     (await next)();
     credits.slice(1).forEach(releaseCredit => releaseCredit());

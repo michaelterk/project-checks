@@ -11,7 +11,7 @@ import { put, temporary } from './helpers.mjs';
 test('invalid verification limits fail before execution', async () => {
   for (const verificationConcurrency of [0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, null, '4', true]) {
     assert.throws(() => defineConfig({ verificationConcurrency }), /verificationConcurrency/);
-    assert.throws(() => createVerificationPool(1, new AbortController().signal, verificationConcurrency), /verificationConcurrency/);
+    assert.throws(() => createVerificationPool(new AbortController().signal, verificationConcurrency), /verificationConcurrency/);
     await assert.rejects(runChecks([], { verificationConcurrency, logger: false }), /verificationConcurrency/);
     await assert.rejects(runCachedUnits({
       verificationConcurrency, cache: false, logger: null,

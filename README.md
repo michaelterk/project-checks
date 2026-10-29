@@ -291,9 +291,9 @@ without holding a worker slot. Each file keeps its suite's configuration, fixtur
 snapshot, coverage artifacts, and evidence checks. Files without coverage artifacts
 release their execution slot after command cleanup, then verify inputs and publish
 their cache record in a separate pool capped by `verificationConcurrency` (default
-32 active jobs). Each invocation bounds executing and finalizing files to its
-execution capacity plus that verification limit, reserving
-space before command admission. Completed files validate their own dependencies;
+32 active jobs). Each invocation independently bounds executing and finalizing
+files to 16 times its CPU affinity core count, reserving space before command
+admission. Completed files validate their own dependencies;
 callers ready before collection begins share a batch's common inputs. Later arrivals
 start a fresh observation. Coverage collection retains execution admission because
 it can start processes and use substantial memory. Suite completion, dependencies,
@@ -482,7 +482,7 @@ subprocesses; whole command deadlines use `timeoutMs`.
 | `workers` | Automatically tuned CPU/RAM-derived count | Positive integer worker cap |
 | `scanConcurrency` | `32` from packaged JSON | Initial adaptive input scanner concurrency; growth can exceed it and pressure can reduce it to one |
 | `inputConcurrency` | Unset; uses `scanConcurrency` | Compatibility startup setting for the same adaptive input scanner |
-| `verificationConcurrency` | `32` from packaged JSON | Positive integer cap on concurrent passing-file validations and, in the final phase, suite input checks |
+| `verificationConcurrency` | `32` from packaged JSON | Positive integer or core multiple (for example `"4N"`) cap on concurrent passing-file validations and, in the final phase, suite input checks |
 | `memoryMiB` | Shared pool default | Per-file RAM estimate: positive integer or `(id) => integer` |
 | `resources` | See below | Resource policy |
 | `cache` | `true` | Read/write passing evidence |
@@ -571,7 +571,8 @@ otherwise the smallest selected suite startup setting applies. An explicitly
 configured `inputConcurrency` takes precedence over that suite’s `scanConcurrency`;
 no inherited input default limits an explicitly larger scanner startup. The CLI
 `checks` command uses the consuming project's automatically loaded root configuration.
-`verificationConcurrency` is a fixed maximum; `scanConcurrency` and the compatibility
+`verificationConcurrency` accepts a positive integer or a multiple of CPU affinity
+cores such as `"4N"`. It is fixed for each invocation. `scanConcurrency` and the compatibility
 `inputConcurrency` setting choose the startup value of one adaptive scanner. `workers` and `--workers` continue to control test
 execution admission independently of these settings.
 

@@ -8,7 +8,7 @@ import { defineConfig, loadConfig } from './config.mjs';
 import { runCommand } from './command.mjs';
 import { createSnapshotContext } from './inputs.mjs';
 import { runTests } from './runner.mjs';
-import { command, inputLimit, integer, keys, text } from './util.mjs';
+import { command, inputLimit, integer, workerLimit, keys, text } from './util.mjs';
 import { createProgress } from './progress.mjs';
 import { scanCacheJobs, scanConcurrency as defaultScanConcurrency } from './cache.mjs';
 import defaultConfig from '../project-checks.config.json' with { type: 'json' };
@@ -21,7 +21,7 @@ export async function runChecks(definitions, options = {}) {
   if (options.diagnostics !== undefined) defineConfig({ diagnostics: options.diagnostics });
   if (options.scanConcurrency !== undefined) integer(options.scanConcurrency, 'scanConcurrency');
   if (options.inputConcurrency !== undefined) inputLimit(options.inputConcurrency);
-  if (options.verificationConcurrency !== undefined) integer(options.verificationConcurrency, 'verificationConcurrency');
+  if (options.verificationConcurrency !== undefined) options = { ...options, verificationConcurrency: workerLimit(options.verificationConcurrency, 'verificationConcurrency') };
   const byId = new Map();
   for (const definition of definitions) {
     keys(definition, ['id', 'dependsOn', 'config', 'command', 'cwd', 'env', 'verify'], 'check');

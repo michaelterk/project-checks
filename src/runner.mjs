@@ -7,6 +7,7 @@ import { readFile, realpath } from 'node:fs/promises';
 import { basename, join, resolve, delimiter } from 'node:path';
 import { defineConfig, defaultIgnore, defaultDirectoryIgnore } from './config.mjs';
 import { runCachedUnits, scanConcurrency as defaultScanConcurrency } from './cache.mjs';
+import { workerLimit } from './util.mjs';
 import { verificationConcurrency as defaultVerificationConcurrency } from './verification-pool.mjs';
 import { commandEnvironment, runCommand } from './command.mjs';
 import { createSnapshot, createSnapshotContext, discoverTests, selectTests } from './inputs.mjs';
@@ -111,7 +112,7 @@ async function runTestsWithSignal(options, { retained, normalPhase, cacheScan, q
   config.progress && config.progress.files(config.suite, total);
   if (!files.length) {
     await queueScan?.([], config.scanConcurrency ?? defaultScanConcurrency);
-    await cacheScan?.({ total: 0, cached: 0, jobs: [], verificationConcurrency: config.verificationConcurrency ?? defaultVerificationConcurrency });
+    await cacheScan?.({ total: 0, cached: 0, jobs: [], verificationConcurrency: workerLimit(config.verificationConcurrency ?? defaultVerificationConcurrency, 'verificationConcurrency') });
     await executeFiles?.();
     options.signal?.throwIfAborted();
     return { exitCode: 0, total: 0, passed: 0, failed: 0, cached: 0, excluded: selectedFiles.length, results: [] };
