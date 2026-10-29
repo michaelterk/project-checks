@@ -10,6 +10,34 @@ const deserialize = value => {
 };
 const batchSize = 16;
 
+// Pending input trees can contain many entries. Keep dequeue and priority
+// insertion constant-time while preserving FIFO within each priority lane.
+function createJobQueue() {
+  const lanes = [{}, {}];
+  let length = 0;
+  return {
+    get length() { return length; },
+    peek() { return lanes[0].head ?? lanes[1].head; },
+    push(job) {
+      const lane = lanes[job.priority ? 0 : 1];
+      if (lane.tail) lane.tail.queueNext = job;
+      else lane.head = job;
+      lane.tail = job;
+      length++;
+    },
+    shift() {
+      const lane = lanes[0].head ? lanes[0] : lanes[1];
+      const job = lane.head;
+      if (!job) return;
+      lane.head = job.queueNext;
+      if (!lane.head) lane.tail = undefined;
+      job.queueNext = undefined;
+      length--;
+      return job;
+    },
+  };
+}
+
 // Files, directory enumeration and other metadata work share this admission.
 // One worker owns one entry through stat/read/hash; aggregation owns no slot.
 export function createHashPool({ workers, resources = {}, host = detectResources(), sample = resourceSampler(),
@@ -23,7 +51,7 @@ export function createHashPool({ workers, resources = {}, host = detectResources
   // startup and scheduling cost; batches amortize the waiting I/O.
   const maximum = Math.max(1, Math.min(Math.floor(selected.memoryBudgetMiB / workerMemoryMiB),
     Math.max(workers, Math.ceil(cpuBudget))));
-  const queue = [], slots = new Set(), terminations = new Set();
+  const queue = createJobQueue(), slots = new Set(), terminations = new Set();
   // Send immutable path policies once per process, rather than once per directory.
   const filterPolicies = new Map(), policyKeys = new Map(), policyObjects = new WeakMap();
   const snapshotPolicies = new WeakMap();
@@ -107,7 +135,7 @@ export function createHashPool({ workers, resources = {}, host = detectResources
       // Batch only waiting leaf jobs; operations retain their queue position and
       // admission. Each worker still opens at most one file at a time.
       const jobs = [job];
-      while (!job.task && jobs.length < batchSize && queue.length && !queue[0].operation && !queue[0].task) jobs.push(queue.shift());
+      while (!job.task && jobs.length < batchSize && queue.length && !queue.peek().operation && !queue.peek().task) jobs.push(queue.shift());
       let slot = [...slots].find(slot => !slot.jobs);
       try {
         slot ??= spawn(); slot.worker.ref?.(); slot.jobs = jobs;
@@ -174,9 +202,7 @@ export function createHashPool({ workers, resources = {}, host = detectResources
       const job = { ...fields, id: ++sequence, resolve, reject, queuedAt };
       // Ready cache comparisons stay bounded by this pool but must not wait
       // behind every unrelated dependency task already queued for discovery.
-      const before = fields.priority ? queue.findIndex(waiting => !waiting.priority) : -1;
-      if (before < 0) queue.push(job);
-      else queue.splice(before, 0, job);
+      queue.push(job);
       if (!timer) { reading = sample(); timer = setInterval(tick, 1000); }
       timer.ref?.();
       dispatch();
@@ -185,7 +211,8 @@ export function createHashPool({ workers, resources = {}, host = detectResources
   function close(error = new Error('Input scanner pool closed')) {
     if (!closed) {
       closed = true; reason = error; clearInterval(timer); timer = undefined;
-      queue.splice(0).forEach(job => job.reject(reason)); report();
+      while (queue.length) queue.shift().reject(reason);
+      report();
       for (const slot of slots) if (slot.jobs) slot.worker.cancel?.();
     }
     finish(); return ended.promise;

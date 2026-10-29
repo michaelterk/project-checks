@@ -368,3 +368,55 @@ test('CPU backoff waits for long tasks to shed load instead of collapsing parall
   fake.workers.filter(worker => worker.job).forEach(worker => worker.complete());
   await Promise.all([...rejected, closing]);
 });
+
+
+test('priority FIFO survives reentrant priority work without crossing leaf, task or operation barriers', async () => {
+  const fake = fakeWorkers(), pool = createHashPool({ workers: 1, createWorker: fake.createWorker });
+  const jobs = [], events = [];
+  const track = job => { jobs.push(job); return job; };
+  const first = track(pool.inspect('blocked'));
+  const leaf = track(pool.inspect('leaf'));
+  const operation = track(pool.run(() => events.push('normal')));
+  const task = track(pool.inputTask({}, { mode: 'unit', id: 'task' }));
+  const last = track(pool.inspect('last'));
+  let nested;
+  const priority = track(pool.run(() => {
+    events.push('priority-one');
+    nested = track(pool.run(() => events.push('priority-three'), { priority: true }));
+  }, { priority: true }));
+  const secondPriority = track(pool.run(() => events.push('priority-two'), { priority: true }));
+  const worker = fake.workers[0];
+  try {
+    assert.equal(pool.state().waiting, 6);
+    worker.complete();
+    await Promise.all([first, priority, secondPriority]);
+    await nested;
+    assert.deepEqual(events, ['priority-one', 'priority-two', 'priority-three']);
+    assert.deepEqual(worker.job.jobs.map(job => job.file), ['leaf']);
+    assert.equal(pool.state().active, 1);
+    assert.equal(pool.state().waiting, 3);
+    worker.complete();
+    await Promise.all([leaf, operation]);
+    assert.deepEqual(events, ['priority-one', 'priority-two', 'priority-three', 'normal']);
+    assert.equal(worker.job.jobs.length, 1);
+    assert.equal(worker.job.jobs[0].task.id, 'task');
+    worker.complete();
+    await task;
+    assert.deepEqual(worker.job.jobs.map(job => job.file), ['last']);
+    worker.complete();
+    await last;
+    assert.equal(pool.state().waiting, 0);
+    assert.equal(pool.state().active, 0);
+    const again = track(pool.inspect('after-empty'));
+    const finalPriority = track(pool.run(() => events.push('after-empty'), { priority: true }));
+    worker.complete();
+    await Promise.all([again, finalPriority]);
+    assert.equal(events.at(-1), 'after-empty');
+    assert.equal(worker.dispatched, 5);
+  } finally {
+    const settled = Promise.allSettled(jobs);
+    const closing = pool.close();
+    if (worker.job) worker.complete();
+    await Promise.all([settled, closing]);
+  }
+});
