@@ -2,9 +2,46 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import test from 'node:test';
-import { hasCpuQuota, quotaCpus, runWithCpuQuota } from '../src/cpu-quota.mjs';
+import { hasCpuQuota, quotaCpus, runWithCpuQuota, userBusEnvironment } from '../src/cpu-quota.mjs';
 import { temporary, put } from './helpers.mjs';
 import { setTimeout as delay } from 'node:timers/promises';
+
+test('missing session environment discovers only the current user bus without mutating the caller', () => {
+  const env = { PATH: '/usr/bin', QUOTA_FIXTURE: 'kept' };
+  const paths = [];
+  const stat = path => {
+    paths.push(path);
+    return { uid: 123, mode: 0o700, isDirectory: () => path === '/run/user/123', isSocket: () => path === '/run/user/123/bus' };
+  };
+  assert.deepEqual(userBusEnvironment(env, { uid: 123, stat }), {
+    ...env, XDG_RUNTIME_DIR: '/run/user/123', DBUS_SESSION_BUS_ADDRESS: 'unix:path=/run/user/123/bus',
+  });
+  assert.deepEqual(paths, ['/run/user/123', '/run/user/123/bus']);
+  assert.deepEqual(env, { PATH: '/usr/bin', QUOTA_FIXTURE: 'kept' });
+});
+
+test('explicit session addresses are preserved without probing a different session', () => {
+  for (const env of [{ XDG_RUNTIME_DIR: '/explicit/runtime' }, { DBUS_SESSION_BUS_ADDRESS: 'unix:path=/explicit/bus' }]) {
+    assert.equal(userBusEnvironment(env, { uid: 123, stat: () => assert.fail('unexpected fallback') }), env);
+  }
+});
+
+test('bus discovery refuses missing, symlinked, foreign-owned and non-private endpoints', () => {
+  const directory = { uid: 123, mode: 0o700, isDirectory: () => true };
+  const socket = { uid: 123, isSocket: () => true };
+  const failures = [
+    () => { throw Object.assign(new Error('missing'), { code: 'ENOENT' }); },
+    () => { throw Object.assign(new Error('denied'), { code: 'EACCES' }); },
+    ...[
+      [{ ...directory, uid: 456 }, socket],
+      [{ ...directory, mode: 0o755 }, socket],
+      [{ ...directory, isDirectory: () => false }, socket],
+      [directory, { ...socket, uid: 456 }],
+      [directory, { ...socket, isSocket: () => false }],
+    ].map(([runtime, bus]) => path => path.endsWith('/bus') ? bus : runtime),
+  ];
+  for (const stat of failures) assert.throws(() => userBusEnvironment({}, { uid: 123, stat }), /Cannot locate the current user's systemd bus/);
+});
 
 test('quota percentages use aggregate host CPUs and reject invalid configuration', () => {
   const host = { cpus: 8, memoryMiB: 8192 };
@@ -46,7 +83,10 @@ child.unref();
 writeFileSync(${JSON.stringify(output)}, JSON.stringify({ group, quota: readFileSync(join('/sys/fs/cgroup', group, 'cpu.max'), 'utf8'), cwd: process.cwd(), argument: process.argv[2], value: process.env.QUOTA_FIXTURE, child: child.pid }));
 process.exitCode = 17;
 `);
-  const status = await runWithCpuQuota([process.execPath, script, 'literal $(no shell)'], { cwd: root, env: { ...process.env, QUOTA_FIXTURE: 'kept' }, stdio: 'ignore' });
+  const env = { ...process.env, QUOTA_FIXTURE: 'kept' };
+  delete env.XDG_RUNTIME_DIR;
+  delete env.DBUS_SESSION_BUS_ADDRESS;
+  const status = await runWithCpuQuota([process.execPath, script, 'literal $(no shell)'], { cwd: root, env, stdio: 'ignore' });
   assert.equal(status, 17);
   const result = JSON.parse(await readFile(output, 'utf8'));
   const [maximum, period] = result.quota.trim().split(/\s+/).map(Number);
@@ -56,6 +96,14 @@ process.exitCode = 17;
   assert.equal(result.value, 'kept');
   const state = await readFile(`/proc/${result.child}/stat`, 'utf8').catch(error => { if (error.code !== 'ENOENT') throw error; });
   assert.ok(state === undefined || ['Z', 'X'].includes(state.slice(state.lastIndexOf(')') + 2).split(' ')[0]));
+});
+
+test('explicit command bus environment also controls scope cleanup', { skip: process.platform !== 'linux' }, async t => {
+  const env = userBusEnvironment({ ...process.env });
+  const original = process.env;
+  process.env = { ...original, DBUS_SESSION_BUS_ADDRESS: 'unix:path=/nonexistent-project-checks-bus' };
+  t.after(() => { process.env = original; });
+  assert.equal(await runWithCpuQuota([process.execPath, '-e', 'process.exitCode = 17'], { env, stdio: 'ignore' }), 17);
 });
 
 test('cancellation drains the quota scope before returning', { skip: process.platform !== 'linux' }, async t => {
