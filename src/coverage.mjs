@@ -21,7 +21,7 @@ export function validateCoverage(value) {
   for (const field of ['include', 'exclude']) if (value[field] !== undefined && (!Array.isArray(value[field]) || value[field].some(item => typeof item !== 'string' || !item))) throw new TypeError(`coverage.${field} must be an array of patterns`);
   for (const field of ['python', 'configFile', 'report']) if (value[field] !== undefined && (typeof value[field] !== 'string' || !value[field])) throw new TypeError(`coverage.${field} must be a nonempty string`);
 }
-export async function createCoverage(config, environment) {
+export async function createCoverage(config, environment, validationContext = config.snapshotContext) {
   const definition = config.coverage;
   validateCoverage(definition);
   const provider = definition.provider ?? 'v8';
@@ -56,10 +56,10 @@ export async function createCoverage(config, environment) {
     if (hashes.some(hash => !hash)) throw new Error('Missing V8 coverage provider input');
     return digest(JSON.stringify([paths, hashes, process.versions, process.platform, process.arch]));
   }
-  async function materialize(source, sources) {
+  async function materialize(source, sources, context = config.snapshotContext) {
     const destination = join(staging, randomUUID());
     const original = await readFile(source);
-    const options = { provider, root: config.root, sources, context: config.snapshotContext };
+    const options = { provider, root: config.root, sources, context };
     if (provider === 'v8') await validatePortableV8Artifact(original, options);
     await writeFile(destination, original, { flag: 'wx', mode: 0o600 });
     if (provider === 'python') {
@@ -99,10 +99,10 @@ export async function createCoverage(config, environment) {
         await writeFile(`${artifact}.tmp`, await compress(JSON.stringify(values)), { flag: 'wx', mode: 0o600 });
         await rename(`${artifact}.tmp`, artifact);
       }
-      const normalized = await normalizeCoverageArtifact(await readFile(artifact), { provider, sourceRoot: config.root, context: config.snapshotContext });
+      const normalized = await normalizeCoverageArtifact(await readFile(artifact), { provider, sourceRoot: config.root, context: validationContext });
       await writeFile(`${artifact}.tmp`, normalized.bytes, { flag: 'wx', mode: 0o600 });
       await rename(`${artifact}.tmp`, artifact);
-      contributions.set(unit.id, await materialize(artifact, normalized.sources));
+      contributions.set(unit.id, await materialize(artifact, normalized.sources, validationContext));
       sourceProofs.set(unit.id, normalized.sources);
       await rm(output, { recursive: true, force: true });
       outputs.delete(unit.id);

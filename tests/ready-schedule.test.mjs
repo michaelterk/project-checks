@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { Admission } from '../src/admission.mjs';
 import { createFileQueue } from '../src/file-queue.mjs';
-import { loadChecks, runChecks, runTests } from '../src/index.mjs';
+import { fileReadyOptions, loadChecks, runChecks, runTests } from '../src/index.mjs';
 import { put, temporary } from './helpers.mjs';
 
 const options = { schedule: 'ready', workers: 2, inputConcurrency: 2, verificationConcurrency: 2, logger: false };
@@ -208,4 +208,135 @@ test('V8 aggregate reuse verifies measurements, binds rules, and enforces the cu
   assert.ok(!lines.some(line => line.includes('Verified V8 coverage')));
   config.coverage.include = ['absent.mjs'];
   await assert.rejects(runTests(config), /No source files in coverage domain/);
+});
+
+test('a verified miss completes while a sibling coverage hit is still scanning', { timeout: 15000 }, async t => {
+  const root = await temporary(t);
+  await put(root, 'source.mjs', 'export const n = 1;');
+  const cached = 'test/cached.test.mjs', fresh = 'test/fresh.test.mjs';
+  for (const file of [cached, fresh]) await put(root, file, "import '../source.mjs';");
+  const base = { root, inputs: ['source.mjs'], coverage: { include: ['source.mjs'] }, stdio: 'ignore' };
+  assert.equal((await runTests({ ...base, files: [cached], logger: false })).exitCode, 0);
+
+  const early = Promise.withResolvers();
+  t.signal.addEventListener('abort', early.resolve, { once: true });
+  const ran = [];
+  let setups = 0, closes = 0;
+  const result = await runChecks([{ id: 'mixed', config: {
+    ...base, setup() { setups++; return { close() { closes++; } }; },
+    testInputs: async id => { if (id === cached) await early.promise; return []; },
+  } }], { ...options, ...fileReadyOptions, signal: t.signal, progress: { files() {}, file(_suite, id, state) {
+    if (state === 'file-start') ran.push(id);
+    if (id === fresh && state === 'file-end') early.resolve();
+  } } });
+  assert.deepEqual([result.exitCode, result.results[0].cached, setups, closes], [0, 1, 1, 1]);
+  assert.deepEqual(ran, [fresh]);
+  const report = JSON.parse(await readFile(join(root, '.test-cache/project-checks/coverage/tests/latest.json')));
+  assert.deepEqual(report.actual, { lines: 100, branches: 100, functions: 100 });
+});
+
+test('an early command checks fresh inputs even when its mutation is reverted before scan completion', { timeout: 10000 }, async t => {
+  const root = await temporary(t);
+  const first = 'test/early.test.mjs', last = 'test/late.test.mjs';
+  await put(root, first, 'original'); await put(root, last, '');
+  const checked = Promise.withResolvers();
+  t.signal.addEventListener('abort', checked.resolve, { once: true });
+  const ran = [];
+  let mutate = true, initialLateScan = true;
+  const config = { root, inputs: [], coverage: false, testInputs: async id => {
+    if (id === last && initialLateScan) {
+      initialLateScan = false;
+      await checked.promise;
+      await put(root, first, 'original');
+    }
+    return [];
+  }, setup: () => ({ execute: async command => {
+    const file = command.at(-1);
+    ran.push(file);
+    if (file === first && mutate) await put(root, first, 'changed');
+    return 0;
+  } }) };
+  const settings = { ...options, ...fileReadyOptions, signal: t.signal, progress: { files() {}, file(_suite, id, state) {
+    if (id === first && state === 'file-end') checked.resolve();
+  } } };
+  const run = () => runChecks([{ id: 'files', config }], settings);
+  const result = await run();
+  assert.equal(result.results[0].inputsChanged, true);
+  assert.equal(result.exitCode, 1);
+  mutate = false;
+  ran.length = 0;
+  assert.equal((await run()).exitCode, 0);
+  assert.deepEqual(ran, [first]);
+});
+
+test('a late scan failure cancels and drains a running file before closing its fixture', { timeout: 10000 }, async t => {
+  const root = await temporary(t);
+  const first = 'test/a.test.mjs', last = 'test/b.test.mjs';
+  for (const file of [first, last]) await put(root, file, '');
+  const entered = Promise.withResolvers(), aborted = Promise.withResolvers(), released = Promise.withResolvers();
+  t.signal.addEventListener('abort', () => { entered.resolve(); aborted.resolve(); released.resolve(); }, { once: true });
+  let closed = false;
+  const running = runChecks([{ id: 'files', config: { root, inputs: [], coverage: false, testInputs: async id => {
+    if (id === last) { await entered.promise; throw new Error('late scan failure'); }
+    return [];
+  }, setup: ({ signal }) => ({ execute: async () => {
+    signal.addEventListener('abort', aborted.resolve, { once: true });
+    entered.resolve();
+    await released.promise;
+    assert.equal(closed, false);
+    return 0;
+  }, close() { closed = true; } }) } }], { ...options, ...fileReadyOptions, signal: t.signal });
+  const failure = assert.rejects(running, /late scan failure/);
+  await aborted.promise;
+  assert.equal(closed, false);
+  released.resolve();
+  await failure;
+  assert.equal(closed, true);
+});
+
+test('file-ready dispatch ranks the remaining backlog and long files within the current memory budget', { timeout: 5000 }, async t => {
+  const admission = new Admission({ memoryMiBPerWorker: 128, reserveMemoryMiB: 1024 }, 2, {
+    workers: 2, host: { cpus: 8, memoryMiB: 1664 }, sample: () => ({ availableMemoryMiB: 1664 }),
+  });
+  t.after(() => admission.close());
+  await admission.acquire({ memoryMiB: 512 });
+  await admission.acquire();
+  const suites = ['blocked', 'cold-a', 'cold-b', 'single', 'batch'];
+  const queue = createFileQueue(suites.map(id => ({ id, jobs: [] })), admission, t.signal, { readyFirst: true, prioritizeSuites: true });
+  t.after(() => queue.close());
+  const ran = [];
+  const offer = (suite, fileIndex, priority, memoryMiB = 128) => queue.offer(suite,
+    Object.assign(() => ran.push(`${suite}/${fileIndex}`), { fileIndex, priority, memoryMiB }));
+  offer('blocked', 0, 100, 512);
+  offer('cold-b', 2, 0);
+  for (const suite of ['cold-a', 'cold-b']) for (const index of [1, 0]) offer(suite, index, 0);
+  offer('single', 0, 10);
+  for (const [index, seconds] of [6, 6, 7, 7, 8].entries()) offer('batch', index, seconds);
+  const blocked = queue.run('blocked');
+  const rest = Promise.all(suites.slice(1).map(id => queue.run(id)));
+  admission.release();
+  await rest;
+  admission.release({ memoryMiB: 512 });
+  await blocked;
+  // Two-worker backlog estimate falls from 17 to 13 to 9.5 seconds.
+  // The individual 10-second file becomes critical at that third dispatch.
+  assert.deepEqual(ran, ['batch/4', 'batch/2', 'single/0', 'batch/3', 'batch/0', 'batch/1',
+    'cold-b/0', 'cold-a/0', 'cold-b/1', 'cold-a/1', 'cold-b/2', 'blocked/0']);
+  assert.equal(admission.inspect().reservedMemoryMiB, 0);
+});
+
+test('file-ready scan-only reports misses without setting up or executing a fixture', async t => {
+  const root = await temporary(t);
+  for (const file of ['a', 'b']) await put(root, `test/${file}.test.mjs`, '');
+  const previous = process.env.PROJECT_CHECKS_SCAN_ONLY;
+  process.env.PROJECT_CHECKS_SCAN_ONLY = '1';
+  try {
+    const result = await runChecks([{ id: 'files', config: { root, inputs: [], coverage: false,
+      setup: () => assert.fail('scan-only started a fixture'),
+    } }], { ...options, ...fileReadyOptions });
+    assert.deepEqual(result, { exitCode: 0, scanOnly: true, total: 2, cached: 0 });
+  } finally {
+    if (previous === undefined) delete process.env.PROJECT_CHECKS_SCAN_ONLY;
+    else process.env.PROJECT_CHECKS_SCAN_ONLY = previous;
+  }
 });

@@ -58,10 +58,20 @@ export function resourceSampler({ read = cpuTimes } = {}) {
   };
 }
 
+// Back-to-back startup reads can precede the first usable CPU counter interval.
+function startupSample(reading, budget) {
+  const { busyCpus, pressure, memoryPressure, ioPressure, availableMemoryMiB, cpuObservedSeconds } = reading;
+  if (!(cpuObservedSeconds >= 0.1) || ![busyCpus, pressure, memoryPressure, ioPressure, availableMemoryMiB]
+    .every(value => Number.isFinite(value) && value >= 0)) return undefined;
+  return busyCpus < budget && pressure < 0.20 && memoryPressure <= 0.05 && ioPressure <= 0.05;
+}
+
 // One run-local CPU weight. RAM reservations stay conservative; sampled free RAM
 // cannot establish smaller per-worker peaks or guarantee protection from spikes.
 export class Admission {
-  constructor(policy, units, { host = detectResources(), sample = resourceSampler(), signal, workers } = {}) {
+  constructor(policy, units, { host = detectResources(), sample = resourceSampler(), signal, workers, adaptiveStartup = false } = {}) {
+    if (typeof adaptiveStartup !== 'boolean') throw new TypeError('adaptiveStartup must be a boolean');
+    this.adaptiveStartup = adaptiveStartup;
     this.policy = policy;
     this.sample = sample;
     this.reading = sample();
@@ -75,7 +85,11 @@ export class Admission {
     this.capacity = Math.max(1, Math.min(units, this.host.cpus * 4, Math.floor(this.selected.memoryBudgetMiB / this.memory), policy.maxWorkers ?? Infinity));
     this.fixedWorkers = workers === undefined ? undefined : Math.min(this.capacity, integer(workers, 'workers'));
     if (this.fixedWorkers !== undefined) this.capacity = this.fixedWorkers;
-    const initial = this.fixedWorkers ?? Math.max(1, Math.min(this.capacity, Math.floor(this.host.cpus * 3 / 4),
+    const healthyStartup = adaptiveStartup && startupSample(this.reading, this.selected.cpuBudget);
+    this.awaitingStartupSample = healthyStartup === undefined && this.fixedWorkers === undefined;
+    const defaultStartup = this.host.cpus * 3 / 4;
+    const startupCpus = adaptiveStartup ? Math.min(this.selected.cpuBudget, healthyStartup ? Infinity : defaultStartup) : defaultStartup;
+    const initial = this.fixedWorkers ?? Math.max(1, Math.min(this.capacity, Math.floor(startupCpus),
       Number.isFinite(available) ? Math.floor((available - this.reserve) / this.memory) : Infinity));
     this.weight = this.selected.cpuBudget / (initial + 1e-6);
     this.active = 0;
@@ -126,12 +140,17 @@ export class Admission {
       if (busyCpus >= budget) this.cpuBackoff = true;
       else if (busyCpus < budget * 85 / 90) this.cpuBackoff = false;
       const cpuPressure = pressure >= 0.20;
-      const spare = this.active >= this.limit && !this.cpuBackoff && busyCpus < budget && !cpuPressure && !(memoryPressure > 0.05) && memoryFits;
+      const healthy = this.adaptiveStartup && startupSample(this.reading, budget);
+      const spare = (!this.adaptiveStartup || healthy) && this.active >= this.limit && !this.cpuBackoff && busyCpus < budget && !cpuPressure && !(memoryPressure > 0.05) && memoryFits;
       const pressured = !memoryFits || memoryPressure > 0.05;
       this.spare = spare ? this.spare + 1 : 0;
       this.pressured = pressured ? this.pressured + 1 : 0;
       let next = this.limit;
-      if (this.spare >= 3 && next < this.capacity) next++;
+      // On the first measured sample a saturated conservative start can add one
+      // slot toward the startup budget. Later growth needs sustained headroom.
+      const promoteStartup = this.awaitingStartupSample && healthy && next < Math.floor(budget);
+      if (healthy !== undefined) this.awaitingStartupSample = false;
+      if ((promoteStartup && spare || this.spare >= (this.adaptiveStartup ? 2 : 3)) && next < this.capacity) next++;
       else if ((this.cpuBackoff || cpuPressure || this.pressured >= 3) && this.active <= next && next > 1) next--;
       if (next !== this.limit) {
         this.weight = budget / (next + 1e-6);

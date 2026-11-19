@@ -13,6 +13,8 @@ import { createProgress } from './progress.mjs';
 import { scanCacheJobs, scanConcurrency as defaultScanConcurrency } from './cache.mjs';
 import defaultConfig from '../project-checks.config.json' with { type: 'json' };
 
+export const fileReadyOptions = Object.freeze({ schedule: 'file-ready', adaptiveStartup: true });
+
 // Definitions describe ownership and ordering. Every command, fixture attempt,
 // retry and coverage gate uses the same invocation-owned admission pool.
 export async function runChecks(definitions, options = {}) {
@@ -26,9 +28,9 @@ export async function runChecksWithReceipt(definitions, options = {}, previous =
 }
 
 async function run(definitions, options, previous) {
-  keys(options, ['resources', 'workers', 'scanConcurrency', 'inputConcurrency', 'verificationConcurrency', 'signal', 'logger', 'progress', 'diagnostics', 'failureExclusions', 'schedule'], 'check options');
-  if (options.schedule !== undefined && !['preflight', 'ready'].includes(options.schedule)) throw new Error('schedule must be preflight or ready');
-  const readySchedule = options.schedule === 'ready' && process.env.PROJECT_CHECKS_SCAN_ONLY !== '1';
+  keys(options, ['resources', 'workers', 'scanConcurrency', 'inputConcurrency', 'verificationConcurrency', 'signal', 'logger', 'progress', 'diagnostics', 'failureExclusions', 'schedule', 'adaptiveStartup'], 'check options');
+  if (options.schedule !== undefined && !['preflight', 'ready', 'file-ready'].includes(options.schedule)) throw new Error('schedule must be preflight, ready or file-ready');
+  const readySchedule = ['ready', 'file-ready'].includes(options.schedule) && process.env.PROJECT_CHECKS_SCAN_ONLY !== '1';
   if (options.failureExclusions !== undefined) defineConfig({ failureExclusions: options.failureExclusions });
   if (options.diagnostics !== undefined) defineConfig({ diagnostics: options.diagnostics });
   if (options.scanConcurrency !== undefined) integer(options.scanConcurrency, 'scanConcurrency');
@@ -77,12 +79,13 @@ async function run(definitions, options, previous) {
     const diagnostics = options.diagnostics;
     const progress = options.progress ?? diagnostics?.progress ?? createProgress({ logger, suites: definitions.filter(definition => definition.config !== undefined).map(definition => definition.id) });
     let exitCode = 2;
-    const admission = new Admission(options.resources ?? {}, Number.MAX_SAFE_INTEGER, { signal, workers: options.workers });
+    const admission = new Admission(options.resources ?? {}, Number.MAX_SAFE_INTEGER, { signal, workers: options.workers, adaptiveStartup: options.adaptiveStartup });
     diagnostics?.observeAdmission?.(admission);
     let snapshotContext;
     const pending = new Map(), completed = new Map(), launched = new Set(), suites = new Map();
     const retained = [], suiteContexts = [];
     const blocked = new Error('Check prerequisite failed');
+    const streamFiles = readySchedule && options.schedule === 'file-ready';
     let executing = false, scanning = false, fileQueue;
     const scanned = Promise.withResolvers();
     scanned.promise.catch(() => {});
@@ -167,6 +170,19 @@ async function run(definitions, options, previous) {
         suiteContexts.push(context);
         context.beginScanGeneration();
         return await runSuite(id, config, context, {
+          stream: streamFiles ? {
+            validationContext() {
+              // Early post-command checks must not read the memoized initial scan.
+              const fresh = context.fork();
+              suiteContexts.push(fresh);
+              return fresh;
+            },
+            offer: job => fileQueue.offer(id, job, error => { if (!prepared) controller.abort(error); }),
+            stop: async error => {
+              if (!prepared) controller.abort(error);
+              await fileQueue.skip(id, error);
+            },
+          } : undefined,
           queueScan: async (jobs, concurrency) => {
             await scanCacheJobs(guardedScanJobs(jobs), options.resources, options.scanConcurrency ?? concurrency,
               { logger: options.progress === false ? null : logger, suite: id, snapshotContext: context });
@@ -328,7 +344,7 @@ async function run(definitions, options, previous) {
       if (readySchedule) {
         snapshotContext = createSnapshotContext({ signal, inputConcurrency: options.inputConcurrency ?? options.scanConcurrency, resources: options.resources });
         fileQueue = createFileQueue(definitions.filter(item => item.config !== undefined).map(({ id }) => ({ id, jobs: [] })),
-          admission, signal, { verificationConcurrency, readyFirst: true });
+          admission, signal, { verificationConcurrency, readyFirst: true, prioritizeSuites: streamFiles });
       } else {
         const preparation = await prepareGlobalQueue();
         if (preparation.scanOnly) return preparation;

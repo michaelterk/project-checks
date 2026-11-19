@@ -164,7 +164,7 @@ export interface EvidenceFiles {
 
 /** One invocation-owned pool; close only after every sharing suite has settled. */
 export class Admission {
-  constructor(policy: ResourcePolicy, units: number, options?: { host?: HostResources; signal?: AbortSignal; workers?: number });
+  constructor(policy: ResourcePolicy, units: number, options?: { host?: HostResources; signal?: AbortSignal; workers?: number; adaptiveStartup?: boolean });
   /** Maximum queued workers, bounded by explicit workers and resource caps. */
   readonly capacity: number;
   /** Current CPU-feedback limit; may fall below an explicit worker cap. */
@@ -309,10 +309,13 @@ export interface CheckDefinition {
 export function loadChecks(filename: string, options?: {
   target?: string | string[]; files?: string[]; filters?: string[]; cache?: boolean; prefix?: string; frameworkArgs?: string[];
 }): Promise<CheckDefinition[]>;
+export const fileReadyOptions: Readonly<{ schedule: 'file-ready'; adaptiveStartup: true }>;
 export function runChecks(definitions: CheckDefinition[], options?: {
   /** Preflight scans every suite before execution. Ready mode scans and executes each
-   * suite after its dependencies pass using shared invocation-level concurrency settings. */
-  schedule?: 'preflight' | 'ready';
+   * suite after its dependencies pass. File-ready also streams verified cache misses within a suite. */
+  schedule?: 'preflight' | 'ready' | 'file-ready';
+  /** Start at the CPU budget, grow after two consecutive spare samples. */
+  adaptiveStartup?: boolean;
   failureExclusions?: FailureExclusions;
   /** Caller-owned invocation observer; close it after runChecks settles. */
   diagnostics?: Diagnostics;

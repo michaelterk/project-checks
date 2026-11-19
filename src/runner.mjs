@@ -45,9 +45,10 @@ async function normalizeConfig(options) {
   return config;
 }
 
-function fileSnapshot(config) {
+function fileSnapshot(config, validationContext) {
   const context = config.snapshotContext ?? createSnapshotContext({ signal: config.signal, inputConcurrency: config.inputConcurrency ?? config.scanConcurrency ?? defaultScanConcurrency, resources: config.resources });
   const snapshot = createSnapshot(config, context);
+  const validation = validationContext ? createSnapshot(config, validationContext) : snapshot;
   let closed = false;
   const pending = new Set();
   const track = operation => {
@@ -59,7 +60,7 @@ function fileSnapshot(config) {
   };
   const unitSnapshot = batchValidationSnapshots(async () => {
     config.signal?.throwIfAborted();
-    const prepared = await snapshot.prepare();
+    const prepared = await validation.prepare();
     return async id => {
       if (!prepared.files.includes(id)) throw new Error('Current test-unit discovery changed before validation');
       await prepared.unit(id);
@@ -72,7 +73,7 @@ function fileSnapshot(config) {
       const prepared = await snapshot.prepare(inventory);
       return { ...prepared, unit: id => track(() => prepared.unit(id)) };
     }),
-    snapshot: () => track(snapshot),
+    snapshot: () => track(validation),
     close: async () => {
       closed = true;
       await Promise.allSettled(pending);
@@ -94,7 +95,7 @@ function snapshotDigest(snapshot) {
     Object.keys(snapshot.units).sort().map(id => [id, snapshot.units[id]])]));
 }
 
-async function runTestsWithSignal(options, { retained, normalPhase, cacheScan, queueScan, executeFiles, deferFinalVerification, receipt }) {
+async function runTestsWithSignal(options, { retained, normalPhase, cacheScan, queueScan, executeFiles, deferFinalVerification, receipt, stream }) {
   const config = await normalizeConfig(options);
   const { root } = config;
   if (config.coverage?.report) config.ignore = [...config.ignore, config.coverage.report, `${config.coverage.report}.*.tmp`];
@@ -164,8 +165,10 @@ async function runTestsWithSignal(options, { retained, normalPhase, cacheScan, q
       config.cache !== false && definition === false
       ? digest(JSON.stringify([config.root, config.suite, process.execPath, process.versions,
         Object.entries(env).sort(), units.map(unit => [unit.id, unit.command])])) : undefined;
+    const streamMisses = stream && files.length > 1 && config.cache !== false && !options.frameworkArgs?.length ? stream : undefined;
+    const freshContext = streamMisses?.validationContext();
     if (contract && deferFinalVerification && receipt.previous?.contract === contract && /^[a-f0-9]{64}$/.test(receipt.previous.inputs)) {
-      inputs = fileSnapshot(config);
+      inputs = fileSnapshot(config, freshContext);
       before = await inputs.snapshot();
     }
     if (before && snapshotDigest(before) === receipt.previous.inputs) {
@@ -189,16 +192,18 @@ async function runTestsWithSignal(options, { retained, normalPhase, cacheScan, q
     // Partial files can contribute coverage; filters never contribute complete evidence.
     if (definition !== false && !filters.length) {
       config.coverage = definition;
-      artifacts = await createCoverage(config, env);
+      artifacts = await createCoverage(config, env, freshContext);
       for (const unit of units) {
         unit.command = artifacts.command(unit.command);
         unit.identity = JSON.stringify([unit.command, artifacts.identity]);
       }
     }
     if (!cacheScan) fixture = await options.setup?.({ signal: config.signal });
-    const prepareExecution = cacheScan ? async () => {
+    let setup;
+    const prepareExecution = cacheScan ? () => setup ??= Promise.resolve().then(async () => {
+      config.signal.throwIfAborted();
       fixture = await options.setup?.({ signal: config.signal });
-    } : undefined;
+    }) : undefined;
     if (options.engine === 'playwright' && options.frameworkArgs?.length) {
       if (typeof template === 'function') throw new Error('Playwright actions require a command template');
       const action = { id: 'framework-action', memoryMiB: typeof config.memoryMiB === 'function' ? Math.max(...units.map(unit => unit.memoryMiB)) : config.memoryMiB, command: [...template.flatMap(argument => argument.includes('{file}')
@@ -218,7 +223,7 @@ async function runTestsWithSignal(options, { retained, normalPhase, cacheScan, q
     }
     const retryTimeouts = options.retryTimeouts ?? false;
     const retryTimeoutMs = options.retryTimeoutMs ?? 60000;
-    inputs ??= fileSnapshot(config);
+    inputs ??= fileSnapshot(config, freshContext);
     // Leaves publish their final verdict only after invocation-wide verification.
     const deferFinal = Boolean(retained && deferFinalVerification);
     if (!options.snapshotContext) context.beginScanGeneration();
@@ -285,13 +290,13 @@ async function runTestsWithSignal(options, { retained, normalPhase, cacheScan, q
         if (status === 0) hints.record(unit.id, (performance.now() - started) / 1000);
         return status;
       },
-    }, { queueScan, cacheScan, prepareExecution, executeFiles, artifactContext: context, initialSnapshot,
+    }, { queueScan, cacheScan, prepareExecution, executeFiles, stream: streamMisses, artifactContext: context, validationContext: freshContext, initialSnapshot,
       unitSnapshot: id => span('unit-input-validation', () => inputs.unitSnapshot(id), { file: id }),
       deferFinalVerification: deferFinal,
       afterScan: async () => {
         if (!options.snapshotContext) await context.finishScanGeneration();
         diagnostics?.event('file-estimates', { suite: config.suite, files: files.map(file => ({ file, seconds: hints.priority(file) })) });
-      }, orderFiles: (a, b) => hints.priority(b) - hints.priority(a) });
+      }, priority: hints.priority });
     diagnostics?.event('snapshot-final', { suite: config.suite, call: snapshotCalls, seconds: lastSnapshotSeconds });
     if (!result.inputsChanged && !deferFinal) await hints.save();
     const verify = async () => {

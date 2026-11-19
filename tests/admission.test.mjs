@@ -327,3 +327,61 @@ test('per-worker live headroom, cancellation and exclusive admission preserve re
   assert.equal(admission.inspect().reservedMemoryMiB, 0);
   for (const memoryMiB of [0, -1, 1.5, NaN]) await assert.rejects(admission.acquire({ memoryMiB }), /memoryMiB/);
 });
+
+test('opt-in startup uses the CPU budget and grows only after two spare samples within memory caps', async t => {
+  const reading = { busyCpus: 5, pressure: 0, memoryPressure: 0, ioPressure: 0, availableMemoryMiB: 8192, cpuObservedSeconds: 1 };
+  const create = (available, cpus = 8) => {
+    reading.availableMemoryMiB = available;
+    const admission = new Admission({ reserveMemoryMiB: 1024, memoryMiBPerWorker: 512 }, 32, {
+      host: { cpus, memoryMiB: 8192 }, sample: () => ({ ...reading }), adaptiveStartup: true,
+    });
+    t.after(() => admission.close());
+    return admission;
+  };
+  assert.equal(create(2560).limit, 3);
+  reading.pressure = 0.20;
+  assert.equal(create(8192).limit, 6);
+  reading.pressure = 0;
+  const admission = create(8192);
+  assert.equal(admission.limit, 7);
+  assert.equal(admission.selected.cpuBudget, 7.2);
+  for (let i = 0; i < 7; i++) await admission.acquire();
+  admission.tick();
+  assert.equal(admission.limit, 7);
+  admission.tick();
+  assert.equal(admission.limit, 8);
+  await admission.acquire();
+  reading.memoryPressure = 0.1;
+  for (let i = 0; i < 3; i++) admission.tick();
+  assert.equal(admission.limit, 7);
+  admission.release();
+  reading.memoryPressure = 0;
+  reading.busyCpus = 7.2;
+  admission.tick();
+  assert.equal(admission.limit, 6);
+  assert.equal(admission.active, 7);
+});
+
+test('opt-in admission waits for measured startup headroom and promotes only once on the first healthy sample', async t => {
+  const healthy = { busyCpus: 4, pressure: 0, memoryPressure: 0, ioPressure: 0, availableMemoryMiB: 8192, cpuObservedSeconds: 1 };
+  for (const [field, value] of [['busyCpus', NaN], ['pressure', undefined], ['memoryPressure', NaN],
+    ['ioPressure', undefined], ['availableMemoryMiB', NaN], ['cpuObservedSeconds', 0.001]]) {
+    const reading = { ...healthy, [field]: value };
+    const admission = new Admission({ reserveMemoryMiB: 1024 }, 10, {
+      adaptiveStartup: true, host: { cpus: 8, memoryMiB: 8192 }, sample: () => ({ ...reading }),
+    });
+    t.after(() => admission.close());
+    assert.equal(admission.limit, 6, field);
+    for (let i = 0; i < 6; i++) await admission.acquire();
+    for (let i = 0; i < 3; i++) admission.tick();
+    assert.equal(admission.limit, 6, field);
+    Object.assign(reading, healthy);
+    admission.tick();
+    assert.equal(admission.limit, 7, field);
+    await admission.acquire();
+    admission.tick();
+    assert.equal(admission.limit, 7, field);
+    admission.tick();
+    assert.equal(admission.limit, 8, field);
+  }
+});

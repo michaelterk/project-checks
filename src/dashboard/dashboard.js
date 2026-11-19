@@ -34,7 +34,7 @@ function renderFiles() {
   $('empty').hidden = files.length > 0;
   $('empty').textContent = query ? 'No matching test files.' : `No ${view} test files.`;
   $('list-note').textContent = view === 'queued'
-    ? 'Queue order follows the scheduler. Dependencies, worker limits and retries can change what starts next.'
+    ? 'Queued files are grouped by suite. Priorities and available workers determine what starts next.'
     : view === 'running' ? 'Validating files have finished executing and are checking their evidence.'
       : view === 'completed' ? 'Most recently completed first. Cached files reuse verified passing evidence.' : 'Failed and timed-out test files in this run.';
   for (const button of $('views').querySelectorAll('button')) {

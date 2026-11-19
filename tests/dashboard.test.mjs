@@ -149,7 +149,10 @@ test('loopback HTTP serves the packaged assets and requires origin and token for
   assert.equal(page.status, 200);
   assert.match(page.headers.get('content-security-policy'), /frame-ancestors 'none'/);
   assert.match(await page.text(), /Also exclude failed test files/);
-  for (const path of ['/dashboard.css', '/dashboard.js']) assert.equal((await get(path)).status, 200);
+  assert.equal((await get('/dashboard.css')).status, 200);
+  const script = await get('/dashboard.js');
+  assert.equal(script.status, 200);
+  assert.match(await script.text(), /Queued files are grouped by suite/);
   const data = await (await get('/api/runs')).json();
   assert.equal(data.runs[0].id, f.recorder.id);
   const path = `/api/runs/${f.recorder.id}/discard`;

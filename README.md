@@ -187,6 +187,19 @@ file that cannot fit the available memory. Invocation-level input and
 verification settings take precedence, with the package defaults when omitted.
 Scan-only still uses the shared preflight.
 
+With `{ schedule: 'file-ready' }`, a cacheable multi-file suite can start an
+individual miss as soon as its inputs, cache lookup, any restoration attempt
+and its one fixture setup finish. Both coverage and ordinary files use fresh
+post-command observations while sibling scans continue. Each admission favors
+the ready suite with the longest estimated backlog, using the greater of its
+longest queued file and its queued command-seconds divided by the current
+worker limit. Within that suite the longest file that fits RAM starts first.
+When no ready suite has a timing estimate, the largest ready backlog goes
+first. Tied suites take turns, and tied ready files follow discovery order.
+Uncached commands and framework actions retain their suite scan gate.
+`fileReadyOptions` exports this schedule together with `adaptiveStartup: true`
+for callers that support multiple package versions.
+
 `runChecksWithReceipt(definitions, options, previous)` returns an optional
 `receipt` after a complete passing run. A release coordinator can pass it to
 the next stage in the same checkout after independently binding the tested
@@ -636,6 +649,12 @@ remain historical aggregates.
 Admission targets at most `resources.cpuQuotaPercent` of detected host CPU capacity (default 90%), reserving roughly
 10% by default for other work even when `cpuPercent` is higher. Automatic runs start at three quarters
 of available CPU cores (rounded down, minimum one), clamped by live free RAM and hard caps.
+On `runChecks`, `adaptiveStartup: true` starts automatic command admission at
+the whole-worker CPU budget with healthy sampled headroom (seven with eight CPUs and the default 90% quota),
+subject to memory and capacity limits. If CPU or pressure readings are missing
+or the CPU observation spans less than 100 ms, it starts conservatively. A
+saturated runner can add one startup slot on its first measured healthy sample,
+up to the CPU budget. Further growth needs two consecutive healthy samples. The input scanner retains its own feedback.
 Explicit worker caps set the initial count and still respond to CPU feedback.
 They automatically adjust the effective `cpusPerWorker`. Three consecutive one-second
 samples below the CPU ceiling with spare RAM permit one additional worker. Reaching
@@ -663,7 +682,7 @@ Active commands finish normally. If admission stays blocked with no active
 worker for 30 seconds, the run fails rather than forcing
 one through. This is conservative admission, not protection against every memory
 spike. CPU feedback uses host usage and Linux pressure data where available;
-missing CPU measurements retain the conservative startup count. No process-tree profiling,
+missing CPU measurements retain the selected startup count. No process-tree profiling,
 calibration runs or saved tuning profiles are used. Each invocation learns anew.
 Cached passes bypass admission. A short summary reports peak fresh workers,
 sampled CPU, minimum available RAM and the final effective CPU weight.
@@ -710,8 +729,8 @@ project-checks dashboard
 The page updates every second with completed/total **test files**, host CPU use,
 active workers and their current limit, cache hits, elapsed time, and estimated
 time remaining. Its Running, Queued, Completed, and Failed lists include file
-names and suites. Queued files follow scheduler order; dependencies, adaptive
-admission, and retries can change what starts next. Builds and other commands
+names and suites. Queued files are grouped by suite. Priorities and available
+workers determine what starts next. Builds and other commands
 are shown separately. ETA uses source-bound duration hints when available, then
 observed durations; it stays unknown without enough evidence and excludes final
 validation overhead.
