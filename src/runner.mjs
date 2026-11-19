@@ -275,7 +275,7 @@ async function runTestsWithSignal(options, { retained, normalPhase, cacheScan, q
         const eligible = units.filter(unit => !result.excludedFiles?.includes(unit.id));
         if (eligible.length) {
           await admission.acquire({ signal: config.signal });
-          try { result.exitCode = await artifacts.aggregate(eligible); }
+          try { result.exitCode = await artifacts.aggregate(eligible, before); }
           finally { admission.release(); }
         }
         aggregated = true;

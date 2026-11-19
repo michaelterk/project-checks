@@ -5,7 +5,7 @@ import { pathToFileURL } from 'node:url';
 import { gzip } from 'node:zlib';
 import { promisify } from 'node:util';
 import { runCommand } from './command.mjs';
-import { keys } from './util.mjs';
+import { digest, keys } from './util.mjs';
 import { normalizeCoverageArtifact, validatePortablePythonArtifact, validatePortableV8Artifact, validateCoverageSources } from './coverage-paths.mjs';
 
 const compress = promisify(gzip);
@@ -30,6 +30,8 @@ export async function createCoverage(config, environment) {
   await mkdir(directory, { recursive: true });
   const staging = await mkdtemp(join(directory, '.run-'));
   const measured = join(staging, 'measurement.json');
+  const summaryPath = definition.report ? resolve(config.root, definition.report) : join(directory, 'latest.json');
+  let verifyPythonDomain = false;
   const outputs = new Map(), contributions = new Map(), sourceProofs = new Map();
   const prefix = pathToFileURL(`${config.root}${sep}`).href;
   const python = definition.python ?? 'python3';
@@ -41,6 +43,11 @@ export async function createCoverage(config, environment) {
     const status = await runCommand([python, helper, operation, source, destination, ...configArgs], commandOptions);
     if (status) throw new Error(`Invalid Python coverage contribution (${operation})`);
   }
+  async function verifyPythonContributions() {
+    for (const { path, hash } of contributions.values()) {
+      if (digest(await readFile(path)) !== hash) throw new Error('Staged Python coverage contribution changed');
+    }
+  }
   async function materialize(source, sources) {
     const destination = join(staging, randomUUID());
     const original = await readFile(source);
@@ -51,7 +58,7 @@ export async function createCoverage(config, environment) {
       try { await validatePortablePythonArtifact(destination, options); }
       catch (error) { await rm(destination, { force: true }).catch(() => {}); throw error; }
     }
-    return destination;
+    return { path: destination, hash: provider === 'python' ? digest(original) : undefined };
   }
   return {
     identity: JSON.stringify({ provider, python: provider === 'python' ? python : undefined, configFile: provider === 'python' ? configFile : undefined }),
@@ -110,15 +117,27 @@ export async function createCoverage(config, environment) {
         Object.defineProperty(sources, path, { value: hash, enumerable: true, configurable: true });
       }
       await validateCoverageSources({ root: config.root, sources, context: config.snapshotContext });
+      if (verifyPythonDomain) {
+        await verifyPythonContributions();
+        await pythonArtifact('verify', measured, join(staging, 'combined'));
+      }
     },
-    async aggregate(units) {
+    async aggregate(units, snapshot) {
       if (units.some(unit => !contributions.has(unit.id))) throw new Error('Every current file must supply a valid coverage contribution');
       const manifest = join(staging, 'manifest.json');
-      await writeFile(manifest, JSON.stringify(units.map(unit => contributions.get(unit.id))));
+      await writeFile(manifest, JSON.stringify(units.map(unit => contributions.get(unit.id).path)));
       const report = measured;
       if (report) await mkdir(resolve(report, '..'), { recursive: true });
-      if (provider === 'python') return runCommand([python, helper, 'aggregate', manifest, join(staging, 'combined'), ...configArgs,
-        '--root', config.root, '--minimum', JSON.stringify(minimum), ...(report ? ['--report', report] : [])], commandOptions);
+      if (provider === 'python') {
+        const basis = config.cache !== false && !definition.report && configFile && snapshot && digest(JSON.stringify([definition, snapshot.common,
+          units.map(({ id }) => [id, snapshot.units[id], contributions.get(id).hash, sourceProofs.get(id)])]));
+        if (basis) await verifyPythonContributions();
+        const status = await runCommand([python, helper, 'aggregate', manifest, join(staging, 'combined'), ...configArgs,
+          '--root', config.root, '--minimum', JSON.stringify(minimum), '--report', report,
+          ...(basis ? ['--basis', basis, '--previous', summaryPath] : [])], commandOptions);
+        if (!status && basis) verifyPythonDomain = Boolean(JSON.parse(await readFile(measured, 'utf8')).reuse);
+        return status;
+      }
       const summaryFile = join(staging, 'summary.json');
       const status = await runCommand([process.execPath, '--experimental-test-coverage',
         '--test-reporter=spec', `--test-reporter=${join(import.meta.dirname, 'coverage-reporter.mjs')}`,
@@ -147,7 +166,7 @@ export async function createCoverage(config, environment) {
     },
     async saveSummary(snapshot) {
       const measurement = JSON.parse(await readFile(measured, 'utf8'));
-      const report = definition.report ? resolve(config.root, definition.report) : join(directory, 'latest.json');
+      const report = summaryPath;
       await mkdir(resolve(report, '..'), { recursive: true });
       const temporary = `${report}.${randomUUID()}.tmp`;
       await writeFile(temporary, JSON.stringify({ ...measurement, definition, snapshot, measuredAt: new Date().toISOString() }));

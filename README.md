@@ -243,15 +243,22 @@ Set `coverage: false` for syntax, browser journeys or other commands that have
 no coverage gate.
 
 The package retains raw contributions with passing-file evidence, validates
-them on reuse, and aggregates every current suite file before enforcing its
-minimums. Fractional minimums are enforced. Partial file selections can retain
+them on reuse, and enforces minimums against the complete set of current
+contributions. Fractional minimums are enforced. Partial file selections can retain
 contributions but do not pass the full-suite coverage gate; filtered runs do not
 contribute coverage. Changing only minimums or V8 domain rules rebuilds the gate
 from compatible contributions.
 Cached coverage stores project-relative source paths and resolves them against
 the current root when reporting. Source content bindings belong to artifact
 metadata, separate from validity keys; renamed reporting paths require a new
-contribution. Moving an unchanged checkout preserves reusable coverage.
+contribution. Moving an unchanged checkout preserves reusable coverage artifacts.
+
+Python suites with an explicit local source domain can reuse the previous
+aggregate in the default suite cache. The runner checks the same contributions,
+source contents and inventory, checkout path, interpreter, provider,
+configuration, process environment and thresholds. It verifies the source domain
+again before certifying the run. Custom report destinations, plugins, path aliases
+and unsupported source domains use fresh native aggregation.
 
 `reportCoverage(config)` returns saved measurements, current minimums and
 staleness without running tests. Optional `coverage.report` selects the saved
