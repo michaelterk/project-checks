@@ -1,11 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
-import { join, sep, resolve } from 'node:path';
+import { join, relative, sep, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { gzip } from 'node:zlib';
 import { promisify } from 'node:util';
 import { runCommand } from './command.mjs';
-import { digest, keys } from './util.mjs';
+import { digest, keys, slash } from './util.mjs';
 import { normalizeCoverageArtifact, validatePortablePythonArtifact, validatePortableV8Artifact, validateCoverageSources } from './coverage-paths.mjs';
 
 const compress = promisify(gzip);
@@ -31,7 +31,7 @@ export async function createCoverage(config, environment) {
   const staging = await mkdtemp(join(directory, '.run-'));
   const measured = join(staging, 'measurement.json');
   const summaryPath = definition.report ? resolve(config.root, definition.report) : join(directory, 'latest.json');
-  let verifyPythonDomain = false;
+  let verifyPythonDomain = false, v8Provider;
   const outputs = new Map(), contributions = new Map(), sourceProofs = new Map();
   const prefix = pathToFileURL(`${config.root}${sep}`).href;
   const python = definition.python ?? 'python3';
@@ -43,10 +43,18 @@ export async function createCoverage(config, environment) {
     const status = await runCommand([python, helper, operation, source, destination, ...configArgs], commandOptions);
     if (status) throw new Error(`Invalid Python coverage contribution (${operation})`);
   }
-  async function verifyPythonContributions() {
+  async function verifyContributions() {
     for (const { path, hash } of contributions.values()) {
-      if (digest(await readFile(path)) !== hash) throw new Error('Staged Python coverage contribution changed');
+      if (digest(await readFile(path)) !== hash) throw new Error(`Staged ${provider === 'python' ? 'Python' : 'V8'} coverage contribution changed`);
     }
+  }
+  async function v8ProviderIdentity() {
+    const paths = [process.execPath, ...['coverage-merge.mjs', 'coverage-reporter.mjs',
+      'coverage-paths.mjs', 'util.mjs', 'scan-profile.mjs', 'cpu-limits.mjs'].map(file => join(import.meta.dirname, file))];
+    const hashes = await Promise.all(paths.map(file => config.snapshotContext?.sourceHash
+      ? config.snapshotContext.sourceHash(file) : readFile(file).then(digest)));
+    if (hashes.some(hash => !hash)) throw new Error('Missing V8 coverage provider input');
+    return digest(JSON.stringify([paths, hashes, process.versions, process.platform, process.arch]));
   }
   async function materialize(source, sources) {
     const destination = join(staging, randomUUID());
@@ -58,7 +66,7 @@ export async function createCoverage(config, environment) {
       try { await validatePortablePythonArtifact(destination, options); }
       catch (error) { await rm(destination, { force: true }).catch(() => {}); throw error; }
     }
-    return { path: destination, hash: provider === 'python' ? digest(original) : undefined };
+    return { path: destination, hash: digest(original) };
   }
   return {
     identity: JSON.stringify({ provider, python: provider === 'python' ? python : undefined, configFile: provider === 'python' ? configFile : undefined }),
@@ -117,8 +125,12 @@ export async function createCoverage(config, environment) {
         Object.defineProperty(sources, path, { value: hash, enumerable: true, configurable: true });
       }
       await validateCoverageSources({ root: config.root, sources, context: config.snapshotContext });
+      if (v8Provider) {
+        await verifyContributions();
+        if (await v8ProviderIdentity() !== v8Provider) throw new Error('V8 coverage provider changed');
+      }
       if (verifyPythonDomain) {
-        await verifyPythonContributions();
+        await verifyContributions();
         await pythonArtifact('verify', measured, join(staging, 'combined'));
       }
     },
@@ -131,32 +143,59 @@ export async function createCoverage(config, environment) {
       if (provider === 'python') {
         const basis = config.cache !== false && !definition.report && configFile && snapshot && digest(JSON.stringify([definition, snapshot.common,
           units.map(({ id }) => [id, snapshot.units[id], contributions.get(id).hash, sourceProofs.get(id)])]));
-        if (basis) await verifyPythonContributions();
+        if (basis) await verifyContributions();
         const status = await runCommand([python, helper, 'aggregate', manifest, join(staging, 'combined'), ...configArgs,
           '--root', config.root, '--minimum', JSON.stringify(minimum), '--report', report,
           ...(basis ? ['--basis', basis, '--previous', summaryPath] : [])], commandOptions);
         if (!status && basis) verifyPythonDomain = Boolean(JSON.parse(await readFile(measured, 'utf8')).reuse);
         return status;
       }
-      const summaryFile = join(staging, 'summary.json');
-      const status = await runCommand([process.execPath, '--experimental-test-coverage',
-        '--test-reporter=spec', `--test-reporter=${join(import.meta.dirname, 'coverage-reporter.mjs')}`,
-        '--test-reporter-destination=stdout', '--test-reporter-destination=stdout',
-        ...(definition.include ?? []).map(value => `--test-coverage-include=${value}`),
-        ...(definition.exclude ?? []).map(value => `--test-coverage-exclude=${value}`),
-        ...Object.entries(minimum).map(([name, value]) => `--test-coverage-${name}=${Math.floor(value)}`),
-        '--test', join(import.meta.dirname, 'coverage-merge.mjs')], {
-        ...commandOptions, env: { ...environment, PROJECT_CHECKS_COVERAGE_MANIFEST: manifest, PROJECT_CHECKS_COVERAGE_REPORT: summaryFile, PROJECT_CHECKS_COVERAGE_ROOT: config.root },
-      });
-      if (status) return status;
-      const summary = JSON.parse(await readFile(summaryFile, 'utf8'));
-      if (!summary.files?.length) throw new Error('No source files in coverage domain');
-      const actual = Object.fromEntries(['Line', 'Branch', 'Function'].map((metric, index) => [Object.keys(defaultMinimum)[index], summary.totals[`covered${metric}Percent`]]));
-      if (Object.values(actual).some(value => !Number.isFinite(value))) throw new Error('Invalid coverage summary');
-      if (report) {
-        await writeFile(`${report}.tmp`, JSON.stringify({ actual, minimum }));
-        await rename(`${report}.tmp`, report);
+      // Node preloads and custom providers may contribute code outside the raw artifacts.
+      // Fall back to the native aggregate whenever its input domain is open.
+      let basis, actual, reuse;
+      if (config.cache !== false && !definition.report && snapshot && definition.include?.length
+          && !environment.NODE_OPTIONS && !environment.NODE_V8_COVERAGE
+          && !process.config.variables.node_shared
+          && !Object.keys(environment).some(key => /^(?:LD_|DYLD_)/.test(key))) {
+        await verifyContributions();
+        v8Provider = await v8ProviderIdentity();
+        const nodeEnv = Object.entries(environment).filter(([key]) => /^(NODE_|LD_|DYLD_)/.test(key)).sort();
+        basis = digest(JSON.stringify(['v8-summary-v1', config.root, v8Provider, nodeEnv,
+          definition.include, definition.exclude, snapshot.common,
+          units.map(({ id }) => [id, snapshot.units[id], contributions.get(id).hash, sourceProofs.get(id)])]));
+        let saved;
+        try { saved = JSON.parse(await readFile(summaryPath, 'utf8')); }
+        catch (error) { if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error; }
+        if (saved?.reuse && Object.keys(defaultMinimum).every(key => Number.isFinite(saved.actual?.[key])
+            && saved.actual[key] >= 0 && saved.actual[key] <= 100)
+            && saved.reuse === digest(JSON.stringify([basis, saved.actual]))) {
+          ({ actual, reuse } = saved);
+          (config.logger === false ? null : config.logger ?? console)?.log(`Verified V8 coverage: ${Object.entries(actual).map(([key, value]) => `${key} ${value}%`).join(', ')}`);
+        }
       }
+      if (!actual) {
+        const summaryFile = join(staging, 'summary.json');
+        const status = await runCommand([process.execPath, '--experimental-test-coverage',
+          '--test-reporter=spec', `--test-reporter=${join(import.meta.dirname, 'coverage-reporter.mjs')}`,
+          '--test-reporter-destination=stdout', '--test-reporter-destination=stdout',
+          ...(definition.include ?? []).map(value => `--test-coverage-include=${value}`),
+          ...(definition.exclude ?? []).map(value => `--test-coverage-exclude=${value}`),
+          ...Object.entries(minimum).map(([name, value]) => `--test-coverage-${name}=${Math.floor(value)}`),
+          '--test', join(import.meta.dirname, 'coverage-merge.mjs')], {
+          ...commandOptions, env: { ...environment, PROJECT_CHECKS_COVERAGE_MANIFEST: manifest, PROJECT_CHECKS_COVERAGE_REPORT: summaryFile, PROJECT_CHECKS_COVERAGE_ROOT: config.root },
+        });
+        if (status) return status;
+        const summary = JSON.parse(await readFile(summaryFile, 'utf8'));
+        if (!summary.files?.length) throw new Error('No source files in coverage domain');
+        actual = Object.fromEntries(['Line', 'Branch', 'Function'].map((metric, index) => [Object.keys(defaultMinimum)[index], summary.totals[`covered${metric}Percent`]]));
+        if (Object.values(actual).some(value => !Number.isFinite(value))) throw new Error('Invalid coverage summary');
+        if (basis) {
+          const covered = new Set([...sourceProofs.values()].flatMap(proof => Object.keys(proof)));
+          if (summary.files.every(file => covered.has(slash(relative(config.root, file.path)))))
+            reuse = digest(JSON.stringify([basis, actual]));
+        }
+      }
+      await writeFile(report, JSON.stringify({ actual, minimum, ...(reuse ? { reuse } : {}) }));
       const failures = Object.entries(minimum).filter(([metric, value]) => actual[metric] < value);
       if (failures.length) {
         (config.logger === false ? null : config.logger ?? console)?.error(`Coverage below minimum: ${failures.map(([metric, value]) => `${metric} ${actual[metric]}% < ${value}%`).join(', ')}`);

@@ -11,7 +11,7 @@ import { workerLimit } from './util.mjs';
 import { verificationConcurrency as defaultVerificationConcurrency } from './verification-pool.mjs';
 import { commandEnvironment, runCommand } from './command.mjs';
 import { createSnapshot, createSnapshotContext, discoverTests, selectTests } from './inputs.mjs';
-import { inside, integer } from './util.mjs';
+import { digest, inside, integer } from './util.mjs';
 import { createDurationHints } from './durations.mjs';
 import { withProgress } from './progress.mjs';
 import { excludedTests } from './test-exclusions.mjs';
@@ -89,7 +89,12 @@ export async function runTests(options = {}, lifecycle = {}) {
   return withProgress(options, progress => withProcessSignal(options.signal, signal => runTestsWithSignal({ ...options, progress, signal }, lifecycle)));
 }
 
-async function runTestsWithSignal(options, { retained, normalPhase, cacheScan, queueScan, executeFiles, deferFinalVerification }) {
+function snapshotDigest(snapshot) {
+  return digest(JSON.stringify([snapshot.common,
+    Object.keys(snapshot.units).sort().map(id => [id, snapshot.units[id]])]));
+}
+
+async function runTestsWithSignal(options, { retained, normalPhase, cacheScan, queueScan, executeFiles, deferFinalVerification, receipt }) {
   const config = await normalizeConfig(options);
   const { root } = config;
   if (config.coverage?.report) config.ignore = [...config.ignore, config.coverage.report, `${config.coverage.report}.*.tmp`];
@@ -153,6 +158,34 @@ async function runTestsWithSignal(options, { retained, normalPhase, cacheScan, q
       for (const unit of units) unit.command.splice(unit.command.indexOf('--test') + 1, 0, ...filters);
     }
     const definition = config.coverage ?? (nodeTest ? {} : pythonTest ? { provider: 'python', python: units[0].command[0] } : false);
+    // Commands, partial selections, coverage and prerequisites keep their normal gates.
+    const contract = receipt && !options.failureExclusions &&
+      !options.files && !excluded.size && !filters.length && !options.frameworkArgs?.length &&
+      config.cache !== false && definition === false
+      ? digest(JSON.stringify([config.root, config.suite, process.execPath, process.versions,
+        Object.entries(env).sort(), units.map(unit => [unit.id, unit.command])])) : undefined;
+    if (contract && deferFinalVerification && receipt.previous?.contract === contract && /^[a-f0-9]{64}$/.test(receipt.previous.inputs)) {
+      inputs = fileSnapshot(config);
+      before = await inputs.snapshot();
+    }
+    if (before && snapshotDigest(before) === receipt.previous.inputs) {
+      await queueScan([], config.scanConcurrency ?? defaultScanConcurrency);
+      await cacheScan({ total, cached: total, jobs: [],
+        verificationConcurrency: workerLimit(config.verificationConcurrency ?? defaultVerificationConcurrency, 'verificationConcurrency') });
+      fixture = await options.setup?.({ signal: config.signal });
+      await executeFiles();
+      retained.push({ close, receipt: receipt.previous, verify: async () => {
+        if (!isDeepStrictEqual(before, await inputs.snapshot())) throw new Error('Check inputs changed during invocation');
+        for (const id of files) {
+          diagnostics?.file(config.suite, id, 'cache-hit');
+          config.progress && config.progress.file(config.suite, id, 'cache-hit');
+        }
+        logger?.log(`Reused verified release checks: ${config.suite} (${total} files)`);
+      } });
+      deferred = true;
+      return { exitCode: 0, total, passed: 0, failed: 0, cached: total, workers: 0, inputsChanged: false,
+        results: files.map(id => ({ id, exitCode: 0, cached: true })) };
+    }
     // Partial files can contribute coverage; filters never contribute complete evidence.
     if (definition !== false && !filters.length) {
       config.coverage = definition;
@@ -185,9 +218,9 @@ async function runTestsWithSignal(options, { retained, normalPhase, cacheScan, q
     }
     const retryTimeouts = options.retryTimeouts ?? false;
     const retryTimeoutMs = options.retryTimeoutMs ?? 60000;
-    inputs = fileSnapshot(config);
+    inputs ??= fileSnapshot(config);
     // Leaves publish their final verdict only after invocation-wide verification.
-    const deferFinal = Boolean(retained && deferFinalVerification && !artifacts);
+    const deferFinal = Boolean(retained && deferFinalVerification);
     if (!options.snapshotContext) context.beginScanGeneration();
     const initialSnapshot = await inputs.prepare(inventory);
     before = initialSnapshot.value;
@@ -262,10 +295,10 @@ async function runTestsWithSignal(options, { retained, normalPhase, cacheScan, q
     diagnostics?.event('snapshot-final', { suite: config.suite, call: snapshotCalls, seconds: lastSnapshotSeconds });
     if (!result.inputsChanged && !deferFinal) await hints.save();
     const verify = async () => {
-      if (!isDeepStrictEqual(before, await inputs.snapshot())) throw new Error('Check inputs changed during invocation');
-      await artifacts?.verifySources();
+      if (!isDeepStrictEqual(before, await span('suite-final-inputs', inputs.snapshot))) throw new Error('Check inputs changed during invocation');
+      if (artifacts) await span('coverage-source-verification', artifacts.verifySources);
     };
-    let aggregated = false, reconciled = false;
+    let aggregated = false, reconciled = false, saveCoverage = false;
     const reconcile = async () => {
       const changed = await excludeFailures(result, options.failureExclusions, config.suite, config.progress);
       if (reconciled && !changed) return result;
@@ -275,14 +308,20 @@ async function runTestsWithSignal(options, { retained, normalPhase, cacheScan, q
         const eligible = units.filter(unit => !result.excludedFiles?.includes(unit.id));
         if (eligible.length) {
           await admission.acquire({ signal: config.signal });
-          try { result.exitCode = await artifacts.aggregate(eligible, before); }
+          try {
+            result.exitCode = await span('coverage-aggregate', () => artifacts.aggregate(eligible, before));
+            // The published snapshot can wait for other leaves. Source/domain
+            // verification still brackets the aggregate and final acceptance.
+            if (!result.exitCode && deferFinal) await span('coverage-source-verification', artifacts.verifySources);
+          }
           finally { admission.release(); }
         }
         aggregated = true;
       }
+      saveCoverage = !result.exitCode && artifacts && complete && !result.excluded;
       if (!result.exitCode && !deferFinal) {
         await verify();
-        if (artifacts && complete && !result.excluded) await artifacts.saveSummary(before);
+        if (saveCoverage) await artifacts.saveSummary(before);
       }
       return result;
     };
@@ -290,7 +329,11 @@ async function runTestsWithSignal(options, { retained, normalPhase, cacheScan, q
     await reconcile();
     if (retained) {
       retained.push({ verify, close, reconcile: options.failureExclusions ? reconcile : undefined,
-        complete: deferFinal && !result.inputsChanged ? () => hints.save() : undefined });
+        ...(contract ? { receipt: { contract, inputs: snapshotDigest(before) } } : {}),
+        complete: deferFinal && !result.inputsChanged ? async invocationPassed => {
+          if (saveCoverage) await artifacts.saveSummary(before);
+          if (invocationPassed) await hints.save();
+        } : undefined });
       deferred = true;
     }
     return result;

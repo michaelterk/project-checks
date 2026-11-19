@@ -141,7 +141,7 @@ export class Admission {
     this.wake();
   }
 
-  async acquire({ exclusive = false, signal, memoryMiB = this.memory } = {}) {
+  async acquire({ exclusive = false, signal, memoryMiB = this.memory, selectFile } = {}) {
     integer(memoryMiB, 'memoryMiB');
     this.timer ??= setInterval(() => this.tick(), 1000);
     const abort = () => this.wake();
@@ -152,8 +152,14 @@ export class Admission {
       signal?.throwIfAborted();
       if (this.closed) throw new Error('Resource admission stopped');
       const available = this.reading.availableMemoryMiB;
-      const fits = this.reservedMemoryMiB + memoryMiB <= this.selected.memoryBudgetMiB
-        && (!Number.isFinite(available) || available >= this.reserve + memoryMiB);
+      const fitsMemory = memory => this.reservedMemoryMiB + memory <= this.selected.memoryBudgetMiB
+        && (!Number.isFinite(available) || available >= this.reserve + memory);
+      // Reconsider all currently ready files on every wake, reserving exactly
+      // the estimate of the selected file in the same synchronous turn.
+      const file = selectFile?.(fitsMemory);
+      if (selectFile && !file) return;
+      if (file) memoryMiB = integer(file.run.memoryMiB ?? this.memory, 'memoryMiB');
+      const fits = fitsMemory(memoryMiB);
       const pressured = this.reading.memoryPressure > 0.05;
       const room = exclusive ? this.active === 0 && this.normalProducers === 0 : !this.exclusive && (this.pendingExclusive === 0 || this.normalProducers > 0) && this.active < this.limit;
       if (room && fits && !pressured) {
@@ -162,7 +168,7 @@ export class Admission {
         this.exclusive = exclusive;
         this.peak = Math.max(this.peak, this.active);
         this.blockedSince = undefined;
-        return;
+        return file;
       }
       if (!this.active && (!fits || pressured)) {
         this.blockedSince ??= performance.now();

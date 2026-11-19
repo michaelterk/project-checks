@@ -2,20 +2,36 @@ import { createPermits } from './permits.mjs';
 import { createVerificationPool } from './verification-pool.mjs';
 
 // Command admission and terminal file completion have separate lifetimes.
-export function createFileQueue(plans, admission, signal, { workers = 1, verificationConcurrency } = {}) {
+export function createFileQueue(plans, admission, signal, { workers = 1, verificationConcurrency, readyFirst = false } = {}) {
   const dispatch = new AbortController();
   const dispatchSignal = AbortSignal.any([signal, dispatch.signal]);
   const commands = admission ? null : createPermits(workers, dispatchSignal);
   const verification = createVerificationPool(signal, verificationConcurrency);
-  const groups = new Map(plans.map(({ id, jobs }) => [id, {
+  const groups = new Map(plans.map(({ id }) => [id, {
     enabled: false, done: Promise.withResolvers(),
-    remaining: jobs.length, active: 0, stopped: false,
+    jobs: [], remaining: 0, active: 0, stopped: false,
   }]));
-  const queue = plans.flatMap(({ id, jobs }) => jobs.map(run => ({ group: groups.get(id), run, claimed: false })));
+  function addJobs(id, jobs) {
+    const group = groups.get(id);
+    for (const run of jobs) group.jobs.push({ group, run });
+    group.remaining += jobs.length;
+  }
+  for (const { id, jobs } of plans) addJobs(id, jobs);
   const active = new Set();
   let pumping;
   for (const group of groups.values()) group.done.promise.catch(() => {});
-  const next = () => queue.find(job => !job.claimed && job.group.enabled && !job.group.stopped);
+  function next(fitsMemory) {
+    let first;
+    for (const group of groups.values()) {
+      if (!group.enabled || group.stopped || (readyFirst && !group.ready)) continue;
+      for (const job of group.jobs) {
+        if (job.claimed) continue;
+        first ??= job;
+        if (!fitsMemory || fitsMemory(job.run.memoryMiB ?? admission.memory)) return job;
+      }
+    }
+    return first;
+  }
   function settle(group) {
     if (group.remaining || group.active) return;
     if (group.error) group.done.reject(group.error);
@@ -31,6 +47,7 @@ export function createFileQueue(plans, admission, signal, { workers = 1, verific
   signal.addEventListener('abort', abort, { once: true });
   if (signal.aborted) abort();
   function kick() {
+    if (readyFirst && pumping) admission?.wake();
     if (pumping || dispatchSignal.aborted) return;
     pumping = pump().finally(() => {
       pumping = undefined;
@@ -45,12 +62,15 @@ export function createFileQueue(plans, admission, signal, { workers = 1, verific
         // pump so a newly ready earlier dependency can take its original place.
         if (!next().group.ready) return;
         dispatchSignal.throwIfAborted();
-        const candidate = next();
+        let candidate = next();
         const releaseCredit = await verification.reserve();
         let releaseCommand;
         try {
           if (admission) {
-            await admission.acquire({ signal: dispatchSignal, memoryMiB: candidate.run.memoryMiB });
+            if (readyFirst) {
+              candidate = await admission.acquire({ signal: dispatchSignal, selectFile: next });
+              if (!candidate) { releaseCredit(); continue; }
+            } else await admission.acquire({ signal: dispatchSignal, memoryMiB: candidate.run.memoryMiB });
             let released = false;
             releaseCommand = () => {
               if (released) return;
@@ -59,8 +79,8 @@ export function createFileQueue(plans, admission, signal, { workers = 1, verific
             };
           } else releaseCommand = await commands.acquire();
         } catch (error) { releaseCredit(); throw error; }
-        const job = next();
-        if (!job || job !== candidate || !job.group.ready || dispatchSignal.aborted) {
+        const job = readyFirst ? candidate : next();
+        if (!job || job !== candidate || !job.group.ready || job.group.stopped || dispatchSignal.aborted) {
           releaseCommand();
           releaseCredit();
           dispatchSignal.throwIfAborted();
@@ -85,6 +105,7 @@ export function createFileQueue(plans, admission, signal, { workers = 1, verific
     } catch (error) { for (const group of groups.values()) stop(group, error); }
   }
   return {
+    addJobs,
     enable(id) { groups.get(id).enabled = true; kick(); },
     run(id) {
       const group = groups.get(id);

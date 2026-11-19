@@ -16,7 +16,19 @@ import defaultConfig from '../project-checks.config.json' with { type: 'json' };
 // Definitions describe ownership and ordering. Every command, fixture attempt,
 // retry and coverage gate uses the same invocation-owned admission pool.
 export async function runChecks(definitions, options = {}) {
-  keys(options, ['resources', 'workers', 'scanConcurrency', 'inputConcurrency', 'verificationConcurrency', 'signal', 'logger', 'progress', 'diagnostics', 'failureExclusions'], 'check options');
+  return run(definitions, options);
+}
+
+// The caller owns the trusted receipt and its lifetime. Never accept a receipt
+// from a source checkout, a remote release, or an untrusted cache.
+export async function runChecksWithReceipt(definitions, options = {}, previous = {}) {
+  return run(definitions, options, previous);
+}
+
+async function run(definitions, options, previous) {
+  keys(options, ['resources', 'workers', 'scanConcurrency', 'inputConcurrency', 'verificationConcurrency', 'signal', 'logger', 'progress', 'diagnostics', 'failureExclusions', 'schedule'], 'check options');
+  if (options.schedule !== undefined && !['preflight', 'ready'].includes(options.schedule)) throw new Error('schedule must be preflight or ready');
+  const readySchedule = options.schedule === 'ready' && process.env.PROJECT_CHECKS_SCAN_ONLY !== '1';
   if (options.failureExclusions !== undefined) defineConfig({ failureExclusions: options.failureExclusions });
   if (options.diagnostics !== undefined) defineConfig({ diagnostics: options.diagnostics });
   if (options.scanConcurrency !== undefined) integer(options.scanConcurrency, 'scanConcurrency');
@@ -55,7 +67,7 @@ export async function runChecks(definitions, options = {}) {
     for (const dependency of definition.dependsOn ?? []) collectPrerequisite(dependency, definition.command !== undefined ? id : undefined);
     if (definition.command !== undefined) prerequisites.add(id);
   }
-  for (const definition of definitions) if (definition.config !== undefined) {
+  for (const definition of definitions) if (!readySchedule && definition.config !== undefined) {
     for (const dependency of definition.dependsOn ?? []) collectPrerequisite(dependency);
   }
   return withProcessSignal(options.signal, async processSignal => {
@@ -69,7 +81,7 @@ export async function runChecks(definitions, options = {}) {
     diagnostics?.observeAdmission?.(admission);
     let snapshotContext;
     const pending = new Map(), completed = new Map(), launched = new Set(), suites = new Map();
-    const retained = [];
+    const retained = [], suiteContexts = [];
     const blocked = new Error('Check prerequisite failed');
     let executing = false, scanning = false, fileQueue;
     const scanned = Promise.withResolvers();
@@ -107,6 +119,73 @@ export async function runChecks(definitions, options = {}) {
       }
       finally { admission.release(); }
     }
+    async function prepareConfig(definition) {
+      signal.throwIfAborted();
+      await definition.verify?.();
+      signal.throwIfAborted();
+      const config = typeof definition.config === 'function' ? await definition.config({ signal })
+        : typeof definition.config === 'string' ? await loadConfig(resolve(definition.cwd ?? process.cwd(), definition.config)) : definition.config;
+      signal.throwIfAborted();
+      defineConfig(config);
+      return config;
+    }
+    async function runSuite(id, config, context, hooks) {
+      const suiteProgress = progress ? {
+        files: (_, total) => progress.files(id, total),
+        file: (_, ...args) => progress.file(id, ...args),
+      } : false;
+      const suiteDiagnostics = diagnostics ? {
+        ...diagnostics,
+        files: (_, total) => diagnostics.files(id, total),
+        file: (_, ...args) => diagnostics.file(id, ...args),
+        span: (_, ...args) => diagnostics.span(id, ...args),
+        event: (event, fields) => diagnostics.event(event, { ...fields, suite: id }),
+      } : config.diagnostics;
+      diagnostics?.suiteStart?.(id);
+      const failureExclusions = options.failureExclusions ? { ...options.failureExclusions,
+        files: () => options.failureExclusions.files(id) } : undefined;
+      return { id, ...await runTests({ ...config, diagnostics: suiteDiagnostics, failureExclusions, inputConcurrency: options.inputConcurrency ?? config.inputConcurrency, signal, admission, snapshotContext: context, logger: logger ?? false, progress: suiteProgress }, {
+        retained: { push: handle => retained.push({ ...handle, id }) }, normalPhase: phases.get(id),
+        deferFinalVerification: !dependents.has(id),
+        receipt: previous && !options.failureExclusions ? { previous: Object.hasOwn(previous, id) ? previous[id] : undefined } : undefined,
+        executeFiles: () => fileQueue.run(id),
+        ...hooks,
+      }) };
+    }
+    function guardedScanJobs(jobs) {
+      return jobs.map(run => Object.assign(async () => {
+        try { signal.throwIfAborted(); await run(); }
+        catch (error) { controller.abort(error); throw error; }
+      }, { scanIdentity: run.scanIdentity }));
+    }
+    async function runReadySuite(definition) {
+      const { id } = definition;
+      let prepared = false;
+      try {
+        const config = await prepareConfig(definition);
+        const context = snapshotContext.fork();
+        suiteContexts.push(context);
+        context.beginScanGeneration();
+        return await runSuite(id, config, context, {
+          queueScan: async (jobs, concurrency) => {
+            await scanCacheJobs(guardedScanJobs(jobs), options.resources, options.scanConcurrency ?? concurrency,
+              { logger: options.progress === false ? null : logger, suite: id, snapshotContext: context });
+            await context.finishScanGeneration();
+          },
+          cacheScan: ({ total, cached, jobs }) => {
+            signal.throwIfAborted();
+            logger?.log(`CACHE_SCAN: ${id} | Will run: ${total - cached} | Will skip: ${cached} | Total: ${total}`);
+            fileQueue.addJobs(id, jobs);
+            fileQueue.enable(id);
+            prepared = true;
+          },
+        });
+      } catch (error) {
+        fileQueue.skip(id, error);
+        if (!prepared) controller.abort(error);
+        throw error;
+      } finally { diagnostics?.suiteEnd?.(id); }
+    }
     function runPrerequisite(id) {
       if (pending.has(id)) return pending.get(id);
       launched.add(id);
@@ -134,7 +213,15 @@ export async function runChecks(definitions, options = {}) {
         if (launched.has(id) || (definition.dependsOn ?? []).some(dependency => !completed.has(dependency))) continue;
         launched.add(id);
         const failed = (definition.dependsOn ?? []).some(dependency => completed.get(dependency).exitCode);
-        if (definition.config !== undefined) {
+        if (readySchedule && definition.config !== undefined) {
+          if (failed) {
+            progress && progress.files(id, 0);
+            track(id, Promise.resolve({ id, exitCode: 1, skipped: true }));
+          } else {
+            phases.get(id)(true);
+            track(id, runReadySuite(definition));
+          }
+        } else if (definition.config !== undefined) {
           if (failed) { progress && progress.files(id, 0); fileQueue.skip(id); suites.get(id).permission.reject(blocked); }
           else {
             phases.get(id)(true);
@@ -147,7 +234,7 @@ export async function runChecks(definitions, options = {}) {
         }
       }
     }
-    try {
+    async function prepareGlobalQueue() {
       const builds = await Promise.all([...prerequisites].map(runPrerequisite));
       const buildError = builds.find(result => result.status === 'rejected');
       if (buildError) throw buildError.reason;
@@ -157,13 +244,7 @@ export async function runChecks(definitions, options = {}) {
       let configError;
       const preparedConfigs = await Promise.allSettled(testDefinitions.filter(({ id }) => !failedPrerequisite(id)).map(async definition => {
         try {
-          signal.throwIfAborted();
-          await definition.verify?.();
-          signal.throwIfAborted();
-          const config = typeof definition.config === 'function' ? await definition.config({ signal })
-            : typeof definition.config === 'string' ? await loadConfig(resolve(definition.cwd ?? process.cwd(), definition.config)) : definition.config;
-          signal.throwIfAborted();
-          defineConfig(config);
+          const config = await prepareConfig(definition);
           return [definition.id, config];
         } catch (error) {
           if (!configError) { configError = error; controller.abort(error); }
@@ -194,27 +275,10 @@ export async function runChecks(definitions, options = {}) {
           try {
             signal.throwIfAborted();
             const config = configs.get(id);
-            const suiteProgress = progress ? {
-              files: (_, total) => progress.files(id, total),
-              file: (_, ...args) => progress.file(id, ...args),
-            } : false;
-            const suiteDiagnostics = diagnostics ? {
-              ...diagnostics,
-              files: (_, total) => diagnostics.files(id, total),
-              file: (_, ...args) => diagnostics.file(id, ...args),
-              span: (_, ...args) => diagnostics.span(id, ...args),
-              event: (event, fields) => diagnostics.event(event, { ...fields, suite: id }),
-            } : config.diagnostics;
-            diagnostics?.suiteStart?.(id);
-            const failureExclusions = options.failureExclusions ? { ...options.failureExclusions,
-              files: () => options.failureExclusions.files(id) } : undefined;
-            return { id, ...await runTests({ ...config, diagnostics: suiteDiagnostics, failureExclusions, inputConcurrency: options.inputConcurrency ?? config.inputConcurrency, signal, admission, snapshotContext, logger: logger ?? false, progress: suiteProgress }, {
-              retained: { push: handle => retained.push({ ...handle, id }) }, normalPhase: phases.get(id),
-              deferFinalVerification: !dependents.has(id),
-              executeFiles: () => fileQueue.run(id),
+            return await runSuite(id, config, snapshotContext, {
               queueScan: (jobs, scanConcurrency) => { queued.resolve({ jobs, scanConcurrency }); return scanned.promise; },
               cacheScan: plan => { ready.resolve(plan); return permission.promise; },
-            }) };
+            });
           } catch (error) {
             fileQueue?.skip(id, error);
             if (error === blocked) return { id, exitCode: 1, skipped: true };
@@ -234,10 +298,8 @@ export async function runChecks(definitions, options = {}) {
       if (testDefinitions.length) logger?.log(`CACHE_SCAN: checks | Queued: ${jobs.length} test files | Concurrency: ${scanConcurrency}`);
       scanning = true;
       try {
-        await profileStage('scan-queue', () => scanCacheJobs(jobs.map(run => Object.assign(async () => {
-          try { signal.throwIfAborted(); await run(); }
-          catch (error) { controller.abort(error); throw error; }
-        }, { scanIdentity: run.scanIdentity })), options.resources, scanConcurrency, { logger: options.progress === false ? null : logger, snapshotContext }));
+        await profileStage('scan-queue', () => scanCacheJobs(guardedScanJobs(jobs), options.resources, scanConcurrency,
+          { logger: options.progress === false ? null : logger, snapshotContext }));
       } finally {
         scanning = false;
         if (signal.aborted) scanned.reject(signal.reason);
@@ -259,6 +321,19 @@ export async function runChecks(definitions, options = {}) {
       const verificationConcurrency = options.verificationConcurrency ?? (prepared.length
         ? Math.min(...prepared.map(({ value }) => value.verificationConcurrency)) : undefined);
       fileQueue = createFileQueue([...suites.keys()].map((id, index) => ({ id, jobs: prepared[index].value.jobs })), admission, signal, { verificationConcurrency });
+      return { verificationConcurrency };
+    }
+    try {
+      let verificationConcurrency = options.verificationConcurrency ?? defaultConfig.verificationConcurrency;
+      if (readySchedule) {
+        snapshotContext = createSnapshotContext({ signal, inputConcurrency: options.inputConcurrency ?? options.scanConcurrency, resources: options.resources });
+        fileQueue = createFileQueue(definitions.filter(item => item.config !== undefined).map(({ id }) => ({ id, jobs: [] })),
+          admission, signal, { verificationConcurrency, readyFirst: true });
+      } else {
+        const preparation = await prepareGlobalQueue();
+        if (preparation.scanOnly) return preparation;
+        verificationConcurrency = preparation.verificationConcurrency ?? defaultConfig.verificationConcurrency;
+      }
       executing = true;
       launchReady();
       let settled;
@@ -290,13 +365,15 @@ export async function runChecks(definitions, options = {}) {
       }
       signal.throwIfAborted();
       const resultExitCode = results.find(result => result.exitCode)?.exitCode ?? 0;
-      if (!resultExitCode) for (const handle of retained) {
+      for (const handle of retained) {
         signal.throwIfAborted();
-        await handle.complete?.();
+        await handle.complete?.(resultExitCode === 0);
       }
       signal.throwIfAborted();
       exitCode = resultExitCode;
-      return { exitCode, results };
+      return { exitCode, results, ...(previous && !exitCode ? {
+        receipt: Object.fromEntries(retained.filter(handle => handle.receipt).map(handle => [handle.id, handle.receipt])),
+      } : {}) };
     } catch (error) {
       if (processSignal.aborted || error.name === 'AbortError') exitCode = 130;
       throw error;
@@ -310,6 +387,7 @@ export async function runChecks(definitions, options = {}) {
       signal.removeEventListener('abort', stopPreparation);
       try {
         const closed = await Promise.allSettled(retained.map(handle => handle.close()));
+        await Promise.all(suiteContexts.map(context => context.close()));
         await snapshotContext?.close();
         admission.report(logger, 'checks');
         admission.close();

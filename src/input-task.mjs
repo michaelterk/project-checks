@@ -43,11 +43,12 @@ export function createProcessSnapshot(config, context, selectTests, createSnapsh
         ? entries => context.inputTask(definition, { mode: 'projection', entries }) : undefined,
     }, context);
     let common;
+    const fixtureGeneration = context.fingerprintRecords();
     const getCommon = () => common ??= commonSnapshot.prepare(inventory).then(plan => plan.common());
     const unit = async id => {
       config.signal?.throwIfAborted();
       // Fixture-owned runtime paths stay with their original owner.
-      const declared = config.testFixtureInputs ? await config.testFixtureInputs(id) : [];
+      const declared = config.testFixtureInputs ? await config.testFixtureInputs(id, { generation: fixtureGeneration }) : [];
       const fixtures = fixtureInputs(config.root, declared);
       const shared = getCommon();
       const operation = () => context.inputTask(definition, { mode: 'unit', id, fixtures });

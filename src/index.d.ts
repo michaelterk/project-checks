@@ -93,7 +93,7 @@ export interface TestConfig {
   /** Overrides inherited environment; undefined removes a variable. */
   env?: Record<string, string | undefined>;
   /** Declare literal fixture files/directories, root-relative or absolute. The package hashes them. */
-  testFixtureInputs?: (id: string) => FixtureInput[] | Promise<FixtureInput[]>;
+  testFixtureInputs?: (id: string, context: { generation: object }) => FixtureInput[] | Promise<FixtureInput[]>;
   signal?: AbortSignal;
   logger?: Logger | false;
   stdio?: 'inherit' | 'ignore';
@@ -310,6 +310,9 @@ export function loadChecks(filename: string, options?: {
   target?: string | string[]; files?: string[]; filters?: string[]; cache?: boolean; prefix?: string; frameworkArgs?: string[];
 }): Promise<CheckDefinition[]>;
 export function runChecks(definitions: CheckDefinition[], options?: {
+  /** Preflight scans every suite before execution. Ready mode scans and executes each
+   * suite after its dependencies pass using shared invocation-level concurrency settings. */
+  schedule?: 'preflight' | 'ready';
   failureExclusions?: FailureExclusions;
   /** Caller-owned invocation observer; close it after runChecks settles. */
   diagnostics?: Diagnostics;
@@ -322,6 +325,11 @@ export function runChecks(definitions: CheckDefinition[], options?: {
   verificationConcurrency?: number | `${number}N`;
   progress?: TestProgress | false;
 }): Promise<{ exitCode: number; results: Array<{ id: string; exitCode: number; skipped?: boolean }> }>;
+export type CheckReceipt = Record<string, { contract: string; inputs: string }>;
+/** Reuse complete, cacheable non-coverage leaf checks from a trusted earlier run
+ * in the same checkout. Current fixture and file evidence is verified at completion. */
+export function runChecksWithReceipt(definitions: CheckDefinition[], options?: Parameters<typeof runChecks>[1],
+  previous?: CheckReceipt): Promise<Awaited<ReturnType<typeof runChecks>> & { receipt?: CheckReceipt }>;
 export function reportCoverage(config: TestConfig): Promise<null | {
   suite: string; minimum: { lines: number; branches: number; functions: number };
   actual?: { lines: number; branches: number; functions: number }; stale: boolean; measuredAt?: string;

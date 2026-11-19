@@ -20,14 +20,14 @@ const realpath = (...args) => profileFilesystemCall('realpath', args[0], () => f
 
 // One queue bounds leaf work. Visitors enqueue children without awaiting them.
 export function createSnapshotContext({ signal, inputConcurrency,
-  scanConcurrency = defaultConfig.scanConcurrency, resources, local = false, digestCache } = {}) {
+  scanConcurrency = defaultConfig.scanConcurrency, resources, local = false, digestCache, sharedPool } = {}) {
   if (inputConcurrency !== undefined) inputLimit(inputConcurrency);
   if (scanConcurrency !== undefined) inputLimit(scanConcurrency);
   const digests = digestCache ?? new Map(), exclusions = new Map();
   const directoryRoots = new Map(), directoryDecisions = new Map();
   let closed = false, closeReason, closing;
   let sourceScan, scanProjections, scanRecords, scanInventories, scanLeaves, scanDirectories, inputGeneration;
-  const pool = local ? createLocalInputPool() : createHashPool({ workers: inputConcurrency ?? scanConcurrency, resources });
+  const pool = sharedPool ?? (local ? createLocalInputPool() : createHashPool({ workers: inputConcurrency ?? scanConcurrency, resources }));
   const acceptedSources = new Map();
   const run = (operation, options) => pool.run(operation, options);
   const excluded = config => inputExclusions(config, exclusions);
@@ -141,7 +141,7 @@ export function createSnapshotContext({ signal, inputConcurrency,
   function cancelScanGeneration(reason) {
     sourceScan = scanProjections = scanRecords = scanInventories = scanLeaves = scanDirectories = inputGeneration = undefined;
     acceptedSources.clear();
-    return pool.close(reason);
+    if (!sharedPool) return pool.close(reason);
   }
   async function finishScanGeneration() {
     // Disable memoization before the independent freshness gate; every accepted
@@ -259,7 +259,10 @@ export function createSnapshotContext({ signal, inputConcurrency,
   const abort = () => { void close(signal.reason).catch(() => {}); };
   signal?.addEventListener('abort', abort, { once: true });
   if (signal?.aborted) abort();
-  return { run, inputGeneration: () => inputGeneration, inputTask: pool.inputTask, scanState: pool.state, excluded, directoryExcluded, identify, discoverInventory, projectionMemo, fingerprintRecords: () => scanRecords ?? new WeakMap(), sourceHash, beginScanGeneration, acceptSourceProof, cancelScanGeneration, finishScanGeneration, digests, exclusions, close };
+  // A ready suite needs its own scan lifetime: its post-command snapshots must
+  // already be fresh while another suite is still preparing its inventory.
+  const fork = () => createSnapshotContext({ signal, digestCache: digests, sharedPool: pool });
+  return { fork, run, inputGeneration: () => inputGeneration, inputTask: pool.inputTask, scanState: pool.state, excluded, directoryExcluded, identify, discoverInventory, projectionMemo, fingerprintRecords: () => scanRecords ?? new WeakMap(), sourceHash, beginScanGeneration, acceptSourceProof, cancelScanGeneration, finishScanGeneration, digests, exclusions, close };
 }
 
 export async function discoverTests({ root, testDirectory, pattern, ignore }) {
@@ -445,7 +448,7 @@ export function createSnapshot(config, context = createSnapshotContext()) {
         let fixtures = [];
         if (config.testFixtureInputs) {
           stage = 'fixture discovery';
-          const declared = await config.testFixtureInputs(id);
+          const declared = await config.testFixtureInputs(id, { generation: serialized });
           fixtures = fixtureInputs(config.root, declared);
         }
         config.signal?.throwIfAborted();

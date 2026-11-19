@@ -23,7 +23,7 @@ and install that archive in another project:
 npm pack
 
 # In your project (adjust the path)
-npm install --save-dev /path/to/project-checks/project-checks-0.5.2.tgz
+npm install --save-dev /path/to/project-checks/project-checks-0.11.0.tgz
 ```
 
 After a maintainer publishes it under this name, installation will be
@@ -178,6 +178,31 @@ unknown dependencies and cycles fail. Final verification rechecks participating
 suite inputs and loaded JSON configurations before the invocation succeeds.
 Final suite input checks overlap up to `verificationConcurrency`, retain independent
 fresh snapshots, and drain before fixture cleanup; loaded-configuration callbacks stay sequential.
+
+Pass `{ schedule: 'ready' }` to `runChecks` to start independent branches as
+soon as their own prerequisites and scans finish. Each suite scans only after
+its prerequisites pass. The invocation shares the input scanner, command
+admission and verification pool. Ready files can pass a waiting fixture or a
+file that cannot fit the available memory. Invocation-level input and
+verification settings take precedence, with the package defaults when omitted.
+Scan-only still uses the shared preflight.
+
+`runChecksWithReceipt(definitions, options, previous)` returns an optional
+`receipt` after a complete passing run. A release coordinator can pass it to
+the next stage in the same checkout after independently binding the tested
+source to the release. Keep this evidence private to that invocation. Eligible
+cacheable, complete non-coverage leaf suites check current command, environment,
+inventory and input digests and verify their inputs again at completion.
+Changed suites use ordinary per-file evidence. Prerequisites, runtime checks
+with caching disabled, fixture setup/teardown and coverage run normally.
+
+`testFixtureInputs(id, { generation })` receives an opaque key shared within
+an observation round. A later validation receives a fresh key.
+
+V8 suites with explicit include patterns can reuse a successful aggregate from
+the suite cache after verifying raw contributions, source identities, provider
+and domain. Each invocation evaluates its current thresholds. Custom reports
+and Node preloads use the native aggregate.
 
 Fixture modules with pure, process-safe input callbacks can export
 `processInputs = true`. Project loading then moves dependency discovery, path
