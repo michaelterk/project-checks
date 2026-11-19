@@ -1,11 +1,12 @@
-import { digest, text } from './util.mjs';
+import { fixtureInputs } from './versioned-inputs.mjs';
+import { digest } from './util.mjs';
 import { resolve } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { randomUUID } from 'node:crypto';
 
 export const inputProcess = Symbol('project-checks.input-process');
 const runtimeFields = ['root', 'suite', 'testDirectory', 'pattern', 'inputs', 'ignore',
-  'directoryIgnore', 'cacheDirectory', 'excludeTestsFromInputs'];
+  'directoryIgnore', 'trustPackageVersions', 'cacheDirectory', 'excludeTestsFromInputs'];
 const configurations = new Map(), digests = new Map();
 const signal = new AbortController().signal; // Parent cancellation stops the worker's entire process group.
 
@@ -47,8 +48,7 @@ export function createProcessSnapshot(config, context, selectTests, createSnapsh
       config.signal?.throwIfAborted();
       // Fixture-owned runtime paths stay with their original owner.
       const declared = config.testFixtureInputs ? await config.testFixtureInputs(id) : [];
-      if (!Array.isArray(declared)) throw new TypeError('testFixtureInputs must return an array of literal paths');
-      const fixtures = declared.map(path => text(path, 'fixture input path'));
+      const fixtures = fixtureInputs(config.root, declared);
       const shared = getCommon();
       const operation = () => context.inputTask(definition, { mode: 'unit', id, fixtures });
       const task = Promise.resolve().then(() => config.diagnostics

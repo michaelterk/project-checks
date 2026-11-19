@@ -15,7 +15,7 @@ async function fixture(t) {
   await put(root, 'common.txt', 'common');
   await put(root, 'fixture.txt', 'fixture');
   await put(root, 'config.json', JSON.stringify({ root: '.', suite: 'fixture', inputs: ['common.txt'],
-    coverage: false, cache: false, inputConcurrency: 2, testInputs: { 'test/a.test.mjs': ['dependency.txt'] } }));
+    coverage: false, cache: false, inputConcurrency: 2, testInputs: { 'test/a.test.mjs': ['dependency.txt', 'node_modules/loaded'] } }));
   await put(root, 'fixture.mjs', `
 import { appendFileSync, writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
@@ -55,12 +55,20 @@ export default function(config, context) {
 
 test('process snapshots preserve fingerprints, selection, fresh mutations and runtime fixture paths', { timeout: 10000 }, async t => {
   const { root, config } = await fixture(t);
+  await put(root, 'node_modules/loaded/package.json', '{"name":"loaded","version":"1"}');
+  await put(root, 'node_modules/loaded/payload.js', 'first');
+  config.inputs.push('node_modules/loaded');
+  config.trustPackageVersions = true;
+  config.testFixtureInputs = () => [{ path: 'fixture.txt', version: 'engine-1' }];
   // A changed callback disables offload, giving an independent local baseline.
   const local = await createFileSnapshot({ ...config, testInputs: id => config.testInputs(id) });
   const remote = await createFileSnapshot(config);
   t.after(async () => { await Promise.all([local.close(), remote.close()]); });
   const before = await local.snapshot();
   await writeFile(join(root, 'pids.log'), '');
+  assert.deepEqual(await remote.snapshot(), before);
+  await put(root, 'node_modules/loaded/payload.js', 'same installed version');
+  await put(root, 'fixture.txt', 'same declared version');
   assert.deepEqual(await remote.snapshot(), before);
   const events = (await readFile(join(root, 'pids.log'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
   assert.ok(events.every(([, pid]) => pid !== process.pid));

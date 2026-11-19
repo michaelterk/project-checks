@@ -1,3 +1,4 @@
+export type FixtureInput = string | { path: string; version: string };
 export type InputIdentity = ['file', string] | ['missing'] | ['directory', [string, InputIdentity][]] | ['symlink', string, InputIdentity] | ['cycle', string];
 
 export interface ResourcePolicy {
@@ -56,6 +57,8 @@ export interface TestConfig {
   testInputs?: Record<string, string[]> | ((id: string) => string[] | Promise<string[]>);
   /** Exclude runnable tests from dependency folders/globs, keeping each own test identity. */
   excludeTestsFromInputs?: boolean;
+  /** Trust installed npm name/version for selected package payloads. Defaults to false. */
+  trustPackageVersions?: boolean;
   /** Optional canonical content projection; called again for fresh snapshots.
    * Paths are selected aliases; identities contain actual content hashes and
    * directory/symlink/missing structure. Return deterministic plain JSON data.
@@ -90,7 +93,7 @@ export interface TestConfig {
   /** Overrides inherited environment; undefined removes a variable. */
   env?: Record<string, string | undefined>;
   /** Declare literal fixture files/directories, root-relative or absolute. The package hashes them. */
-  testFixtureInputs?: (id: string) => string[] | Promise<string[]>;
+  testFixtureInputs?: (id: string) => FixtureInput[] | Promise<FixtureInput[]>;
   signal?: AbortSignal;
   logger?: Logger | false;
   stdio?: 'inherit' | 'ignore';

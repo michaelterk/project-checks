@@ -438,6 +438,25 @@ fixtures that require containment must check their bundle before returning paths
 Explicit fixture declarations ignore ordinary `ignore` rules, so an engine bundle
 excluded from a broad SDK input can still be tracked for its actual consumers.
 Fixture directories inside or resolving into `cacheDirectory` are rejected.
+When a distribution identifies a runtime by version, a fixture can return
+`{ path: executablePath, version: 'chromium-headless-shell/linux-x64/1234' }`.
+The scanner checks that the executable resolves to a regular file and binds its
+presence and declared version without reading its bytes. Include the engine,
+platform and revision as appropriate. Return a fresh declaration on each call.
+
+Set `trustPackageVersions: true` to identify installed npm dependencies by
+their project-relative install slot, manifest name and version. This applies to ordinary
+`inputs` and `testInputs` selecting a package tree or an individual path within
+one. Explicitly selected leaves bind their relative name and existence. A
+literal fixture or an `inputProjection` callback using `context.identify()`
+can name a package root in a sibling project and use the same version evidence. Selecting a package root also includes its
+selected nested installations. A selected `node_modules` directory skips hidden
+npm bookkeeping and bin shims; explicitly selected shims retain byte evidence.
+Same-version payload edits are intentionally trusted. Source files, linked
+workspaces, links outside the installed package, unversioned packages and
+other literal fixture paths retain byte
+evidence. With the default `false`, installed packages retain byte evidence too.
+
 Load the JSON config and add this fixture callback before calling `runTests`.
 For import discovery, `testInputs` also accepts a sync/async `(id) => string[]`
 callback. It runs on every snapshot, including focused runs, and returns
@@ -494,7 +513,8 @@ subprocesses; whole command deadlines use `timeoutMs`.
 | `suite` | `tests` | Cache namespace |
 | `env` | Inherit environment | String overrides; undefined removes a variable |
 | `normalizeNpmEnvironment` | `false` | Remove npm launch metadata and use the owning project's executable search path |
-| `testFixtureInputs` | None | Programmatic sync/async callback `(id) => string[]` declaring literal fixture input paths |
+| `testFixtureInputs` | None | Programmatic sync/async callback declaring literal paths or versioned executable files |
+| `trustPackageVersions` | `false` | Use installed npm package identities for selected dependency payloads |
 | `admission` | None | Caller-owned worker pool shared across `runTests` calls |
 | `snapshotContext` | None | Caller-owned hashing queue shared across snapshots/suites |
 | `diagnostics` | None | Invocation observer returned by `createDiagnostics` |

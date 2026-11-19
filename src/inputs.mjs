@@ -1,13 +1,14 @@
 import { isDeepStrictEqual } from 'node:util';
 import { randomUUID } from 'node:crypto';
+import { fixtureInputs, fixtureVersion, installedVersion, packageRoot } from './versioned-inputs.mjs';
 import { createHashPool } from './input-hash-pool.mjs';
 import { inputMetadata } from './input-hash-sync.mjs';
 import { directoryExclusions, inputExclusions } from './input-exclusions.mjs';
 import { createLocalInputPool } from './input-local.mjs';
 import { inputProcess, createProcessSnapshot } from './input-task.mjs';
 import { glob, lstat as fsLstat, readdir as fsReaddir, readlink as fsReadlink, realpath as fsRealpath } from 'node:fs/promises';
-import { dirname, join, matchesGlob, relative, resolve } from 'node:path';
-import { digest, inside, inputLimit, slash, text } from './util.mjs';
+import { basename, dirname, join, matchesGlob, relative, resolve, sep } from 'node:path';
+import { digest, inside, inputLimit, slash } from './util.mjs';
 import { defineConfig, defaultDirectoryIgnore } from './config.mjs';
 import { profileContentRead, profileFilesystemCall, profileQueue, profileStage, profileSync } from './scan-profile.mjs';
 import defaultConfig from '../project-checks.config.json' with { type: 'json' };
@@ -133,7 +134,7 @@ export function createSnapshotContext({ signal, inputConcurrency,
     // identical projections may share that root; descendant trees are not reused.
     const key = JSON.stringify([config.root, config.cacheDirectory, config.ignore,
       config.directoryIgnore ?? defaultDirectoryIgnore, Boolean(config.allowMissing),
-      Boolean(config.regularFilesOnly), config.fixtureCacheDirectory ?? null, [...excludedFiles].sort()]);
+      Boolean(config.regularFilesOnly), Boolean(config.trustPackageVersions), config.fixtureCacheDirectory ?? null, [...excludedFiles].sort()]);
     if (!scanProjections.has(key)) scanProjections.set(key, new Map());
     return scanProjections.get(key);
   }
@@ -164,15 +165,30 @@ export function createSnapshotContext({ signal, inputConcurrency,
       const values = new Array(files.length);
       let remaining = 0;
       const failures = [];
-      function enqueue(file, ancestors, assign, directoryRoot, logical = file) {
+      function enqueue(file, ancestors, assign, directoryRoot, logical, trustPackages) {
         remaining++;
         // A directory releases its scanner slot before it queues child jobs.
         // Aggregation stays on the coordinator and never waits inside admission.
         (async () => {
           if (failures.length) return;
-          let value;
-          try { value = await inspectEntry(file, Boolean(config.regularFilesOnly)); }
-          catch (error) {
+          let value, version;
+          try {
+            if (trustPackages && file === logical) {
+              const root = packageRoot(config.root, file);
+              if (root && (file === root || file === directoryRoot)) {
+                const installed = await run(() => installedVersion(config, root, file));
+                if (installed?.trusted) {
+                  version = installed.marker;
+                  if (file !== root) { assign(version); return; }
+                } else if (installed) {
+                  // Workspace and escaping links also depend on their target bytes.
+                  const assignTree = assign;
+                  assign = target => assignTree(['directory', [['package.json', installed.marker], ['target', target]]]);
+                }
+              }
+            }
+            value = version ? { kind: 'directory' } : await inspectEntry(file, Boolean(config.regularFilesOnly));
+          } catch (error) {
             if (error.code === 'ENOENT' && config.allowMissing && !config.regularFilesOnly) { assign(['missing']); return; }
             throw error;
           }
@@ -190,7 +206,7 @@ export function createSnapshotContext({ signal, inputConcurrency,
             const identity = ['symlink', readlinkTarget, null];
             assign(identity);
             if (ancestors.has(target)) identity[2] = ['cycle', target];
-            else enqueue(target, ancestors, nested => { identity[2] = nested; }, directoryRoot, logical);
+            else enqueue(target, ancestors, nested => { identity[2] = nested; }, directoryRoot, logical, trustPackages);
           } else if (value.kind === 'directory') {
             let discovery = scanDirectories?.get(file);
             if (!discovery) {
@@ -205,17 +221,29 @@ export function createSnapshotContext({ signal, inputConcurrency,
             }
             if (ancestors.has(canonical)) { assign(['cycle', canonical]); return; }
             const nested = new Set(ancestors).add(canonical);
-            const kept = await pool.filterDirectory({ file, logical, names, root: directoryRoot,
+            // Only nested installations can add independent versions to a package.
+            let selected = names;
+            if (version) selected = names.filter(name => name === 'node_modules');
+            if (trustPackages && file === logical && basename(file) === 'node_modules') selected = names.filter(name => !name.startsWith('.'));
+            const kept = await pool.filterDirectory({ file, logical, names: selected, root: directoryRoot,
               config: filterConfig, excludedFiles: excludedPaths });
             const children = kept.map(name => ({ file: join(file, name), logical: join(logical, name), value: [name, null] }));
-            assign(['directory', children.map(entry => entry.value)]);
-            for (const entry of children) enqueue(entry.file, nested, identity => { entry.value[1] = identity; }, directoryRoot, entry.logical);
+            const entries = children.map(entry => entry.value);
+            if (version) entries.unshift(['package.json', version]);
+            assign(['directory', entries]);
+            for (const entry of children) enqueue(entry.file, nested, identity => { entry.value[1] = identity; }, directoryRoot, entry.logical, trustPackages);
           } else throw new Error(`Unsupported input type: ${file}`);
         })().catch(error => { if (!failures.length) failures.push(error); }).finally(() => {
           if (!--remaining) failures.length ? reject(failures[0]) : resolveIdentities(values);
         });
       }
-      files.forEach((file, index) => enqueue(file, new Set(), identity => { values[index] = identity; }, file));
+      files.forEach((file, index) => {
+        // Explicit package roots also cover sibling projects. Literal fixtures
+        // and external projection paths below those roots retain byte evidence.
+        const trustPackages = config.trustPackageVersions && !config.regularFilesOnly &&
+          ((!config.fixtureCacheDirectory && inside(config.root, file)) || packageRoot(config.root, file) === file);
+        enqueue(file, new Set(), identity => { values[index] = identity; }, file, file, trustPackages);
+      });
       if (!remaining) resolveIdentities(values);
     });
   }
@@ -348,7 +376,9 @@ export function createSnapshot(config, context = createSnapshotContext()) {
         const excluded = context.directoryExcluded(config, parent);
         let current = file;
         while (current !== parent && !excluded(current)) current = dirname(current);
-        if (current === parent) continue;
+        // A versioned package root proves its installation, while explicitly
+        // selected payload paths must still prove their own existence.
+        if (current === parent && !(config.trustPackageVersions && relative(config.root, file).split(sep).includes('node_modules'))) continue;
       }
       roots.push(file);
     }
@@ -364,6 +394,8 @@ export function createSnapshot(config, context = createSnapshotContext()) {
     const roots = suppliedCommon === undefined ? await selectPaths(config.inputs, excludedFiles) : [];
     const inputOptions = { ...config, allowMissing: true };
     const values = context.projectionMemo(inputOptions, excludedFiles);
+    const sourceOptions = config.trustPackageVersions ? { ...inputOptions, trustPackageVersions: false } : inputOptions;
+    const sourceValues = config.trustPackageVersions ? context.projectionMemo(sourceOptions, excludedFiles) : values;
     const serialized = context.fingerprintRecords();
     const content = identities => fingerprint(identities, serialized);
     let common = suppliedCommon === undefined ? undefined : Promise.resolve(suppliedCommon), fixtureProjection;
@@ -380,6 +412,7 @@ export function createSnapshot(config, context = createSnapshotContext()) {
     };
     const identify = async (paths, memo, options, excluded = new Set()) => {
       const settled = await Promise.allSettled(paths.map(file => {
+        if (typeof file !== 'string') return context.run(() => fixtureVersion(file));
         if (!memo.has(file)) memo.set(file, context.identify([file], options, excluded).then(([value]) => value));
         return memo.get(file);
       }));
@@ -413,15 +446,15 @@ export function createSnapshot(config, context = createSnapshotContext()) {
         if (config.testFixtureInputs) {
           stage = 'fixture discovery';
           const declared = await config.testFixtureInputs(id);
-          if (!Array.isArray(declared)) throw new TypeError('testFixtureInputs must return an array of literal paths');
-          fixtures = [...new Set(declared.map(file => resolve(config.root, text(file, 'fixture input path'))))].sort();
+          fixtures = fixtureInputs(config.root, declared);
         }
         config.signal?.throwIfAborted();
         stage = 'input fingerprint';
         // Await together so all work drains before a failed unit releases its slot.
         const fingerprints = await Promise.allSettled([
           getCommon(),
-          identify([resolve(config.root, id), ...dependencies], values, inputOptions, excludedFiles),
+          identify([resolve(config.root, id)], sourceValues, sourceOptions, excludedFiles),
+          identify(dependencies, values, inputOptions, excludedFiles),
           (async () => {
             if (!fixtures.length) return [];
             fixtureProjection ??= (async () => {
@@ -439,8 +472,8 @@ export function createSnapshot(config, context = createSnapshotContext()) {
         const failure = fingerprints.find(result => result.status === 'rejected');
         if (failure) throw failure.reason;
         snapshot.common = fingerprints[0].value;
-        snapshot.units[id] = await project([resolve(config.root, id), ...dependencies, ...fixtures],
-          [...fingerprints[1].value, ...fingerprints[2].value], 'unit', id);
+        snapshot.units[id] = await project([resolve(config.root, id), ...dependencies, ...fixtures.map(item => typeof item === 'string' ? item : item.path)],
+          [...fingerprints[1].value, ...fingerprints[2].value, ...fingerprints[3].value], 'unit', id);
         return fingerprints[1].value[0][1];
       } catch (error) {
         if (config.signal?.aborted) throw config.signal.reason;

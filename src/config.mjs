@@ -6,7 +6,7 @@ import { command, inputLimit, integer, workerLimit, keys, text } from './util.mj
 import { selectConcurrency } from './resources.mjs';
 import defaultConfig from '../project-checks.config.json' with { type: 'json' };
 
-const options = ['extends', 'root', 'testDirectory', 'pattern', 'files', 'command', 'inputs', 'testInputs', 'inputProjection', 'excludeTestsFromInputs', 'ignore', 'directoryIgnore', 'workers', 'scanConcurrency', 'inputConcurrency', 'verificationConcurrency', 'memoryMiB', 'resources', 'cache', 'cacheDirectory', 'suite', 'env', 'testFixtureInputs', 'signal', 'logger', 'stdio', 'retryTimeouts', 'retryTimeoutMs', 'timeoutMs', 'subprocessTimeoutMs', 'admission', 'snapshotContext', 'diagnostics', 'progress', 'durationHints', 'initialDurations', 'select', 'setup', 'filters', 'engine', 'coverage', 'frameworkArgs', 'normalizeNpmEnvironment', 'failureExclusions'];
+const options = ['extends', 'root', 'testDirectory', 'pattern', 'files', 'command', 'inputs', 'testInputs', 'inputProjection', 'trustPackageVersions', 'excludeTestsFromInputs', 'ignore', 'directoryIgnore', 'workers', 'scanConcurrency', 'inputConcurrency', 'verificationConcurrency', 'memoryMiB', 'resources', 'cache', 'cacheDirectory', 'suite', 'env', 'testFixtureInputs', 'signal', 'logger', 'stdio', 'retryTimeouts', 'retryTimeoutMs', 'timeoutMs', 'subprocessTimeoutMs', 'admission', 'snapshotContext', 'diagnostics', 'progress', 'durationHints', 'initialDurations', 'select', 'setup', 'filters', 'engine', 'coverage', 'frameworkArgs', 'normalizeNpmEnvironment', 'failureExclusions'];
 export const defaultDirectoryIgnore = defaultConfig.directoryIgnore;
 export const defaultIgnore = defaultConfig.ignore;
 
@@ -42,6 +42,7 @@ export function defineConfig(config) {
     if (!Array.isArray(config.files) || !config.files.length || new Set(config.files).size !== config.files.length) throw new TypeError('files must be a nonempty array of unique test file IDs');
     config.files.forEach(testId);
   }
+  if (config.trustPackageVersions !== undefined && typeof config.trustPackageVersions !== 'boolean') throw new TypeError('trustPackageVersions must be a boolean');
   if (config.excludeTestsFromInputs !== undefined && typeof config.excludeTestsFromInputs !== 'boolean') throw new TypeError('excludeTestsFromInputs must be a boolean');
   for (const key of ['inputs', 'ignore']) if (config[key] !== undefined) patterns(config[key], key, true);
   if (config.directoryIgnore !== undefined) {
