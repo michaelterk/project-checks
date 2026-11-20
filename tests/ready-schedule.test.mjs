@@ -331,9 +331,14 @@ test('file-ready scan-only reports misses without setting up or executing a fixt
   const previous = process.env.PROJECT_CHECKS_SCAN_ONLY;
   process.env.PROJECT_CHECKS_SCAN_ONLY = '1';
   try {
-    const result = await runChecks([{ id: 'files', config: { root, inputs: [], coverage: false,
-      setup: () => assert.fail('scan-only started a fixture'),
-    } }], { ...options, ...fileReadyOptions });
+    const result = await runChecks([
+      { id: 'prepare', cwd: root, memoryMiB: 128,
+        command: [process.execPath, '-e', "require('node:fs').writeFileSync('built','ready')"] },
+      { id: 'files', dependsOn: ['prepare'], config: async () => {
+        assert.equal(await readFile(join(root, 'built'), 'utf8'), 'ready');
+        return { root, inputs: [], coverage: false, setup: () => assert.fail('scan-only started a fixture') };
+      } },
+    ], { ...options, ...fileReadyOptions });
     assert.deepEqual(result, { exitCode: 0, scanOnly: true, total: 2, cached: 0 });
   } finally {
     if (previous === undefined) delete process.env.PROJECT_CHECKS_SCAN_ONLY;

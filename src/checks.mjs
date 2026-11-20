@@ -38,11 +38,15 @@ async function run(definitions, options, previous) {
   if (options.verificationConcurrency !== undefined) options = { ...options, verificationConcurrency: workerLimit(options.verificationConcurrency, 'verificationConcurrency') };
   const byId = new Map();
   for (const definition of definitions) {
-    keys(definition, ['id', 'dependsOn', 'config', 'command', 'cwd', 'env', 'verify'], 'check');
+    keys(definition, ['id', 'dependsOn', 'config', 'command', 'cwd', 'env', 'memoryMiB', 'verify'], 'check');
     text(definition.id, 'check id');
     if (byId.has(definition.id)) throw new Error(`Duplicate check: ${definition.id}`);
     if ((definition.config === undefined) === (definition.command === undefined)) throw new Error('A check needs exactly one config or command');
     if (definition.command !== undefined) command(definition.command);
+    if (definition.memoryMiB !== undefined) {
+      if (definition.command === undefined) throw new TypeError('memoryMiB is only supported for command checks');
+      integer(definition.memoryMiB, 'memoryMiB');
+    }
     if (definition.verify !== undefined && typeof definition.verify !== 'function') throw new Error('verify must be a function');
     if (definition.dependsOn !== undefined && (!Array.isArray(definition.dependsOn) || definition.dependsOn.some(id => typeof id !== 'string'))) throw new Error('dependsOn must be an array of check IDs');
     byId.set(definition.id, definition);
@@ -112,7 +116,8 @@ async function run(definitions, options, previous) {
     async function runCommandCheck(definition) {
       signal.throwIfAborted();
       await definition.verify?.();
-      await admission.acquire({ signal });
+      const { memoryMiB } = definition;
+      await admission.acquire({ signal, memoryMiB });
       try {
         diagnostics?.event('check-start', { suite: definition.id });
         const execute = () => runCommand(definition.command, { cwd: definition.cwd, env: definition.env, signal, logger });
@@ -120,7 +125,7 @@ async function run(definitions, options, previous) {
         diagnostics?.event('check-end', { suite: definition.id, exitCode });
         return { id: definition.id, exitCode };
       }
-      finally { admission.release(); }
+      finally { admission.release({ memoryMiB }); }
     }
     async function prepareConfig(definition) {
       signal.throwIfAborted();
