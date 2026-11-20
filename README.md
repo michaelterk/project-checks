@@ -155,8 +155,10 @@ Use a project JSON file to select suites and order builds or other prerequisites
 `config` names a suite configuration. Optional `fixture` names a module whose
 default export receives `(config, { signal })` and returns configuration overrides,
 such as runtime inputs, environment or `setup`. Paths resolve beside the project
-JSON. A command check may set `cwd` and `env`; a nested owner uses `project` and
-an optional `target` instead of `config`.
+JSON. A command check may set `cwd`, `env`, and a positive integer `memoryMiB`
+for its shared admission reservation. The reservation defaults to
+`resources.memoryMiBPerWorker`. A nested owner uses `project` and an optional
+`target` instead of `config`.
 
 ```js
 import { loadChecks, runChecks } from 'project-checks';

@@ -304,6 +304,8 @@ export interface CheckDefinition {
   command?: string[];
   cwd?: string;
   env?: Record<string, string | undefined>;
+  /** Shared admission reservation for a command check. Defaults to resources.memoryMiBPerWorker. */
+  memoryMiB?: number;
   verify?: () => void | Promise<void>;
 }
 export function loadChecks(filename: string, options?: {

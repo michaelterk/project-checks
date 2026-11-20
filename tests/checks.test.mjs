@@ -22,20 +22,48 @@ const options = { workers: 1, logger: false };
 
 test('JSON dependencies build before tests; failed prerequisites block only their consumers', async t => {
   const root = await project(t, {
-    'test/a.test.mjs': "import {readFileSync} from 'node:fs'; if (readFileSync('built','utf8') !== 'ready') throw Error('build missing');",
+    'test/a.test.mjs': `import test from 'node:test';
+      import {readFileSync} from 'node:fs';
+      test('uses build', () => { if (readFileSync('built','utf8') !== 'ready') throw Error('build missing'); });
+      test('filtered out', () => { throw Error('filter missing'); });`,
     'checks.json': JSON.stringify({ checks: {
-      build: { command: [process.execPath, '-e', "require('node:fs').writeFileSync('built','ready')"] },
-      broken: { command: [process.execPath, '-e', 'process.exit(7)'] },
+      build: { command: [process.execPath, '-e', "require('node:fs').writeFileSync('built','ready')"], memoryMiB: 128 },
+      broken: { command: [process.execPath, '-e', 'process.exit(7)'], memoryMiB: 96 },
       tests: { config: 'suite.json', dependsOn: ['build'] },
       blocked: { command: [process.execPath, '-e', "require('node:fs').writeFileSync('unsafe','ran')"], dependsOn: ['broken'] },
-    }, targets: { default: ['tests', 'blocked'] } }),
+      regular: { command: [process.execPath, '-e', ''] },
+    }, targets: { default: ['tests', 'blocked', 'regular'] } }),
     'suite.json': JSON.stringify({ testDirectory: 'test', inputs: ['built'], coverage: false }),
   });
-  const result = await runChecks(await loadChecks(join(root, 'checks.json')), options);
+  const checks = await loadChecks(join(root, 'checks.json'), {
+    files: ['test/a.test.mjs'], filters: ['--test-name-pattern=uses build'],
+  });
+  let admission;
+  const reservations = {};
+  const diagnostics = {
+    observeAdmission(value) { admission = value; },
+    event(event, { suite }) {
+      if (event === 'check-start') reservations[suite] = admission.inspect().reservedMemoryMiB;
+    },
+    span(_suite, _stage, run) { return run(); },
+    files() {},
+    file() {},
+  };
+  const result = await runChecks(checks, { ...options, diagnostics, resources: { memoryMiBPerWorker: 64 } });
   assert.equal(result.results.find(result => result.id === 'tests').exitCode, 0);
   assert.equal(result.results.find(result => result.id === 'broken').exitCode, 7);
   assert.equal(result.results.find(result => result.id === 'blocked').skipped, true);
   await assert.rejects(readFile(join(root, 'unsafe')), { code: 'ENOENT' });
+  assert.deepEqual(reservations, { build: 128, broken: 96, regular: 64 });
+  assert.equal(admission.inspect().reservedMemoryMiB, 0);
+});
+
+test('command reservations must be positive integers and belong to command checks', async () => {
+  const command = [process.execPath, '-e', ''];
+  for (const memoryMiB of [0, -1, 1.5, '64', null]) {
+    await assert.rejects(runChecks([{ id: 'command', command, memoryMiB }], options), /memoryMiB must be an integer >= 1/);
+  }
+  await assert.rejects(runChecks([{ id: 'suite', config: {}, memoryMiB: 64 }], options), /only supported for command checks/);
 });
 
 test('cycles and unknown dependencies fail before any command starts', async t => {

@@ -22,7 +22,8 @@ export async function loadChecks(filename, { target = 'default', files, filters,
     if (selected.has(id)) return;
     const definition = project.checks?.[id];
     if (!definition) throw new Error(`Unknown check: ${id}`);
-    keys(definition, ['config', 'fixture', 'command', 'cwd', 'env', 'dependsOn', 'project', 'target'], 'project check');
+    keys(definition, ['config', 'fixture', 'command', 'cwd', 'env', 'memoryMiB', 'dependsOn', 'project', 'target'], 'project check');
+    if (definition.memoryMiB !== undefined && (!definition.command || definition.project)) throw new TypeError('memoryMiB is only supported for command checks');
     visiting.add(id);
     for (const dependency of definition.dependsOn ?? []) visit(dependency);
     visiting.delete(id);
@@ -39,7 +40,10 @@ export async function loadChecks(filename, { target = 'default', files, filters,
     } else {
       const cwd = resolve(directory, definition.cwd ?? '.');
       const sources = new Map([[path, projectSource]]);
-      const value = { verify: async () => { for (const [file, source] of sources) if (await readFile(file, 'utf8') !== source) throw new Error(`Check configuration changed: ${file}`); }, id: `${prefix}${id}`, dependsOn: [], ...(definition.command ? { command: definition.command, cwd, env: definition.env } : {
+      const value = { verify: async () => { for (const [file, source] of sources) if (await readFile(file, 'utf8') !== source) throw new Error(`Check configuration changed: ${file}`); }, id: `${prefix}${id}`, dependsOn: [], ...(definition.command ? {
+        command: definition.command, cwd, env: definition.env,
+        ...(definition.memoryMiB === undefined ? {} : { memoryMiB: definition.memoryMiB }),
+      } : {
         config: async context => {
           let config = await loadConfig(resolve(directory, definition.config), { sources });
           if (definition.fixture) {
